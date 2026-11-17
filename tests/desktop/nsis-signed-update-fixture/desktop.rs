@@ -2,12 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    installation::InstallationIdentity,
-    jobs::JobScheduler,
-    maintenance_update::{UpdateActivationReceipt, UpdateJournal, VerifiedMaintenanceUpdate},
-    restore::InstallationLayout,
-    store::Store,
-    workflows::maintenance::MaintenanceActivationRequest,
+    installation::InstallationIdentity, maintenance_update::UpdateJournal, store::Store,
 };
 
 pub fn verify_identifier(identifier: &str) -> Result<()> {
@@ -42,31 +37,6 @@ pub fn after_sqlite(identifier: &str, root: &Path, store: &Store) -> Result<()> 
 }
 
 #[tauri::command]
-pub async fn signed_fixture_activate(
-    app: tauri::AppHandle,
-    store: tauri::State<'_, Store>,
-    identity: tauri::State<'_, InstallationIdentity>,
-    layout: tauri::State<'_, InstallationLayout>,
-    scheduler: tauri::State<'_, JobScheduler>,
-    request: MaintenanceActivationRequest,
-    manifest: serde_json::Value,
-) -> Result<UpdateActivationReceipt, String> {
-    let run = async {
-        verify_identifier(&app.config().identifier)?;
-        let packages = layout.maintenance_packages();
-        let backups = layout.app_data().join("update-backups");
-        std::fs::create_dir_all(&backups)?;
-        VerifiedMaintenanceUpdate::prepare_signed_desktop_fixture(
-            &app, &store, request, &packages, manifest,
-        )
-        .await?
-        .install_after_drain(&store, &identity, &scheduler, packages, backups)
-        .await
-    };
-    run.await.map_err(|error| format!("{error:#}"))
-}
-
-#[tauri::command]
 pub async fn signed_fixture_migration_state(
     store: tauri::State<'_, Store>,
 ) -> Result<Option<String>, String> {
@@ -89,7 +59,8 @@ pub fn read_journal_from_args(identifier: &str) -> Result<bool> {
     let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("Missing LOCALAPPDATA")?)
         .join(identifier);
     ensure!(
-        output == root.join("fixture-journal.json"),
+        output == root.join("fixture-journal.json")
+            || output == root.join("fixture-queue-journal.json"),
         "Unexpected disposable journal output"
     );
     let identity = InstallationIdentity::load(&root)?;

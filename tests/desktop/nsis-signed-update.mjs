@@ -8,6 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { remote } from "webdriverio";
+import { runAutomatic } from "./nsis-signed-update-automatic.mjs";
 
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "x64");
@@ -15,7 +16,7 @@ assert.ok(process.argv[2], "Usage: node tests/desktop/nsis-signed-update.mjs <ca
 const caseFile = await realpath(resolve(process.argv[2]));
 const root = dirname(caseFile);
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
-const { inputCommit, tag, identifier, product } = await readJson(caseFile);
+const { inputCommit, tag, identifier, product, automatic = false } = await readJson(caseFile);
 assert.match(tag, /^[a-f0-9]{10}$/);
 assert.match(inputCommit, /^[a-f0-9]{40}$/);
 assert.equal(basename(root), `omniagent-signed-update-${tag}`);
@@ -32,7 +33,7 @@ const fixtureState = join(appData, "fixture-journal.json");
 const identityFile = join(appData, "installation.dpapi");
 const reportFile = join(root, "update-acceptance-receipt.json");
 const plan = await readJson(join(root, "plan.json"));
-const { requests, manifests, database, packages } = await readJson(join(root, "signed-case.json"));
+const { requests, manifests, database, packages, mismatchedManifest } = await readJson(join(root, "signed-case.json"));
 const sha = async (file) => createHash("sha256").update(await readFile(file)).digest("hex");
 
 function run(command, args, options = {}) {
@@ -187,9 +188,14 @@ async function inspectInstalled(version, source, marker) {
 }
 
 assert.match(plan.baselineCommit, /^[a-f0-9]{40}$/);
-assert.deepEqual(plan.candidates.map(({ version }) => version), ["0.1.1", "0.1.2"]);
-assert.equal(requests.length, 2);
-assert.equal(manifests.length, 2);
+assert.deepEqual(plan.candidates.map(({ version }) => version), automatic ? ["0.1.1"] : ["0.1.1", "0.1.2"]);
+assert.equal(requests.length, plan.candidates.length);
+assert.equal(manifests.length, plan.candidates.length);
+if (automatic) {
+  assert.equal(mismatchedManifest.version, manifests[0].version);
+  assert.equal(mismatchedManifest.url, manifests[0].url);
+  assert.notEqual(mismatchedManifest.signature, manifests[0].signature);
+}
 assert.equal(await realpath(database), join(root, "exported", "omniagent.sqlite3"));
 assert.equal(await realpath(packages), join(root, "exported", "maintenance-packages"));
 for (const { version, commit } of [{ version: "0.1.0", commit: plan.baselineCommit }, ...plan.candidates]) {
@@ -222,10 +228,17 @@ assert.equal(registry("HKLM", "DisplayName"), undefined);
 assert.equal(registry("HKLM", "DisplayName", "32"), undefined);
 assert.equal(powershell("Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Architecture"), "9");
 const osBuild = powershell("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').CurrentBuildNumber");
-assert.equal(osBuild, "19045");
-const report = { inputCommit, product, identifier, fixtureData: appData, expectedInstallRoot: installed,
+const osBuildRevision = powershell("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').UBR");
+assert.match(osBuildRevision, /^\d+$/);
+if (automatic) {
+  assert.ok(osBuild === "19045" || (/^\d{5}$/.test(osBuild) && Number(osBuild) >= 22000),
+    "The automatic case requires Windows 10 22H2 or Windows 11");
+} else {
+  assert.equal(osBuild, "19045");
+}
+const report = { inputCommit, product, identifier, automatic, fixtureData: appData, expectedInstallRoot: installed,
   expectedUninstaller: join(installed, "uninstall.exe"),
-  baselineInstallerSha256: await sha(artifact(plan.baselineCommit)), osBuild };
+  baselineInstallerSha256: await sha(artifact(plan.baselineCommit)), osBuild, osBuildRevision };
 const saveReport = () => writeFile(reportFile, JSON.stringify(report, null, 2));
 await saveReport();
 if (process.argv.includes("--preflight")) {
@@ -251,7 +264,31 @@ try {
   const identityHash = await sha(identityFile);
   report.installationIdentitySha256 = identityHash;
   await saveReport();
+  if (automatic) {
+    await runAutomatic({
+      root, appData, application, identityFile, identityHash,
+      request: requests[0], manifest: manifests[0], mismatchedManifest,
+      verifiedSource: plan.candidates[0].commit, report, saveReport,
+      withApp, invoke, poll, journal, outcome, registry, sha, stopExactApplication, inspectInstalled,
+    });
+  } else {
+    await runManual(identityHash);
+  }
+} finally {
+  if (registry("HKCU", "DisplayName") === product) {
+    stopExactApplication();
+    const uninstaller = await realpath(join(installed, "uninstall.exe"));
+    assert.equal(uninstaller, join(installed, "uninstall.exe"));
+    assert.equal(registry("HKCU", "UninstallString"), uninstaller);
+    checked(uninstaller, ["/S"]);
+    await poll("uninstallation of the test product", () => !existsSync(application) && !registry("HKCU", "DisplayName"), 30_000);
+    report.testProductUninstalled = true;
+    await saveReport();
+  }
+}
+console.log(JSON.stringify(report, null, 2));
 
+async function runManual(identityHash) {
   const upgraded = await trigger("0.1.0", 0, () => outcome("verified", "0.1.1"));
   assert.equal(upgraded.sourceBeforeInstall, plan.baselineCommit);
   assert.equal(upgraded.update.sha256, requests[0].expectedSha256);
@@ -308,16 +345,4 @@ try {
   assert.deepEqual(await journal(), recovered);
   report.rollback = { activation: recovered, ...restored };
   await saveReport();
-} finally {
-  if (registry("HKCU", "DisplayName") === product) {
-    stopExactApplication();
-    const uninstaller = await realpath(join(installed, "uninstall.exe"));
-    assert.equal(uninstaller, join(installed, "uninstall.exe"));
-    assert.equal(registry("HKCU", "UninstallString"), uninstaller);
-    checked(uninstaller, ["/S"]);
-    await poll("uninstallation of the test product", () => !existsSync(application) && !registry("HKCU", "DisplayName"), 30_000);
-    report.testProductUninstalled = true;
-    await saveReport();
-  }
 }
-console.log(JSON.stringify(report, null, 2));

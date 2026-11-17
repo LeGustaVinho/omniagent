@@ -18,6 +18,9 @@ use crate::{
 
 use super::*;
 
+#[path = "signed_update_fixture_queue.rs"]
+mod queue;
+
 const PLAN: &str = "Deliver one tested fixture build.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"Verify the next package\",\"completionCriteria\":[\"The fixture build inputs match the version\"]}]}\n```";
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +46,12 @@ struct SignedCase {
     packages: PathBuf,
     requests: Vec<MaintenanceActivationRequest>,
     manifests: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mismatched_manifest: Option<serde_json::Value>,
+}
+
+fn automatic() -> bool {
+    std::env::var("OMNIAGENT_SIGNED_TEST_AUTOMATIC").as_deref() == Ok("1")
 }
 
 #[tokio::test]
@@ -156,6 +165,9 @@ async fn prepare(case: &Path) -> Result<()> {
 
     let mut candidates = Vec::new();
     for (old, next, migration) in [("0.1.0", "0.1.1", true), ("0.1.1", "0.1.2", false)] {
+        if automatic() && !migration {
+            break;
+        }
         let run = store
             .start_builtin_delivery(repo.project_id.clone(), DeliveryRoles::default())
             .await?;
@@ -228,6 +240,9 @@ async fn prepare(case: &Path) -> Result<()> {
         });
         git(source, &["merge", "--ff-only", &commit.sha])?;
     }
+    if automatic() {
+        queue::seed(&store, case, &repo).await?;
+    }
     fs::write(
         case.join("plan.json"),
         serde_json::to_vec_pretty(&BuildPlan {
@@ -295,6 +310,7 @@ async fn sign(case: &Path) -> Result<()> {
     let public = minisign::PublicKey::from_box(minisign::PublicKeyBox::from_string(&key)?)?;
     let mut requests = Vec::new();
     let mut manifests = Vec::new();
+    let mut mismatched_manifest = None;
     for Candidate {
         version,
         commit,
@@ -313,9 +329,17 @@ async fn sign(case: &Path) -> Result<()> {
             format!("{:x}", Sha256::digest(&bytes)) == handoff.sha256,
             "Fixture package bytes changed"
         );
-        let comment = format!("version:{version}\tsource:{commit}");
-        let signing =
-            minisign::sign(Some(&public), &secret, &bytes[..], Some(&comment), None)?.into_string();
+        let manifest = |source: &str| -> Result<serde_json::Value> {
+            let comment = format!("version:{version}\tsource:{source}");
+            let signing = minisign::sign(Some(&public), &secret, &bytes[..], Some(&comment), None)?
+                .into_string();
+            Ok(
+                json!({"version":version, "url":"https://release.invalid/nsis-test.exe", "signature":STANDARD.encode(signing)}),
+            )
+        };
+        if automatic() {
+            mismatched_manifest = Some(manifest(&"f".repeat(40))?);
+        }
         let request = MaintenanceActivationRequest {
             handoff_id: handoff.id,
             project_id: handoff.project_id,
@@ -324,7 +348,7 @@ async fn sign(case: &Path) -> Result<()> {
         };
         store.require_signed_update_handoff(request.clone()).await?;
         requests.push(request);
-        manifests.push(json!({"version":version, "url":"https://release.invalid/nsis-test.exe", "signature":STANDARD.encode(signing)}));
+        manifests.push(manifest(&commit)?);
     }
     let checkpoint = store
         .create_application_backup(installation.identity, package_root, case.to_path_buf())
@@ -339,6 +363,7 @@ async fn sign(case: &Path) -> Result<()> {
         packages: export.join("maintenance-packages"),
         requests,
         manifests,
+        mismatched_manifest,
     };
     fs::write(
         case.join("signed-case.json"),

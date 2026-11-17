@@ -61,11 +61,19 @@ The installed recovery trial ran on Windows 10 22H2 x64 build `19045.6466`. A di
 
 Reproduce with `./tests/desktop/nsis-signed-update.ps1 -Revision 3e7d71f` from PowerShell 7 with the pinned pnpm and Cargo dependencies cached and compatible WebDrivers available. The script writes `update-acceptance-receipt.json` in the printed temporary directory and uninstalls its test product. [Receipt assertions](../tests/desktop/nsis-signed-update.mjs)
 
-Automatic activation starts disabled. Enable it from the saved maintenance workflow after configuring signed activation and a trusted feed. The permission binds the installation, project and exact settings revision. The updater rechecks that permission before launch, records automatic attempts in its journal, and preserves a revocation across a restore. Nine Rust tests and four UI tests passed for the updater and its settings. Automatic installation with real packages remains pending on Windows 10 and Windows 11. [Automatic policy and tests](../src-tauri/src/maintenance_update/automatic_policy.rs) · [Automatic candidate selection](../src-tauri/src/maintenance_update/automatic.rs)
+Automatic activation starts disabled. Enable it from the saved maintenance workflow after configuring signed activation and a trusted feed. The permission binds the installation, project and exact settings revision. The updater rechecks that permission before launch, records automatic attempts in its journal, and preserves a revocation across a restore. Nine Rust tests and four UI tests passed for the updater and its settings. [Automatic policy and tests](../src-tauri/src/maintenance_update/automatic_policy.rs) · [Automatic candidate selection](../src-tauri/src/maintenance_update/automatic.rs)
+
+On Windows 10 22H2 x64 build `19045.6466`, the automatic monitor left `0.1.0` active with the grant disabled, a signed manifest from a different commit, altered installer bytes and a damaged signature. After the user grant, it drained a running Command before installing signed release `0.1.1` from fixture revision `7d4427b1862d7440b8865f3b817012f1ad8ffd40`. The installation identity digest stayed the same. The admission transaction observed the verified workflow receipt `452c7564-ccd4-4370-9e99-2964df5b6928` before starting the waiting Command, which finished once. The test used ephemeral signing keys and an offline feed, and it uninstalled its disposable NSIS product. The Windows 11 run remains pending. [Automatic acceptance assertions](../tests/desktop/nsis-signed-update-automatic.mjs)
+
+```powershell
+./tests/desktop/nsis-signed-update.ps1 -Revision e469b1c -Automatic
+```
 
 ## CLI and authentication matrix
 
 The observed versions below came from local version probes on 2026-11-16. Git for Windows reported `2.55.0.windows.3` and ripgrep reported `15.2.0`. Settings can show and configure the discovered binaries. The historical authenticated smokes used vendor-managed credentials. Account tier, credential method and organization or tenant were unrecorded in the available release evidence. The installed NSIS trial used only local fixture repository operations. [Executable discovery](../src-tauri/src/providers/profiles/prerequisites.rs)
+
+Separate account probes on the Windows 10 direct host reported a personal ChatGPT account for Codex and a signed-in first-party Claude.ai account for Claude Code. Codex App Server reported the account without refreshing its token. The Antigravity ACP handshake advertised authentication methods and support for reporting tier information. The effective Antigravity account type and tier remain unverified. [Codex and Claude account probes](../src-tauri/src/providers/profiles/account.rs) · [ACP initialization](../src-tauri/src/providers/antigravity.rs)
 
 | CLI and observed version | OmniAgent transport and historical model | Windows 10 direct | Windows 11 x64 |
 | --- | --- | --- | --- |

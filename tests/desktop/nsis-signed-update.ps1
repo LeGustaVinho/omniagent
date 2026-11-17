@@ -1,8 +1,10 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Revision, [switch]$BuildOnly, [string]$ReuseTargetCase)
+param([Parameter(Mandatory)][string]$Revision, [switch]$BuildOnly, [string]$ReuseTargetCase,
+    [switch]$Automatic)
 
 # Windows PowerShell 7, existing pinned pnpm/Cargo caches and WebView2 drivers.
 # Builds and signs packages offline. BuildOnly keeps the signed case out of HKCU.
+# For automatic acceptance on Windows 10 or 11 x64, use -Revision e469b1c -Automatic.
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 $inputCommit = git -C $repo rev-parse --verify "$Revision^{commit}"
@@ -36,6 +38,8 @@ Assert-Native 'Extract pinned source'
 Copy-Item -LiteralPath (Join-Path $fixture 'desktop.rs') -Destination (Join-Path $snapshot 'src-tauri/src/signed_update_desktop_fixture.rs')
 Copy-Item -LiteralPath (Join-Path $fixture 'offline.rs') -Destination (Join-Path $snapshot 'src-tauri/src/maintenance_update/signed_desktop_fixture.rs')
 Copy-Item -LiteralPath (Join-Path $fixture 'seed.rs') -Destination (Join-Path $snapshot 'src-tauri/src/workflows/git_integration/signed_update_fixture.rs')
+Copy-Item -LiteralPath (Join-Path $fixture 'queue.rs') -Destination (Join-Path $snapshot 'src-tauri/src/workflows/git_integration/signed_update_fixture_queue.rs')
+Copy-Item -LiteralPath (Join-Path $fixture 'queue.ps1') -Destination (Join-Path $case 'queue.ps1')
 Copy-Item -LiteralPath (Join-Path $fixture 'build.ps1') -Destination (Join-Path $snapshot 'fixture-build.ps1')
 Copy-Item -LiteralPath (Join-Path $fixture 'migrate.sql') -Destination (Join-Path $snapshot 'src-tauri/migrations/fixture-nsis-update.sql')
 $hooks = (Get-Content -Raw -LiteralPath (Join-Path $fixture 'installer.nsh')).Replace('@IDENTIFIER@', $identifier)
@@ -54,16 +58,46 @@ Edit-Once $main '                let store = Store::open(installation.layout.dat
 '@
 Edit-Once $main '            workflow_ipc::maintenance::activate_signed_update,' @'
             workflow_ipc::maintenance::activate_signed_update,
-            signed_update_desktop_fixture::signed_fixture_activate,
             signed_update_desktop_fixture::signed_fixture_migration_state,
 '@
-Add-Content -LiteralPath (Join-Path $snapshot 'src-tauri/src/maintenance_update.rs') -Value "`nmod signed_desktop_fixture;`npub use signed_desktop_fixture::{dirty_signed_fixture_migration, read_signed_fixture_migration};"
+$update = Join-Path $snapshot 'src-tauri/src/maintenance_update.rs'
+Add-Content -LiteralPath $update -Value "`nmod signed_desktop_fixture;`npub use signed_desktop_fixture::{dirty_signed_fixture_migration, read_signed_fixture_migration};"
+if ($Automatic) {
+    Copy-Item -LiteralPath (Join-Path $fixture 'automatic_feed.rs') -Destination (Join-Path $snapshot 'src-tauri/src/maintenance_update/signed_desktop_fixture_feed.rs')
+    Add-Content -LiteralPath $update -Value "`nmod signed_desktop_fixture_feed;"
+    $network = @'
+        let Some(advertised) = updater
+            .check()
+            .await
+            .context("Cannot check the configured signed update feed")?
+        else {
+            return Ok(None);
+        };
+'@
+    $localFeed = @'
+        let Some(raw) = signed_desktop_fixture_feed::read_fixture_feed(app)? else {
+            return Ok(None);
+        };
+'@
+    Edit-Once $update $network $localFeed
+    Edit-Once $update 'updater.restore_update(advertised.raw_json)' 'updater.restore_update(raw)'
+} else {
+    Copy-Item -LiteralPath (Join-Path $fixture 'desktop_manual.rs') -Destination (Join-Path $snapshot 'src-tauri/src/signed_update_manual_fixture.rs')
+    Copy-Item -LiteralPath (Join-Path $fixture 'offline_manual.rs') -Destination (Join-Path $snapshot 'src-tauri/src/maintenance_update/signed_desktop_fixture_manual.rs')
+    Add-Content -LiteralPath $update -Value "`nmod signed_desktop_fixture_manual;"
+    Edit-Once $main 'mod signed_update_desktop_fixture;' "mod signed_update_desktop_fixture;`nmod signed_update_manual_fixture;"
+    Edit-Once $main '            signed_update_desktop_fixture::signed_fixture_migration_state,' @'
+            signed_update_desktop_fixture::signed_fixture_migration_state,
+            signed_update_manual_fixture::signed_fixture_activate,
+'@
+}
 Add-Content -LiteralPath (Join-Path $snapshot 'src-tauri/src/workflows/git_integration.rs') -Value "`nmod signed_update_fixture;"
 $fixtureTar = Join-Path $case 'fixture-source.tar'
 tar.exe -cf $fixtureTar -C $snapshot .
 Assert-Native 'Archive fixture source without dependencies'
 
 $envNames = @('OMNIAGENT_SIGNED_FIXTURE_ID','OMNIAGENT_SIGNED_TEST_CASE','OMNIAGENT_SIGNED_TEST_STEP',
+    'OMNIAGENT_SIGNED_TEST_AUTOMATIC',
     'OMNIAGENT_SOURCE_COMMIT','OMNIAGENT_UPDATE_FEED','OMNIAGENT_UPDATE_PUBLIC_KEY','CARGO_TARGET_DIR','CARGO_NET_OFFLINE',
     'CARGO_PROFILE_RELEASE_OPT_LEVEL','CARGO_PROFILE_RELEASE_INCREMENTAL')
 $previous = @{}
@@ -71,6 +105,7 @@ foreach ($name in $envNames) { $previous[$name] = [Environment]::GetEnvironmentV
 
 $env:OMNIAGENT_SIGNED_FIXTURE_ID = $identifier
 $env:OMNIAGENT_SIGNED_TEST_CASE = $case
+$env:OMNIAGENT_SIGNED_TEST_AUTOMATIC = if ($Automatic) { '1' } else { $null }
 $env:CARGO_TARGET_DIR = Join-Path $case 'target'
 if ($ReuseTargetCase) {
     $cachedCase = (Resolve-Path -LiteralPath $ReuseTargetCase).Path
@@ -142,13 +177,14 @@ try {
     Assert-Native 'Sign accepted installer bytes with the ephemeral fixture key'
 
     $caseFile = Join-Path $case 'case.json'
-    @{ inputCommit = $inputCommit; tag = $tag; identifier = $identifier; product = $product } |
+    @{ inputCommit = $inputCommit; tag = $tag; identifier = $identifier; product = $product; automatic = $Automatic.IsPresent } |
         ConvertTo-Json | Set-Content -LiteralPath $caseFile -Encoding utf8NoBOM
     if (-not $BuildOnly) {
         $runner = Join-Path $snapshot 'tests/desktop/nsis-signed-update.mjs'
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'nsis-signed-update.mjs') -Destination $runner
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'nsis-signed-update-automatic.mjs') -Destination (Split-Path $runner)
         node $runner $caseFile
-        Assert-Native 'Run real installed update and recovery'
+        Assert-Native 'Exercise the disposable installed updater'
     }
 } finally {
     Pop-Location
