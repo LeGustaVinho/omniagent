@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { editor } from "monaco-editor";
+import type { Uri, editor } from "monaco-editor";
 import { afterEach, expect, it, vi } from "vitest";
 import { CodeEditor } from "@/ide-code-editor";
 import { loadMonaco } from "@/ide-monaco";
@@ -22,6 +22,9 @@ function sourceEditor(language = "typescript") {
   const contextMenus: ((event: editor.IEditorMouseEvent) => void)[] = [];
   const selectionChanged = vi.fn<(callback: () => void) => { dispose: () => void }>().mockReturnValue({ dispose: vi.fn() });
   const capability = { set: vi.fn() };
+  const disposeOpener = vi.fn();
+  const registerEditorOpener = vi.fn<(opener: editor.ICodeEditorOpener) => { dispose: () => void }>()
+    .mockReturnValue({ dispose: disposeOpener });
   const model = {
     getLanguageId: () => language,
     getLineContent: (line: number) => source[line - 1],
@@ -54,9 +57,9 @@ function sourceEditor(language = "typescript") {
     dispose: vi.fn(),
   };
   vi.mocked(loadMonaco).mockResolvedValue({
-    Uri: { from: () => ({ toString: () => "omni-source://test" }) },
+    Uri: { from: (parts: { scheme: string; path: string }) => ({ ...parts, toString: () => `${parts.scheme}:${parts.path}` }) },
     editor: {
-      create: () => instance, createModel: () => model,
+      create: () => instance, createModel: () => model, registerEditorOpener,
       setTheme: vi.fn(), getModelMarkers: () => [], onDidChangeMarkers: () => ({ dispose: vi.fn() }),
       EndOfLinePreference: { LF: 1 }, MouseTargetType: { GUTTER_LINE_NUMBERS: 3 },
     },
@@ -70,8 +73,39 @@ function sourceEditor(language = "typescript") {
     selection = { ...selection, endLineNumber: line };
     act(() => selectionChanged.mock.calls[0]?.[0]());
   }
-  return { actions, commands, instance, clickTarget, selectThrough, capability };
+  return { actions, commands, instance, clickTarget, selectThrough, capability, registerEditorOpener, disposeOpener };
 }
+
+it("dispatches only exact cross-file source URIs from its own Monaco editor", async () => {
+  const monaco = sourceEditor();
+  const onOpenLocation = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  const { unmount } = render(<CodeEditor scope="checkout:real" path="src/main.ts" content="source" models={new Map()}
+    update={vi.fn()} problems={vi.fn()} onOpenLocation={onOpenLocation} />);
+  await act(async () => {});
+  const opener = monaco.registerEditorOpener.mock.lastCall![0];
+  const editorSource = monaco.instance as unknown as editor.ICodeEditor;
+  const uri = (path: string, extra: Partial<Uri> = {}) => ({ scheme: "omni-source", path, authority: "", query: "", fragment: "", ...extra }) as Uri;
+  const target = "/checkout:real/src/ação %2F #1.ts";
+  for (const invalid of [
+    uri("/checkout:real/src/main.ts"), uri("/checkout-copy:real/src/main.ts"), uri("/checkout:simulation/src/main.ts"),
+    uri("/checkout:real/../other.ts"), uri("/checkout:real/.git/config"), uri("/checkout:real/C:/other.ts"),
+    uri("/checkout:real//src/other.ts"), uri("/checkout:real/src\\other.ts"), uri("/checkout:real/src. /other.ts"),
+    uri(target, { scheme: "file" }), uri(target, { authority: "another-checkout" }), uri(target, { fragment: "wrong" }),
+    uri(target, { query: "wrong" }),
+  ]) expect(await opener.openCodeEditor(editorSource, invalid)).toBe(false);
+  expect(await opener.openCodeEditor({} as editor.ICodeEditor, uri(target))).toBe(false);
+  expect(await opener.openCodeEditor(editorSource, uri(target), { lineNumber: 0, column: 1 })).toBe(false);
+  expect(onOpenLocation).not.toHaveBeenCalled();
+
+  expect(await opener.openCodeEditor(editorSource, uri(target), { startLineNumber: 8, startColumn: 4, endLineNumber: 8, endColumn: 9 })).toBe(true);
+  expect(onOpenLocation).toHaveBeenNthCalledWith(1, "src/ação %2F #1.ts", { line: 8, column: 4 });
+  expect(await opener.openCodeEditor(editorSource, uri("/checkout:real/src/obsolete.ts"), { lineNumber: 2, column: 1 })).toBe(false);
+  expect(onOpenLocation).toHaveBeenNthCalledWith(2, "src/obsolete.ts", { line: 2, column: 1 });
+  unmount();
+  expect(monaco.disposeOpener).toHaveBeenCalledOnce();
+  expect(await opener.openCodeEditor(editorSource, uri(target))).toBe(false);
+  expect(onOpenLocation).toHaveBeenCalledTimes(2);
+});
 
 it("delegates edit and file find to Monaco and scopes project find to a supported literal selection", async () => {
   const monaco = sourceEditor();

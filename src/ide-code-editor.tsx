@@ -41,7 +41,7 @@ const duplicateSelectionId = "editor.action.duplicateSelection";
 const toggleCommentId = "editor.action.commentLine";
 const findSelectionId = "actions.findWithSelection";
 
-export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText, blameCheckoutId }: {
+export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText, onOpenLocation, blameCheckoutId }: {
   scope: string;
   path: string;
   content: string;
@@ -57,21 +57,22 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   onPermalink?: (path: string, lines: GitPermalinkLines) => void;
   onOmniAgentLink?: (path: string, line: number, column: number) => void;
   onSearchText?: (text: string) => void;
+  onOpenLocation?: (path: string, location?: EditorLocation) => Promise<boolean>;
   blameCheckoutId?: string;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
   const owner = useFileEditorDocument();
   const viewState = useRef<{ path: string; scope: string; jump?: number; state: editor.ICodeEditorViewState | null }>(undefined);
-  const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText });
+  const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText, onOpenLocation });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
   const [blame, setBlame] = useState<GitLineBlameRequest>();
   const [gutterMenu, setGutterMenu] = useState<{ path: string; line: number; groups: MenuGroups; point: { x: number; y: number } }>();
   const gutterRestoreFocus = useRef(true);
   useEffect(() => {
-    fresh.current = { content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText };
-  }, [content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText]);
+    fresh.current = { content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText, onOpenLocation };
+  }, [content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, onSearchText, onOpenLocation]);
 
   useEffect(() => {
     if (!mount.current) return;
@@ -114,6 +115,24 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
         tabSize: 2,
       });
       instance.current = codeEditor;
+      if (fresh.current.onOpenLocation) {
+        const prefix = `/${scope}/`;
+        subscriptions.push(monaco.editor.registerEditorOpener({
+          openCodeEditor(source, resource, position) {
+            if (cancelled || source !== codeEditor || resource.scheme !== uri.scheme || resource.authority || resource.query || resource.fragment
+              || resource.path === uri.path || !resource.path.startsWith(prefix)) return false;
+            const destination = resource.path.slice(prefix.length);
+            if (/[\\:*?"<>|\u0000-\u001F\u007F]/u.test(destination) || destination.split("/").some((part) =>
+              !part || part.endsWith(".") || part.endsWith(" ") || part.toLowerCase() === ".git")) return false;
+            const location = position && ("startLineNumber" in position
+              ? { line: position.startLineNumber, column: position.startColumn }
+              : { line: position.lineNumber, column: position.column });
+            if (location && (!Number.isSafeInteger(location.line) || location.line < 1
+              || !Number.isSafeInteger(location.column) || location.column < 1)) return false;
+            return fresh.current.onOpenLocation?.(destination, location) ?? false;
+          },
+        }));
+      }
       if (fresh.current.onSettings) {
         const languages = monaco.languages.getLanguages().map(({ id, aliases }) => ({ id, label: aliases?.[0] ?? id }))
           .sort((left, right) => left.label.localeCompare(right.label));

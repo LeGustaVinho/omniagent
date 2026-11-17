@@ -34,6 +34,9 @@ const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => (
 const Terminal = lazy(() => import("@/ide-terminal").then(({ ExampleTerminal }) => ({ default: ExampleTerminal })));
 const WorktreeTerminal = lazy(() => import("@/ide-terminal").then(({ ManualTerminal }) => ({ default: ManualTerminal })));
 
+type FilePlacement = boolean | { groupId: string };
+type OpenFileRequest = { path: string; line?: number; column?: number; placement?: FilePlacement; newWindow?: boolean; exactSource?: boolean };
+
 type IdeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
   | { kind: "format"; path: string; change: SourceFormatChange }
@@ -62,7 +65,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const firstPath = simulated ? target && requestedFolder === undefined && requestedTerminal === undefined && !markdownPath(target) ? normalizeRepositoryPath(target) : "src/health.ts" : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide", simulated, initialPath: firstPath });
   const source = useRepositorySourceBuffers(checkout.checkoutId, !simulated);
-  const { load: loadSource, watch: watchSource, update: updateSource } = source;
+  const { load: loadSource, watch: watchSource, update: updateSource, getFile: getSource } = source;
   const [sidebar, setSidebar] = useFileSidebar();
   const [navigator, setNavigator] = useState<"files" | "search">(requestedFolder === undefined ? "files" : "search");
   const [searchScope, setSearchScope] = useState<FileSearchScope | undefined>(() => requestedFolder ? { kind: "folder", path: requestedFolder } : undefined);
@@ -125,13 +128,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
   }, [files, models]);
 
-  const openFile = useCallback((path: string, line?: number, placement: boolean | { groupId: string } = false, column?: number, newWindow = false) => {
+  const openFileRequest = useCallback(async ({ path, line, column, placement = false, newWindow = false, exactSource = false }: OpenFileRequest) => {
+    if (exactSource && (!dock.ready || markdownPath(path))) return false;
     const request = ++openRequest.current;
     const split = placement === true;
     if (markdownPath(path)) {
       const location = line !== undefined || split ? noteSearchTarget(path, line ?? 1, request, split) : path;
       openWorkspace("knowledge", newWindow ? noteWindowTarget(path, request) : location);
-      return;
+      return true;
     }
     const focus = (file: string) => {
       if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, column, token: (before[file]?.token ?? 0) + 1 } }));
@@ -141,14 +145,21 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     };
     if (simulated) {
       focus(path);
-      return;
+      return true;
     }
-    void loadSource(path).then((canonical) => {
-      if (!canonical || request !== openRequest.current) return;
-      watchSource(canonical);
-      focus(canonical);
-    });
-  }, [dock.open, dock.openInWindow, dock.split, loadSource, openWorkspace, simulated, watchSource]);
+    const canonical = await loadSource(path);
+    if (!canonical || request !== openRequest.current) return false;
+    if (exactSource) {
+      const document = getSource(canonical);
+      if (canonical !== path || !document || document.sourceProblem) return false;
+    }
+    watchSource(canonical);
+    focus(canonical);
+    return true;
+  }, [dock.open, dock.openInWindow, dock.ready, dock.split, getSource, loadSource, openWorkspace, simulated, watchSource]);
+  const openFile = useCallback((path: string, line?: number, placement?: FilePlacement, column?: number, newWindow?: boolean) => {
+    void openFileRequest({ path, line, placement, column, newWindow });
+  }, [openFileRequest]);
 
   useEffect(() => {
     if (simulated || !dock.ready || !dock.api) return;
@@ -541,6 +552,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                       quickFix={quickFix?.panelId === panelId && dock.api?.activePanel?.id === panelId ? quickFix : undefined}
                       onQuickFixShown={finishQuickFix} onSettings={reportEditorSettings}
                       onCopy={menu.copy} onSearchText={searchEditorText} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
+                      onOpenLocation={simulated ? undefined : (path, location) => openFileRequest({ path, ...location, exactSource: true })}
                       onOmniAgentLink={simulated ? undefined : menu.copyOmniAgentLink}
                       onPermalink={simulated ? undefined : menu.copyPermalink} blameCheckoutId={simulated ? undefined : checkout.checkoutId} />
                   </Suspense>

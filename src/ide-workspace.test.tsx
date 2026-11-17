@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
+import type { EditorLocation } from "@/ide-code-editor";
 import type { FileFormat } from "@/source-file-format";
 import { readNoteSearchTarget } from "@/ide-file-search";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -18,14 +19,19 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   Channel: class { onmessage = () => {}; },
 }));
+const editorOpenLocation = vi.hoisted(() => vi.fn<(path: string, open?: (path: string, location?: EditorLocation) => Promise<boolean>) => void>());
 vi.mock("@/ide-code-editor", () => ({
-  CodeEditor: ({ path, content, update, onExcerpt }: { path: string; content: string; update: (path: string, text: string) => void;
-    onExcerpt?: (excerpt: EditorExcerpt, instruction: string) => void }) =>
-    <><textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)} />
+  CodeEditor: ({ path, content, update, onExcerpt, onOpenLocation, jump }: { path: string; content: string; update: (path: string, text: string) => void;
+    onExcerpt?: (excerpt: EditorExcerpt, instruction: string) => void; onOpenLocation?: (path: string, location?: EditorLocation) => Promise<boolean>;
+    jump?: EditorLocation }) => {
+    editorOpenLocation(path, onOpenLocation);
+    return <><textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)}
+      data-line={jump?.line} data-column={jump?.column} />
       {onExcerpt && <button type="button" onClick={() => onExcerpt({ path, text: content, startLine: 2, endLine: 3, language: "rust" }, "Explain this code.")}>
         Explain selection…
       </button>}
-    </>,
+    </>;
+  },
 }));
 vi.mock("@/git-diff-view", () => ({
   MonacoComparison: ({ file }: { file: { path: string; originalPath?: string; original: string; modified: string } }) =>
@@ -252,6 +258,44 @@ function render(element: ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
 }
+
+it("opens a worker destination at its exact verified source path and position within the checkout", async () => {
+  const destination = "src/ação %2F #1.ts";
+  const missing = "src/missing.ts";
+  const redirected = "src/redirected.ts";
+  fixture({ [destination]: "const target = 'fixture';" });
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "open_repository_source_file") {
+      const { checkoutId, path } = args as { checkoutId: string; path: string };
+      if (path === missing) return Promise.resolve({ status: "missing", relativePath: missing });
+      if (path === redirected) return Promise.resolve(documentAt(checkoutId, "canonical-elsewhere", "Different file", "src/other.ts"));
+    }
+    return native(command, args);
+  });
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  const origin = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(origin, { target: { value: "fn unsaved_origin() {}" } });
+  const open = editorOpenLocation.mock.calls.findLast(([path]) => path === file)![1]!;
+  await act(async () => {
+    expect(await open(missing, { line: 2, column: 3 })).toBe(false);
+    expect(await open(redirected, { line: 2, column: 3 })).toBe(false);
+  });
+  expect(screen.getByRole("textbox", { name: editorLabel })).toBe(origin);
+  expect(screen.queryByRole("button", { name: "Close other.ts" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close missing.ts" })).toBeNull();
+
+  await act(async () => { expect(await open(destination, { line: 8, column: 5 })).toBe(true); });
+  const opened = await screen.findByRole("textbox", { name: `Source editor for ${destination}` });
+  expect(opened.getAttribute("data-line")).toBe("8");
+  expect(opened.getAttribute("data-column")).toBe("5");
+  expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId: alternate, path: destination });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_source_file", { checkoutId: main, path: destination });
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+  const sourceTab = screen.getByRole("button", { name: "Close review.rs" }).closest<HTMLElement>(".file-tab-label")!;
+  await userEvent.setup().click(within(sourceTab).getByText("review.rs"));
+  expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel })).value).toBe("fn unsaved_origin() {}");
+});
 
 it("uses the clicked row for the Explorer, even with another source file active", async () => {
   fixture();
