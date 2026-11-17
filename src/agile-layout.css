@@ -9,6 +9,8 @@
 .agile-search > input { width: 100%; }
 
 .agile-column-heading { display: flex; align-items: center; justify-content: space-between; gap: .35rem; padding: .2rem .25rem; }
+.delivery-column[data-collapsed="true"] { min-height: 0; }
+.agile-column-cards:not([hidden]) { display: grid; gap: .5rem; }
 .agile-column-count { color: var(--muted-foreground); font-size: .75rem; font-variant-numeric: tabular-nums; }
 .agile-work-card { position: relative; }
 .agile-work-card-meta { display: flex; align-items: center; justify-content: space-between; gap: .4rem; color: var(--muted-foreground); }

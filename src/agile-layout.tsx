@@ -1,6 +1,6 @@
-import { LayoutGrid, List, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, LayoutGrid, List, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react";
+import { useId, useState, type ComponentProps, type CSSProperties, type ReactNode, type Ref } from "react";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { DeliveryDetailPanel, DeliveryStatus } from "@/tasks-git-ui";
 import "./agile-layout.css";
@@ -53,14 +53,22 @@ export function AgileSearch({ label, value, onChange }: { label: string; value: 
 export function AgileKanbanColumn({ label, count, over, nodeRef, children, menu = [] }: {
   label: string; count: number; over: boolean; nodeRef: Ref<HTMLElement>; children: ReactNode; menu?: MenuGroups;
 }) {
-  return <section ref={nodeRef} className="delivery-column" aria-label={label} data-over={over}>
+  const [collapsed, setCollapsed] = useState(false);
+  const cards = useId();
+  const action = collapsed ? "Expand" : "Collapse";
+  const toggle = () => setCollapsed((value) => !value);
+  return <section ref={nodeRef} className="delivery-column" aria-label={label} data-over={over} data-collapsed={collapsed}>
     <header className="agile-column-heading">
-      <ContextActions label={`${label} column`} groups={menu} className="agile-column-menu">
+      <ContextActions label={`${label} column`} groups={[...menu, [{ label: `${action} column`, run: toggle }]]} className="agile-column-menu">
+        <button type="button" className="agile-disclosure" aria-label={`${action} ${label} column`} aria-controls={cards}
+          aria-expanded={!collapsed} onClick={toggle}>
+          {collapsed ? <ChevronRight size={15} aria-hidden /> : <ChevronDown size={15} aria-hidden />}
+        </button>
         <DeliveryStatus>{label}</DeliveryStatus>
         <span className="agile-column-count">{count}</span>
       </ContextActions>
     </header>
-    {children}
+    <div id={cards} className="agile-column-cards" hidden={collapsed}>{!collapsed && children}</div>
   </section>;
 }
 

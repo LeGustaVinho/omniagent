@@ -492,6 +492,23 @@ it("uses the clicked Kanban card for a new child and the clicked column for a ne
   expect((taskEditor.getByRole("combobox", { name: "State" }) as HTMLSelectElement).value).toBe("ready");
 });
 
+it("collapses only the clicked Kanban column and expands it from the keyboard", async () => {
+  const { user } = testWorkspace();
+  const ready = within(screen.getByRole("region", { name: "Ready" }));
+  const completed = within(screen.getByRole("region", { name: "Completed" }));
+  await ready.findByRole("button", { name: parent.title });
+  fireEvent.contextMenu(ready.getByRole("button", { name: "Collapse Ready column", expanded: true }));
+  await user.click(await screen.findByRole("menuitem", { name: "Collapse column" }));
+  expect(ready.queryByRole("button", { name: parent.title })).toBeNull();
+  expect(completed.getByRole("button", { name: standalone.title })).toBeTruthy();
+
+  const expand = ready.getByRole("button", { name: "Expand Ready column", expanded: false });
+  expand.focus();
+  await user.keyboard("{Enter}");
+  expect(ready.getByRole("button", { name: "Collapse Ready column", expanded: true })).toBeTruthy();
+  expect(ready.getByRole("button", { name: parent.title })).toBeTruthy();
+});
+
 it("opens the shared work editor and persists priority, criteria, dependencies and execution modes", async () => {
   const { user } = testWorkspace();
   await user.click(await within(screen.getByRole("region", { name: "Ready" })).findByRole("button", { name: parent.title }));
