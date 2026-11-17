@@ -72,6 +72,27 @@ export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: stri
     (receipt.unitId ?? null) === (scope?.unit.id ?? null) && (receipt.planRevision ?? null) === plan);
 }
 
+export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit) {
+  const inputs: Inputs = {};
+  for (const port of node.definition.inputs) {
+    const wire = snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === port.name);
+    if (!wire) return null;
+    const sourceForUnit = snapshot.unitNodeIds.includes(wire.from.node);
+    const selected = controlForNode(snapshot, wire.from.node, unit);
+    if (selected?.state === "skipped") return null;
+    if (port.value.kind === "control" && selected) {
+      if (!selected.selectedPorts.includes(wire.from.port)) return null;
+      continue;
+    }
+    const output = snapshot.outputs.findLast(({ artifact, current }) =>
+      artifact.nodeInstanceId === wire.from.node && (sourceForUnit ? artifact.unitId === unit?.unit.id : current) &&
+      (port.value.kind === "control" || artifact.port === wire.from.port));
+    if (!output) return null;
+    if (port.value.kind === "data") inputs[port.name] = output.artifact.id;
+  }
+  return inputs;
+}
+
 export function presentation(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit): {
   status: WorkflowExecutionState;
   reason?: string;

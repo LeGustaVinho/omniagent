@@ -15,9 +15,11 @@ import { ReviewComparisonInputs, SavedComparisonInputs, type ComparisonSelection
 
 type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
 
-export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity, planRevision, pinnedModel }: {
+export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, inputs, unitId = null, taskId, job, label, actions,
+  openActivity, planRevision, pinnedModel, pinnedEffort = null }: {
   scope: DeliveryTarget;
-  nodeId: DeliveryNode;
+  nodeId: string;
+  stage?: DeliveryNode;
   inputs: DeliveryInputs;
   unitId?: string | null;
   taskId?: string;
@@ -27,6 +29,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   openActivity: WorkspaceProps["openActivity"];
   planRevision?: PlanRevisionSource;
   pinnedModel?: DeliveryModelChoice;
+  pinnedEffort?: string | null;
 }) {
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
   const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
@@ -40,11 +43,11 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   const revising = Boolean(revisionSource && planRevision && attempt?.status === "succeeded");
   const choosing = !active && (attempt?.status !== "succeeded" || revising);
   const { options, loading: loadingOptions } = useLiveModelOptions(deliveryProviders, choosing);
-  const role = nodeId === "implement" ? "implementer" : nodeId === "review-candidate" ? "candidate reviewer" : undefined;
+  const role = stage === "implement" ? "implementer" : stage === "review-candidate" ? "candidate reviewer" : undefined;
   const assignments = useTaskAssignments(scope.projectId, taskId, !pinnedModel && Boolean(role) && !active && attempt?.status !== "succeeded");
   const planned = assignments.data?.find((assignment) => assignment.role === role);
-  const defaults = useProjectModelDefaults(scope.projectId, !pinnedModel && choosing && (nodeId === "plan" || nodeId === "implement"));
-  const projectDefault = nodeId === "plan" ? defaults.data?.planning : nodeId === "implement" ? defaults.data?.implementation : undefined;
+  const defaults = useProjectModelDefaults(scope.projectId, !pinnedModel && choosing && (stage === "plan" || stage === "implement"));
+  const projectDefault = stage === "plan" ? defaults.data?.planning : stage === "implement" ? defaults.data?.implementation : undefined;
   const plannedSelection = planned?.modelId ? {
     provider: planned.provider, profileId: planned.profileId, modelId: planned.modelId,
   } : null;
@@ -54,7 +57,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   const ready = effectiveSelection !== null;
   return <section className="pipeline-stack" aria-label={label}>
     <h3 className="text-sm font-medium">{label}</h3>
-    {nodeId === "plan" && <p className="text-xs text-muted-foreground">Plan Mode</p>}
+    {stage === "plan" && <p className="text-xs text-muted-foreground">Plan Mode</p>}
     {job && <div className="pipeline-actions">
       <span role="status">{attempt?.status === "waiting_for_input" ? "Waiting for input" :
         (attempt?.status ?? job.queueState).replaceAll("_", " ")}</span>
@@ -62,7 +65,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         Open {label.toLowerCase()} attempt
       </Button>}
     </div>}
-    {job && nodeId === "review-plan" && <SavedComparisonInputs key={job.id} projectId={scope.projectId} jobId={job.id} openActivity={openActivity} />}
+    {job && stage === "review-plan" && <SavedComparisonInputs key={job.id} projectId={scope.projectId} jobId={job.id} openActivity={openActivity} />}
     {planRevision && !active && attempt?.status === "succeeded" && !revising &&
       <Button type="button" variant="outline" disabled={actions.busy}
         onClick={() => setRevisionSource(planRevision)}>Request plan revision</Button>}
@@ -81,7 +84,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         {ready ? "Model from project defaults" : `Project model · ${projectDefault.modelId} · ${loadingOptions ? "Checking availability" : "Unavailable in current profiles"}`}
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}
-      {nodeId === "review-plan" && <ReviewComparisonInputs projectId={scope.projectId} selection={comparison} onChange={setComparison} />}
+      {stage === "review-plan" && <ReviewComparisonInputs projectId={scope.projectId} selection={comparison} onChange={setComparison} />}
       {revising && revisionSource ? <div className="pipeline-form pipeline-stack">
         <label className="pipeline-stack">
           Feedback for proposal {revisionSource.proposalSequence}
@@ -103,8 +106,8 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         </div>
       </div> : <Button type="button" disabled={!ready || actions.busy}
         onClick={() => actions.execute(() => invoke("submit_repository_delivery_agent", {
-          input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: null,
-            ...(nodeId === "review-plan" && comparison ? { comparison } : {}),
+          input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: pinnedEffort,
+            ...(stage === "review-plan" && comparison ? { comparison } : {}),
           },
         }))}>
         {job ? "Queue another attempt" : `Queue ${label.toLowerCase()}`}

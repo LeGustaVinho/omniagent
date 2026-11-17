@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
 import PipelinesWorkspace from "@/pipelines-workspace";
+import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import type { ExecutionJob, ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -49,6 +50,45 @@ function job(nodeId: string, attempts: ExecutionJob["attempts"], kind: Job["kind
 }
 const output = (nodeInstanceId: string, id: string, port: string, kind: string, evidence: unknown, unitId: string | null = null): ExecutionOutput => ({
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
+});
+
+it("queues an authored planner with the pinned role model and exact wired context", async () => {
+  const source = node("frozen-context", "Saved context", [], [control("loaded"), port("context", "markdown")]);
+  const plan = node("design-stage", "Design plan", [control("ready"), port("context", "markdown")], [port("plan", "plan")]);
+  plan.instance.kind = "plan";
+  const model = { provider: "codex", profileId: "planner-profile", modelId: "planner-model" } as const;
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision: null },
+    definition: { version, name: "Authored workflow", nodes: [source, plan], wires: [
+      { from: { node: source.instance.id, port: "loaded" }, to: { node: plan.instance.id, port: "ready" } },
+      { from: { node: source.instance.id, port: "context" }, to: { node: plan.instance.id, port: "context" } },
+    ] },
+    outputs: [
+      output(source.instance.id, "selected-document", "context", "markdown", {}),
+      { ...output(source.instance.id, "superseded-document", "context", "markdown", {}), current: false },
+    ],
+    rolePins: [{
+      nodeId: plan.instance.id, nodeRevision: plan.revision,
+      version: { destination: "project", kind: "role", id: "planner", revision: "planner-r1" }, requirementsOnly: false,
+      role: { name: "Planner", model, effort: "high", toolScope: "plan", reviewPolicy: "independent" },
+    }],
+    unitNodeIds: [], units: [], jobs: [], control: [],
+  };
+  vi.mocked(invoke).mockImplementation(async (name, input) => {
+    if (name === "conversation_models") return (input as { provider: string }).provider === "codex"
+      ? [{ option: { selection: model, name: "Planner profile", selectable: true, rating: null } }] : [];
+    if (name === "submit_repository_delivery_agent") return job(plan.instance.id, []).job;
+    throw new Error(name);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <WorkflowExecutionAgent snapshot={snapshot} node={plan} openActivity={vi.fn()} />
+  </QueryClientProvider>);
+  const queue = screen.getByRole<HTMLButtonElement>("button", { name: "Queue design plan" });
+  await waitFor(() => expect(queue.disabled).toBe(false));
+  await userEvent.setup().click(queue);
+  expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", {
+    input: { projectId, runId, nodeId: plan.instance.id, unitId: null, inputs: { context: "selected-document" }, selection: model, effort: "high" },
+  });
 });
 
 it("shows real pinned stages, failure and dependency evidence, and opens the exact attempt and Git or Agile records", async () => {

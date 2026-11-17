@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    ArtifactValue, Executor, NodeInputs, WorkflowArtifact, WorkflowDeliveryUnit, WorkflowRevision,
-    WorkflowRun,
+    ArtifactValue, BuiltinNode, Executor, NodeInputs, WorkflowArtifact, WorkflowDeliveryUnit,
+    WorkflowRevision, WorkflowRun,
 };
 
 #[derive(Serialize)]
@@ -32,6 +32,7 @@ pub struct WorkflowPlanProposal {
 }
 
 pub struct WorkflowAgentTarget {
+    pub kind: BuiltinNode,
     pub checkout_id: String,
     pub task_id: Option<String>,
     pub mode: SessionMode,
@@ -220,13 +221,15 @@ impl Store {
         run: String,
     ) -> Result<Vec<WorkflowPlanProposal>> {
         let attempt = self
-            .workflow_attempt(project, run.clone())
+            .workflow_attempt(project.clone(), run.clone())
             .await?
             .context("the planning attempt is outside this project")?;
-        ensure!(
-            attempt.pin.workflow_run_id == workflow && attempt.pin.node_instance_id == "plan",
-            "the planning attempt belongs to a different workflow"
-        );
+        ensure!(attempt.pin.workflow_run_id == workflow, "the planning attempt belongs to a different workflow");
+        let node = self
+            .pinned_workflow_node(project, workflow, attempt.pin.node_instance_id)
+            .await?
+            .context("the pinned planning stage is unavailable")?;
+        ensure!(node.definition.kind == BuiltinNode::Plan, "the pinned stage cannot publish plan proposals");
         self.execute(move |db| {
             let mut statement = db.prepare(
                 "SELECT seq, payload FROM agent_events WHERE run_id = ?1 AND source IN ('provider', 'application') ORDER BY seq",
@@ -295,6 +298,7 @@ impl Store {
             _ => None,
         };
         Ok(WorkflowAgentTarget {
+            kind: definition.definition.kind,
             checkout_id,
             mode,
             release_id,

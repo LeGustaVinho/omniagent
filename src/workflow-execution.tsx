@@ -7,6 +7,8 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPortColumn } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
+import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
+import { WorkflowExecutionUnitChecks } from "@/workflow-execution-candidate";
 import { WorkflowApprovalInspector } from "@/workflow-approval";
 import {
   controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
@@ -146,6 +148,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
               {wire.to.port} needs {wire.from.node}.{wire.from.port}
             </li>)}</ul>
           </section>}
+          <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity} />
+          <WorkflowExecutionUnitChecks key={active.node.instance.id} snapshot={snapshot} node={active.node} unit={unit} />
           <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit?.unit.id ?? ""}`} node={active.node} snapshot={snapshot}
             unitId={unit?.unit.id} control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
         </>}

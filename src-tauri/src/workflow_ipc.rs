@@ -5,7 +5,7 @@ use omniagent::{
     model_catalog::ModelSelection,
     store::Store,
     workflows::{
-        ArtifactValue, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
+        ArtifactValue, BuiltinNode, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
         WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
         WorkflowLaunchReceipt, WorkflowLaunchSource,
         WorkflowPlanHistory, WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun,
@@ -214,15 +214,8 @@ pub async fn submit_repository_delivery_agent(
     input: DeliveryAgentInput,
 ) -> Result<Job, String> {
     async {
-        let instructions = match input.node_id.as_str() {
-            "plan" => "Propose an implementation plan for the selected repository document. Ask for missing decisions using the planning interface.",
-            "review-plan" => "Review the pinned plan and explain unresolved issues. Keep the checkout read-only.",
-            "implement" => "Implement the pinned logical unit on the approved branch. Keep unrelated changes out of the unit. Leave the changes in the worktree for review, checks and commit approval.",
-            "review-candidate" => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
-            _ => anyhow::bail!("select an agent stage of the built-in delivery"),
-        };
         let comparison = input.comparison.clone();
-        let submission = delivery_agent_submission(&store, input, instructions.into()).await?;
+        let submission = delivery_agent_submission(&store, input, false).await?;
         store.submit_workflow_agent_with_comparison(submission, comparison).await
     }.await.map_err(report)
 }
@@ -230,7 +223,7 @@ pub async fn submit_repository_delivery_agent(
 async fn delivery_agent_submission(
     store: &Store,
     input: DeliveryAgentInput,
-    instructions: String,
+    revising_plan: bool,
 ) -> Result<WorkflowAgentSubmission> {
     let target = store
         .workflow_operator_agent_target(
@@ -241,6 +234,18 @@ async fn delivery_agent_submission(
             &input.inputs,
         )
         .await?;
+    let instructions = if revising_plan {
+        anyhow::ensure!(target.kind == BuiltinNode::Plan, "select a planning stage");
+        ""
+    } else {
+        match target.kind {
+            BuiltinNode::Plan => "Propose an implementation plan for the selected repository document. Ask for missing decisions using the planning interface.",
+            BuiltinNode::ReviewPlan => "Review the pinned plan and explain unresolved issues. Keep the checkout read-only.",
+            BuiltinNode::Implement => "Implement the pinned logical unit on the approved branch. Keep unrelated changes out of the unit. Leave the changes in the worktree for review, checks and commit approval.",
+            BuiltinNode::ReviewCandidate => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
+            _ => anyhow::bail!("select a pinned CLI agent stage"),
+        }
+    };
     let scope = selected_scope(
         store,
         target.checkout_id.clone(),
@@ -262,7 +267,7 @@ async fn delivery_agent_submission(
             checkout_id: Some(target.checkout_id),
             task_id: target.task_id,
             mode: target.mode,
-            instructions,
+            instructions: instructions.into(),
             dependencies: Vec::new(),
             requires_bridge: false,
         },
@@ -320,7 +325,7 @@ pub async fn request_repository_plan_revision(
                 effort: input.effort,
                 comparison: None,
             },
-            String::new(),
+            true,
         )
         .await?;
         store
@@ -374,8 +379,12 @@ pub async fn publish_repository_delivery_evidence(
     expected_plan_revision: Option<String>,
 ) -> Result<WorkflowArtifact, String> {
     async {
-        let (port, value) = match node_id.as_str() {
-            "plan" => (
+        let node = store
+            .pinned_workflow_node(project_id.clone(), run_id.clone(), node_id.clone())
+            .await?
+            .context("the evidence stage is unavailable in this workflow")?;
+        let (port, value) = match node.definition.kind {
+            BuiltinNode::Plan => (
                 "plan",
                 ArtifactValue::Plan {
                     run_id: attempt_id,
@@ -384,7 +393,7 @@ pub async fn publish_repository_delivery_evidence(
                         .parse()?,
                 },
             ),
-            "review-plan" | "review-candidate" => {
+            BuiltinNode::ReviewPlan | BuiltinNode::ReviewCandidate => {
                 ("review", ArtifactValue::Review { run_id: attempt_id })
             }
             _ => anyhow::bail!("this node does not publish planning or review evidence"),
@@ -424,12 +433,13 @@ pub async fn publish_repository_delivery_candidate(
     run_id: String,
     task_id: String,
     selection_id: String,
+    node_id: Option<String>,
 ) -> Result<WorkflowArtifact, String> {
     store
         .publish_workflow_candidate(
             project_id,
             run_id,
-            "implement".into(),
+            node_id.unwrap_or_else(|| "implement".into()),
             task_id,
             selection_id,
         )
