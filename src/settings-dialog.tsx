@@ -62,6 +62,7 @@ const pages: readonly Page[] = [
   { id: "system", scope: "device", title: "System", icon: HardDrive, entries: [
     { id: "environment", label: "Current installation", description: "Build, local data directory, runtime" },
     { id: "qualification", label: "Prerequisites and qualification", description: "Windows, WebView2, Git for Windows, ripgrep, CLI, model, runner" },
+    { id: "external-editor", label: "External editor", description: "Choose or clear the local executable for opening checkout files." },
     { id: "backup", label: "Backup and restore", description: "SQLite, protected history, manifest, drafts, snapshot and recovery" },
     { id: "updates", label: "Updates and recovery", description: "Signed package, installer, update, restart and rollback" },
   ] },

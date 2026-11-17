@@ -455,6 +455,23 @@ it("opens a closed source in the chosen existing group and routes Markdown to a 
   expect(readNoteSearchTarget(target!)).toEqual({ path: "docs/Guide.md", line: 1, side: true });
 });
 
+it("launches the configured external editor for the clicked unopened file in its checkout", async () => {
+  const selected = "src/A & (draft) %review%.rs";
+  fixture({ [selected]: "fn draft() {}" });
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => command === "open_checkout_file_in_external_editor"
+    ? Promise.resolve(undefined) : native(command, args));
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "A & (draft) %review%.rs" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Open in external editor" }));
+  await screen.findByText("Started external editor for A & (draft) %review%.rs");
+  expect(invoke).toHaveBeenCalledWith("open_checkout_file_in_external_editor", {
+    checkoutId: alternate, relativePath: selected,
+  });
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "open_repository_source_file")).toBe(false);
+});
+
 it("reveals the breadcrumb folder and reopens the last tab from the empty group", async () => {
   fixture();
   render(<IdeWorkspace {...propsFor(alternate)} />);

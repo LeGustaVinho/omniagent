@@ -30,6 +30,7 @@ use super::{
     git_command, git_path, git_query, verify_checkout, with_managed_worktree_writer,
 };
 
+pub mod external_editor;
 pub mod mutations;
 pub mod windows_hidden;
 
