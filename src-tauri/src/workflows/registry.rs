@@ -8,10 +8,15 @@ use super::{ConditionPredicate, command::CommandConfiguration, mcp_tools::McpToo
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinNode {
     Agent,
+    ValidateOutput,
+    CollectEvidence,
+    QualityGate,
     TypedStart,
     SummarizeResult,
     LoadWorkContext,
     ManageWork,
+    MaterializeBacklog,
+    RunBacklog,
     SetFields,
     FilterMapList,
     BuildText,
@@ -34,6 +39,12 @@ pub enum BuiltinNode {
     VerifyReviewDiff,
     PublishDiffReport,
     VerifyCandidate,
+    VerifyTestPhase,
+    VerifyIntegratedChecks,
+    SearchPublicRepositories,
+    OpenOrUpdatePullRequest,
+    WaitForCi,
+    MergePullRequest,
     AcceptCandidate,
     VerifyCommit,
     VerifyMerge,
@@ -45,6 +56,7 @@ pub enum BuiltinNode {
     Join,
     Subflow,
     RepeatUntil,
+    RepeatOutput,
     IterationLimit,
     BuildList,
     ForEach,
@@ -58,7 +70,7 @@ impl BuiltinNode {
     pub(super) fn generated_iteration(self) -> bool {
         matches!(
             self,
-            Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect
+            Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect | Self::RepeatOutput
         )
     }
 
@@ -68,6 +80,10 @@ impl BuiltinNode {
             Self::Implement
                 | Self::ReviewCandidate
                 | Self::VerifyCandidate
+                | Self::VerifyTestPhase
+                | Self::OpenOrUpdatePullRequest
+                | Self::WaitForCi
+                | Self::MergePullRequest
                 | Self::AcceptCandidate
                 | Self::VerifyCommit
                 | Self::VerifyMerge
@@ -85,6 +101,14 @@ pub enum ArtifactKind {
     ResultSummary,
     WorkflowContext,
     JsonObject,
+    EvidenceSet,
+    TestPhaseEvidence,
+    IntegratedRevision,
+    IntegratedChecksEvidence,
+    GithubResearch,
+    GithubPullRequest,
+    GithubCi,
+    Backlog,
     RenderedText,
     ComparisonResults,
     AgileTarget,
@@ -134,7 +158,14 @@ pub struct Port {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationKind {
+    CandidateAcceptance,
+    SearchPublicRepositories,
+    VerifyTestPhase,
+    IntegratedChecks,
+    RunBacklog,
     TypedStart,
+    ValidateOutput,
+    QualityGate,
     LoadWorkContext,
     ManageWork,
     SetFields,
@@ -148,11 +179,13 @@ pub enum ConfigurationKind {
     None,
     AgentRole,
     RequiredChecks,
+    CandidateChecks,
     Command,
     McpTool,
     Condition,
     SubflowEntry,
     RepeatUntil,
+    RepeatOutput,
     BuildList,
     ForEach,
     ForEachBegin,
@@ -163,7 +196,14 @@ pub enum ConfigurationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
+    CandidateAcceptance(super::candidate_acceptance::CandidateAcceptanceConfiguration),
+    SearchPublicRepositories(super::github::SearchConfiguration),
+    VerifyTestPhase(crate::repository::verification::test_phase::TestPhaseConfiguration),
+    IntegratedChecks(super::integrated_checks::IntegratedChecksConfiguration),
+    RunBacklog(super::backlog::execution::RunBacklogConfiguration),
     TypedStart(super::launch::TypedStartConfiguration),
+    ValidateOutput(super::data_nodes::ValidateOutputConfiguration),
+    QualityGate(super::data_nodes::QualityGateConfiguration),
     LoadWorkContext {
         mode: super::agile_nodes::LoadWorkContextMode,
     },
@@ -195,6 +235,29 @@ pub enum NodeConfiguration {
     },
     RequiredChecks {
         names: Vec<String>,
+        #[serde(
+            rename = "parallelGroups",
+            default,
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        parallel_groups: Vec<Vec<String>>,
+    },
+    StagedChecks {
+        names: Vec<String>,
+        #[serde(
+            rename = "parallelGroups",
+            default,
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        parallel_groups: Vec<Vec<String>>,
+        #[serde(rename = "deferredNames")]
+        deferred_names: Vec<String>,
+        #[serde(
+            rename = "strategyChecks",
+            default,
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        strategy_checks: Vec<String>,
     },
     Command(CommandConfiguration),
     McpTool(McpToolConfiguration),
@@ -209,6 +272,7 @@ pub enum NodeConfiguration {
         outputs: Vec<Port>,
     },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),
+    RepeatOutput(super::repetition::RepeatOutputConfiguration),
     BuildList(super::iteration::BuildListConfiguration),
     ForEach(super::iteration::ForEachConfiguration),
     ForEachBegin(super::iteration::ForEachBeginConfiguration),
@@ -219,7 +283,18 @@ pub enum NodeConfiguration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Executor {
+    SearchPublicRepositories,
+    OpenOrUpdatePullRequest,
+    WaitForCi,
+    MergePullRequest,
+    VerifyTestPhase,
+    VerifyIntegratedChecks,
+    MaterializeBacklog,
+    RunBacklog,
     SummarizeResult,
+    ValidateOutput,
+    CollectEvidence,
+    QualityGate,
     ReadWorkContext,
     ManageWork,
     SetFields,
@@ -253,6 +328,7 @@ pub enum Executor {
     JoinBranches,
     ExpandSubflow,
     RepeatSubflow,
+    SelectRepeatOutput,
     StopAtIterationLimit,
     BuildList,
     ExpandForEach,
@@ -308,6 +384,60 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
         current.revision = 1;
         current.outputs.retain(|port| port.name != "failed");
     }
+    if pinned.kind == BuiltinNode::TypedStart && pinned.revision == 1 {
+        current.revision = 1;
+        current.outputs.retain(|port| port.name != "plan");
+    }
+    if matches!(
+        pinned.kind,
+        BuiltinNode::Implement | BuiltinNode::ReviewCandidate
+    ) && pinned.revision == 1
+    {
+        current.revision = 1;
+        current
+            .outputs
+            .retain(|port| !matches!(port.name.as_str(), "failed" | "report"));
+        current.inputs.retain(|port| port.name != "brief");
+    }
+    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision == 1 {
+        current.revision = 1;
+        current.configuration = ConfigurationKind::None;
+        current
+            .inputs
+            .retain(|port| !matches!(port.name.as_str(), "quality" | "build"));
+    }
+    if matches!(
+        pinned.kind,
+        BuiltinNode::VerifyCandidate | BuiltinNode::VerifyCommit
+    ) && pinned.revision == 1
+    {
+        current.revision = 1;
+        current.outputs.retain(|port| port.name != "failed");
+    }
+    if pinned.kind == BuiltinNode::VerifyCandidate && pinned.revision == 1 {
+        current.configuration = ConfigurationKind::RequiredChecks;
+    }
+    if pinned.kind == BuiltinNode::VerifyCandidate && pinned.revision <= 2 {
+        current.revision = pinned.revision;
+        current.inputs.retain(|port| port.name != "strategy");
+    }
+    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision <= 2 {
+        current.revision = pinned.revision;
+        current.outputs.retain(|port| port.name != "failed");
+    }
+    if pinned.kind == BuiltinNode::RunBacklog && pinned.revision == 1 {
+        current.revision = 1;
+        current.outputs.retain(|port| port.name != "integrated");
+    }
+    if pinned.kind == BuiltinNode::MaterializeBacklog && pinned.revision == 1 {
+        current.revision = 1;
+        current
+            .inputs
+            .retain(|port| !matches!(port.name.as_str(), "design" | "strategy"));
+    }
+    if pinned.kind == BuiltinNode::RepeatOutput {
+        return super::repetition::matches_output_definition(current, pinned);
+    }
     *current == *pinned
 }
 
@@ -317,6 +447,166 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
     use PortType::{Control, Data, Evidence};
 
     let entries = [
+        (
+            SearchPublicRepositories,
+            "Search public repositories",
+            Executor::SearchPublicRepositories,
+            ConfigurationKind::SearchPublicRepositories,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("query", Data(RenderedText))][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("research", Data(GithubResearch)),
+            ][..],
+        ),
+        (
+            OpenOrUpdatePullRequest,
+            "Open or update PR",
+            Executor::OpenOrUpdatePullRequest,
+            ConfigurationKind::None,
+            Effect::WriteRepository,
+            &[
+                ("ready", Control),
+                ("git", Data(Git)),
+                ("risk", Data(JsonObject)),
+            ][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("pull", Data(GithubPullRequest)),
+            ][..],
+        ),
+        (
+            WaitForCi,
+            "Wait for CI",
+            Executor::WaitForCi,
+            ConfigurationKind::None,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("pull", Data(GithubPullRequest))][..],
+            &[
+                ("passed", Control),
+                ("approval_required", Control),
+                ("failed", Control),
+                ("stale", Control),
+                ("ci", Data(GithubCi)),
+            ][..],
+        ),
+        (
+            MergePullRequest,
+            "Merge PR",
+            Executor::MergePullRequest,
+            ConfigurationKind::None,
+            Effect::VerifyRepositoryMerge,
+            &[
+                ("ready", Control),
+                ("ci", Data(GithubCi)),
+                ("approval", Data(JsonObject)),
+            ][..],
+            &[
+                ("merged", Control),
+                ("failed", Control),
+                ("stale", Control),
+                ("integration", Data(Merge)),
+            ][..],
+        ),
+        (
+            VerifyTestPhase,
+            "Verify test phase",
+            Executor::VerifyTestPhase,
+            ConfigurationKind::VerifyTestPhase,
+            Effect::VerifyCandidate,
+            &[
+                ("ready", Control),
+                ("release", Data(Release)),
+                ("worktree", Data(Worktree)),
+                ("candidate", Data(Candidate)),
+                ("prior", Data(TestPhaseEvidence)),
+                ("tests", Data(JsonObject)),
+            ][..],
+            &[
+                ("verified", Control),
+                ("failed", Control),
+                ("blocked", Control),
+                ("evidence", Data(TestPhaseEvidence)),
+            ][..],
+        ),
+        (
+            VerifyIntegratedChecks,
+            "Verify integrated checks",
+            Executor::VerifyIntegratedChecks,
+            ConfigurationKind::IntegratedChecks,
+            Effect::VerifyCandidate,
+            &[("ready", Control), ("integrated", Data(IntegratedRevision))][..],
+            &[
+                ("verified", Control),
+                ("failed", Control),
+                ("blocked", Control),
+                ("evidence", Data(IntegratedChecksEvidence)),
+            ][..],
+        ),
+        (
+            RunBacklog,
+            "Run backlog",
+            Executor::RunBacklog,
+            ConfigurationKind::RunBacklog,
+            Effect::ChangeTaskRecords,
+            &[("ready", Control), ("backlog", Data(Backlog))][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("deliveries", Data(JsonObject)),
+                ("integrated", Data(IntegratedRevision)),
+            ][..],
+        ),
+        (
+            MaterializeBacklog,
+            "Materialize backlog",
+            Executor::MaterializeBacklog,
+            ConfigurationKind::None,
+            Effect::ChangeTaskRecords,
+            &[
+                ("ready", Control),
+                ("plan", Data(JsonObject)),
+                ("sdd", Data(JsonObject)),
+                ("bdd", Data(JsonObject)),
+                ("design", Data(JsonObject)),
+                ("strategy", Data(JsonObject)),
+            ][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("backlog", Data(Backlog)),
+            ][..],
+        ),
+        (
+            QualityGate,
+            "Quality gate",
+            Executor::QualityGate,
+            ConfigurationKind::QualityGate,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("evidence", Data(EvidenceSet))][..],
+            &[
+                ("passed", Control),
+                ("revise", Control),
+                ("blocked", Control),
+                ("decision", Data(JsonObject)),
+            ][..],
+        ),
+        (
+            CollectEvidence,
+            "Collect evidence",
+            Executor::CollectEvidence,
+            ConfigurationKind::None,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("evidence", Evidence)][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("evidence", Data(EvidenceSet)),
+                ("text", Data(RenderedText)),
+            ][..],
+        ),
         (
             BuiltinNode::SetFields,
             "Set fields",
@@ -329,6 +619,19 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("failed", Control),
                 ("object", Data(JsonObject)),
             ][..],
+        ),
+        (
+            ValidateOutput,
+            "Validate output",
+            Executor::ValidateOutput,
+            ConfigurationKind::ValidateOutput,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("source", Evidence)],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("object", Data(JsonObject)),
+            ],
         ),
         (
             BuiltinNode::FilterMapList,
@@ -446,6 +749,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("document", Data(Markdown)),
                 ("task", Data(Task)),
                 ("event", Data(AgileEvent)),
+                ("plan", Data(ArtifactKind::Plan)),
             ],
         ),
         (
@@ -597,8 +901,13 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("plan", Data(ArtifactKind::Plan)),
                 ("release", Data(Release)),
                 ("worktree", Data(Worktree)),
+                ("brief", Data(RenderedText)),
             ],
-            &[("implemented", Control), ("candidate", Data(Candidate))],
+            &[
+                ("implemented", Control),
+                ("candidate", Data(Candidate)),
+                ("failed", Control),
+            ],
         ),
         (
             ReviewCandidate,
@@ -606,8 +915,17 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::ReadOnlyAgent,
             ConfigurationKind::AgentRole,
             Effect::InvokeModel,
-            &[("ready", Control), ("candidate", Data(Candidate))],
-            &[("reviewed", Control), ("review", Data(Review))],
+            &[
+                ("ready", Control),
+                ("candidate", Data(Candidate)),
+                ("brief", Data(RenderedText)),
+            ],
+            &[
+                ("reviewed", Control),
+                ("review", Data(Review)),
+                ("failed", Control),
+                ("report", Data(JsonObject)),
+            ],
         ),
         (
             ReadGit,
@@ -654,24 +972,38 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             VerifyCandidate,
             "Verify candidate",
             Executor::CheckCandidate,
-            ConfigurationKind::RequiredChecks,
+            ConfigurationKind::CandidateChecks,
             Effect::VerifyCandidate,
-            &[("ready", Control), ("candidate", Data(Candidate))],
-            &[("verified", Control), ("checks", Data(Checks))],
+            &[
+                ("ready", Control),
+                ("candidate", Data(Candidate)),
+                ("strategy", Data(JsonObject)),
+            ],
+            &[
+                ("verified", Control),
+                ("failed", Control),
+                ("checks", Data(Checks)),
+            ],
         ),
         (
             AcceptCandidate,
             "Accept candidate",
             Executor::RecordCandidateAcceptance,
-            ConfigurationKind::None,
+            ConfigurationKind::CandidateAcceptance,
             Effect::RecordAcceptance,
             &[
                 ("ready", Control),
                 ("candidate", Data(Candidate)),
                 ("review", Data(Review)),
                 ("checks", Data(Checks)),
+                ("quality", Data(JsonObject)),
+                ("build", Data(Checks)),
             ],
-            &[("accepted", Control), ("acceptance", Data(Acceptance))],
+            &[
+                ("accepted", Control),
+                ("failed", Control),
+                ("acceptance", Data(Acceptance)),
+            ],
         ),
         (
             VerifyCommit,
@@ -684,7 +1016,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("candidate", Data(Candidate)),
                 ("acceptance", Data(Acceptance)),
             ],
-            &[("verified", Control), ("git", Data(Git))],
+            &[
+                ("verified", Control),
+                ("failed", Control),
+                ("git", Data(Git)),
+            ],
         ),
         (
             VerifyMerge,
@@ -789,6 +1125,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("failed", Control)],
         ),
         (
+            RepeatOutput,
+            "Select approved iteration",
+            Executor::SelectRepeatOutput,
+            ConfigurationKind::RepeatOutput,
+            Effect::ReadEvidence,
+            &[][..],
+            &[("completed", Control), ("failed", Control)],
+        ),
+        (
             BuildList,
             "Build list",
             Executor::BuildList,
@@ -878,7 +1223,17 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         .map(
             |(kind, title, executor, configuration, effect, inputs, outputs)| NodeDefinition {
                 kind,
-                revision: if kind == BuiltinNode::Command { 2 } else { 1 },
+                revision: match kind {
+                    BuiltinNode::AcceptCandidate | BuiltinNode::VerifyCandidate => 3,
+                    BuiltinNode::Command
+                    | BuiltinNode::TypedStart
+                    | BuiltinNode::Implement
+                    | BuiltinNode::ReviewCandidate
+                    | BuiltinNode::RunBacklog
+                    | BuiltinNode::MaterializeBacklog
+                    | BuiltinNode::VerifyCommit => 2,
+                    _ => 1,
+                },
                 title: title.into(),
                 executor,
                 configuration,
@@ -897,7 +1252,16 @@ impl ArtifactKind {
             Self::AgileEvent => "agile_event",
             Self::ResultSummary => "result_summary",
             Self::WorkflowContext => "workflow_context",
-            Self::JsonObject => "json_object",
+            // Protected payloads and pinned ports distinguish these JSON artifacts.
+            Self::JsonObject
+            | Self::EvidenceSet
+            | Self::Backlog
+            | Self::TestPhaseEvidence
+            | Self::GithubResearch
+            | Self::GithubPullRequest
+            | Self::GithubCi
+            | Self::IntegratedRevision
+            | Self::IntegratedChecksEvidence => "json_object",
             Self::RenderedText => "rendered_text",
             Self::ComparisonResults => "comparison_results",
             Self::AgileTarget => "agile_target",
@@ -927,7 +1291,22 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
+            (Self::None, ConfigurationKind::CandidateAcceptance) => true,
+            (Self::CandidateAcceptance(config), ConfigurationKind::CandidateAcceptance) => {
+                config.valid()
+            }
+            (
+                Self::SearchPublicRepositories(config),
+                ConfigurationKind::SearchPublicRepositories,
+            ) => config.valid(),
+            (Self::VerifyTestPhase(config), ConfigurationKind::VerifyTestPhase) => config.valid(),
+            (Self::IntegratedChecks(config), ConfigurationKind::IntegratedChecks) => config.valid(),
+            (Self::RunBacklog(config), ConfigurationKind::RunBacklog) => config.valid(),
             (Self::TypedStart(config), ConfigurationKind::TypedStart) => config.valid(),
+            (Self::QualityGate(config), ConfigurationKind::QualityGate) => config.valid(),
+            (Self::ValidateOutput(config), ConfigurationKind::ValidateOutput) => {
+                config.validate().is_ok()
+            }
             (Self::LoadWorkContext { .. }, ConfigurationKind::LoadWorkContext)
             | (Self::ManageWork { .. }, ConfigurationKind::ManageWork) => true,
             (Self::SetFields(config), ConfigurationKind::SetFields) => config.validate().is_ok(),
@@ -955,8 +1334,46 @@ impl NodeConfiguration {
                             && !selection.model_id.trim().is_empty()
                     })
             }
-            (Self::RequiredChecks { names }, ConfigurationKind::RequiredChecks) => {
+            (
+                Self::RequiredChecks {
+                    names,
+                    parallel_groups,
+                },
+                ConfigurationKind::RequiredChecks | ConfigurationKind::CandidateChecks,
+            ) => {
                 names.iter().all(|name| !name.trim().is_empty())
+                    && crate::repository::verification::valid_parallel_check_groups(parallel_groups)
+            }
+            (
+                Self::StagedChecks {
+                    names,
+                    parallel_groups,
+                    deferred_names,
+                    strategy_checks,
+                },
+                ConfigurationKind::CandidateChecks,
+            ) => {
+                !deferred_names.is_empty()
+                    && names.iter().all(|name| !name.trim().is_empty())
+                    && crate::repository::verification::valid_parallel_check_groups(parallel_groups)
+                    && crate::repository::verification::valid_deferred_check_names(
+                        names,
+                        parallel_groups,
+                        deferred_names,
+                    )
+                    && strategy_checks.len() <= 32
+                    && strategy_checks.iter().enumerate().all(|(index, name)| {
+                        !name.trim().is_empty()
+                            && name.len() <= 256
+                            && !name.chars().any(char::is_control)
+                            && !strategy_checks[..index].contains(name)
+                            && !names.contains(name)
+                            && !deferred_names.contains(name)
+                            && !parallel_groups
+                                .iter()
+                                .flatten()
+                                .any(|grouped| grouped == name)
+                    })
             }
             (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
             (Self::McpTool(config), ConfigurationKind::McpTool) => config.is_valid(),
@@ -965,6 +1382,9 @@ impl NodeConfiguration {
                 super::subflow::valid_entry_ports(outputs)
             }
             (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => {
+                configuration.valid()
+            }
+            (Self::RepeatOutput(configuration), ConfigurationKind::RepeatOutput) => {
                 configuration.valid()
             }
             (Self::BuildList(configuration), ConfigurationKind::BuildList) => configuration.valid(),

@@ -75,6 +75,90 @@ pub(super) fn materialize(
     git.materialize_tree(&tree, &[&selected.base_commit], b"Selected candidate\n")
 }
 
+pub(super) fn materialize_test_snapshot(
+    capture: &CandidateRevision,
+    selected: &SelectedCandidate,
+    test_paths: &[String],
+    test_only: bool,
+    expected_patch: Option<&str>,
+) -> Result<Result<(MaterializedCandidate, String), &'static str>> {
+    let (git, tree) = replay(capture, &selected.selection)?;
+    ensure!(
+        tree == selected.tree,
+        "The saved test snapshot differs from its selected Git tree"
+    );
+    let changed = git.run(
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &selected.base_commit,
+            &tree,
+            "--",
+        ],
+        None,
+    )?;
+    let changed = String::from_utf8(changed)?;
+    let names = changed
+        .split_terminator('\0')
+        .collect::<std::collections::HashSet<_>>();
+    if !test_paths.iter().all(|path| names.contains(path.as_str())) {
+        return Ok(Err(
+            "The selected tree lost part of the required test patch",
+        ));
+    }
+    if test_only && names.len() != test_paths.len() {
+        return Ok(Err(
+            "The red candidate contains changes outside the declared test patch",
+        ));
+    }
+    let literal: Vec<_> = test_paths
+        .iter()
+        .map(|path| format!(":(top,literal){path}"))
+        .collect();
+    let mut args = vec![
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-renames",
+        "--no-textconv",
+        "--no-ext-diff",
+        "--no-color",
+        &selected.base_commit,
+        &tree,
+        "--",
+    ];
+    args.extend(literal.iter().map(String::as_str));
+    let patch = git.run(&args, None)?;
+    if patch.is_empty() {
+        return Ok(Err("A test phase requires a non-empty test patch"));
+    }
+    let revision = format!("{:x}", Sha256::digest(&patch));
+    if expected_patch.is_some_and(|expected| expected != revision) {
+        return Ok(Err(
+            "The tests changed after red. Verify the new test patch in red.",
+        ));
+    }
+    // Recreate red explicitly from the original base and the authorized test diff.
+    let tree = if test_only {
+        git.run(&["read-tree", &selected.base_commit], None)?;
+        git.apply(&patch)?;
+        let reproduced = git.object(&["write-tree"])?;
+        ensure!(
+            reproduced == tree,
+            "The test patch did not reproduce the red candidate"
+        );
+        reproduced
+    } else {
+        tree
+    };
+    Ok(Ok((
+        git.materialize_tree(&tree, &[&selected.base_commit], b"Workflow test phase\n")?,
+        revision,
+    )))
+}
+
 pub(crate) fn materialize_maintenance_commit(
     git_common_dir: &Path,
     commit: &str,

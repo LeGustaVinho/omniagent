@@ -72,6 +72,30 @@ impl Store {
         &self,
         submission: WorkflowHostSubmission,
     ) -> Result<WorkflowArtifact> {
+        self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
+            self.resolve_workflow_github_base(project, checkout, destination)
+        }).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_workflow_host_with_github(
+        &self,
+        submission: WorkflowHostSubmission,
+        client: &impl super::github::GithubDeliveryClient,
+    ) -> Result<WorkflowArtifact> {
+        self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
+            self.resolve_workflow_github_base_with_client(project, checkout, destination, client)
+        }).await
+    }
+
+    async fn execute_workflow_host_with_base<F>(
+        &self,
+        submission: WorkflowHostSubmission,
+        resolve_base: impl FnOnce(String, String, String) -> F,
+    ) -> Result<WorkflowArtifact>
+    where
+        F: std::future::Future<Output = Result<Option<String>>> + Send,
+    {
         let WorkflowHostSubmission {
             project_id,
             run_id,
@@ -150,13 +174,21 @@ impl Store {
                 HostAction::Publish("git", ArtifactValue::GitInspection(inspection))
             }
             (Executor::CheckSelectedGit, WorkflowHostRequest::VerifyReviewDiff) => {
-                let NodeConfiguration::RequiredChecks { names } = node.instance.configuration
+                let NodeConfiguration::RequiredChecks {
+                    names,
+                    parallel_groups,
+                } = node.instance.configuration
                 else {
                     anyhow::bail!("The diff checks configuration is unavailable");
                 };
-                let checks =
-                    super::templates::diff::verify(self, &project_id, &inputs["git"], names)
-                        .await?;
+                let checks = super::templates::diff::verify(
+                    self,
+                    &project_id,
+                    &inputs["git"],
+                    names,
+                    parallel_groups,
+                )
+                .await?;
                 HostAction::Publish("checks", ArtifactValue::Checks(checks))
             }
             (Executor::ReportSelectedGit, WorkflowHostRequest::PublishDiffReport) => {
@@ -220,12 +252,67 @@ impl Store {
                         decision.plan_revision.clone(),
                     )
                     .await?;
-                let worktree = repository::provision_task_worktree(
+                let plan = self
+                    .resolve_workflow_artifact(
+                        project_id.clone(),
+                        run_id.clone(),
+                        decision.plan_revision.clone(),
+                        super::ArtifactKind::Plan,
+                    )
+                    .await?
+                    .context("The approved plan is unavailable")?;
+                let integration = match plan.value {
+                    ArtifactValue::BacklogPlan(plan) => {
+                        let verified_tip = resolve_base(
+                            project_id.clone(),
+                            decision.source_checkout_id.clone(),
+                            plan.destination_branch.clone(),
+                        ).await?;
+                        if let Some(repair) = &plan.repair {
+                            let tip = verified_tip.clone()
+                                .context("The GitHub retry lost its verified destination")?;
+                            let managed = self
+                                .live_managed_worktree(project_id.clone(), task.task_id.clone())
+                                .await?
+                                .context("The GitHub retry lost its managed worktree")?;
+                            let project = project_id.clone();
+                            let checkout = managed.worktree.checkout_id;
+                            let expected = repair.previous_source_sha.clone();
+                            let integration = repository::IntegratedWorktreeBase {
+                                branch: plan.destination_branch.clone(),
+                                prerequisite_commits: vec![repair.destination_sha.clone()],
+                                verified_tip: Some(tip),
+                            };
+                            self.execute(move |db| {
+                                ensure!(
+                                    repository::registered_checkout_head(db, &project, &checkout)?
+                                        == expected,
+                                    "The task worktree advanced after the failed CI revision"
+                                );
+                                integration.registered_tip(db, &project, &checkout)
+                                    .context("The GitHub destination lost the previously tested history")?;
+                                Ok(())
+                            })
+                            .await?;
+                        }
+                        Some(repository::IntegratedWorktreeBase {
+                            branch: plan.destination_branch,
+                            prerequisite_commits: plan
+                                .prerequisite_integrations
+                                .into_values()
+                                .collect(),
+                            verified_tip,
+                        })
+                    }
+                    _ => None,
+                };
+                let worktree = repository::provision_task_worktree_at(
                     self,
                     default_root,
                     project_id.clone(),
                     task.task_id.clone(),
                     decision.source_checkout_id.clone(),
+                    integration,
                 )
                 .await?;
                 HostAction::Prepare {
@@ -374,7 +461,20 @@ impl Store {
                 );
             let optional_agent_input =
                 agent_stage && super::generic_agent::optional_input(&port.name);
-            if source.is_none() && (mcp_arguments || optional_agent_input) {
+            let optional_delivery_input = matches!(
+                (pinned.instance.kind, port.name.as_str()),
+                (
+                    super::BuiltinNode::Implement | super::BuiltinNode::ReviewCandidate,
+                    "brief"
+                ) | (super::BuiltinNode::OpenOrUpdatePullRequest, "risk")
+                    | (super::BuiltinNode::MergePullRequest, "approval")
+            ) || pinned.instance.kind
+                == super::BuiltinNode::AcceptCandidate
+                && matches!(pinned.instance.configuration, NodeConfiguration::None)
+                && matches!(port.name.as_str(), "quality" | "build");
+            if source.is_none()
+                && (mcp_arguments || optional_agent_input || optional_delivery_input)
+            {
                 continue;
             }
             let source = source.context("pinned workflow input has no source")?;
@@ -439,10 +539,13 @@ impl Store {
                         .with_context(|| {
                             format!("artifact for workflow input {} is unavailable", port.name)
                         })?;
+                    let forwarded = control_checked
+                        && producer.instance.kind == super::BuiltinNode::RepeatOutput;
                     ensure!(
-                        artifact.node_instance_id == source.from.node
-                            && artifact.port == source.from.port
-                            && artifact.unit_id.as_deref() == producer_unit,
+                        forwarded
+                            || (artifact.node_instance_id == source.from.node
+                                && artifact.port == source.from.port
+                                && artifact.unit_id.as_deref() == producer_unit),
                         "artifact for workflow input {} is outside its pinned wire",
                         port.name
                     );

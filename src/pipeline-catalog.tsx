@@ -92,10 +92,10 @@ export type PipelineCatalogGroup = { title: string; entries: PipelineCatalogEntr
 
 const catalogGroups = [
   ["Entry and results", ["start", "typed_start", "load_context", "load_work_context", "summarize_result", "result"]],
-  ["Data", ["build_list", "set_fields", "filter_map_list", "build_text"]],
+  ["Data", ["build_list", "set_fields", "filter_map_list", "build_text", "validate_output", "collect_evidence"]],
   ["Control", ["condition", "parallel", "join", "for_each", "repeat_until", "iteration_limit", "subflow"]],
   ["Decisions", ["request_input", "approval", "approve_implementation"]],
-  ["Agile", ["link_work", "find_work", "update_progress", "manage_work"]],
+  ["Agile", ["link_work", "find_work", "update_progress", "manage_work", "materialize_backlog", "run_backlog"]],
   ["Agents and execution", ["agent", "plan", "review_plan", "implement", "review_candidate", "compare_models", "command", "mcp_tool"]],
 ] as const;
 
@@ -118,7 +118,7 @@ export function workflowRegistryGroups(definitions: WorkflowDefinition[],
   return groups.map((title) => ({
     title,
     entries: definitions.filter(({ kind }) =>
-      !["for_each_begin", "for_each_gate", "for_each_collect"].includes(kind) && groupFor(kind) === title)
+      !["for_each_begin", "for_each_gate", "for_each_collect", "repeat_output"].includes(kind) && groupFor(kind) === title)
       .map((entry) => ({
         id: entry.kind,
         label: entry.kind === "result" ? "Delivery result" : entry.title,

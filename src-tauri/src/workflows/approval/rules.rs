@@ -13,6 +13,7 @@ use crate::workflows::{
     ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs, PinnedNode, WorkflowArtifact,
     WorkflowRun,
     artifacts::{load_artifact, load_plan_text},
+    launch::{WorkflowLaunchOrigin, load_workflow_launch},
     runtime::load_workflow_run,
     units::parse_plan_units,
 };
@@ -33,6 +34,79 @@ pub enum ApprovalRuleSettings {
         maximum_units: u32,
         if_unmet: UnmetApproval,
     },
+    BacklogAutomatic {
+        scope: BacklogApprovalScope,
+        source_checkout_id: String,
+        maximum_units: u32,
+        if_unmet: UnmetApproval,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BacklogApprovalScope {
+    pub parent_run_id: String,
+    pub node_id: String,
+    pub child_revision: String,
+}
+
+impl ApprovalRuleSettings {
+    fn automatic_terms(&self) -> Option<(u32, UnmetApproval)> {
+        match self {
+            Self::Automatic {
+                maximum_units,
+                if_unmet,
+                ..
+            }
+            | Self::BacklogAutomatic {
+                maximum_units,
+                if_unmet,
+                ..
+            } => Some((*maximum_units, *if_unmet)),
+            Self::Human => None,
+        }
+    }
+
+    fn matches_scope(&self, facts: &ApprovalFacts) -> bool {
+        match self {
+            Self::Human => false,
+            Self::Automatic {
+                task_id,
+                source_checkout_id,
+                ..
+            } => task_id == &facts.task_id && source_checkout_id == &facts.source_checkout_id,
+            Self::BacklogAutomatic {
+                scope,
+                source_checkout_id,
+                ..
+            } => {
+                Some(scope) == facts.backlog_scope.as_ref()
+                    && source_checkout_id == &facts.source_checkout_id
+            }
+        }
+    }
+}
+
+fn backlog_scope(
+    db: &Connection,
+    run: &WorkflowRun,
+    work: &str,
+) -> Result<Option<BacklogApprovalScope>> {
+    let Some(launch) = load_workflow_launch(db, &run.project_id, &run.id)? else {
+        return Ok(None);
+    };
+    match launch.origin {
+        WorkflowLaunchOrigin::Backlog {
+            parent_run_id,
+            node_id,
+            work_id,
+        } if work_id == work => Ok(Some(BacklogApprovalScope {
+            parent_run_id,
+            node_id,
+            child_revision: run.version.revision.clone(),
+        })),
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +124,8 @@ pub struct ApprovalFacts {
     pub task_id: String,
     pub source_checkout_id: String,
     pub unit_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog_scope: Option<BacklogApprovalScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,28 +204,43 @@ impl ApprovalContext {
         let ArtifactValue::Task(task_ref) = &task.value else {
             anyhow::bail!("approval requires linked work");
         };
-        let ArtifactValue::Plan {
-            run_id: attempt,
-            event_sequence,
-        } = &plan.value
-        else {
-            anyhow::bail!("approval requires a plan");
-        };
         ensure!(
             task_ref.project_id == run.project_id
                 && task.workflow_run_id == run.id
                 && plan.workflow_run_id == run.id,
             "approval evidence is outside this workflow"
         );
-        let text = load_plan_text(db, attempt, *event_sequence)?;
-        let unit_count = parse_plan_units(&plan.id, &text)?.len().try_into()?;
-        let source_checkout_id = load_plan_checkout(db, &run.project_id, attempt)?;
+        let (source_checkout_id, unit_count) = match &plan.value {
+            ArtifactValue::Plan {
+                run_id: attempt,
+                event_sequence,
+            } => {
+                let text = load_plan_text(db, attempt, *event_sequence)?;
+                (
+                    load_plan_checkout(db, &run.project_id, attempt)?,
+                    parse_plan_units(&plan.id, &text)?.len().try_into()?,
+                )
+            }
+            ArtifactValue::BacklogPlan(plan) => {
+                ensure!(
+                    &plan.task.task == task_ref,
+                    "The backlog plan belongs to another task"
+                );
+                (plan.checkout_id.clone(), 1)
+            }
+            _ => anyhow::bail!("approval requires a plan"),
+        };
         let facts = ApprovalFacts {
             plan_revision: plan.id.clone(),
             task_artifact_id: task.id.clone(),
             task_id: task_ref.task_id.clone(),
             source_checkout_id: source_checkout_id.clone(),
             unit_count,
+            backlog_scope: if matches!(&plan.value, ArtifactValue::BacklogPlan(_)) {
+                backlog_scope(db, run, &task_ref.task_id)?
+            } else {
+                None
+            },
         };
         Ok(Self {
             facts,
@@ -238,21 +329,14 @@ impl Store {
         settings: ApprovalRuleSettings,
     ) -> Result<WorkflowApprovalPreview> {
         let context = self.approval_context(submission).await?;
-        if let ApprovalRuleSettings::Automatic {
-            task_id,
-            source_checkout_id,
-            maximum_units,
-            ..
-        } = &settings
-        {
+        if let Some((maximum_units, _)) = settings.automatic_terms() {
             ensure!(
-                *maximum_units > 0,
+                maximum_units > 0,
                 "an automatic release needs a positive unit limit"
             );
             ensure!(
-                task_id == &context.facts.task_id
-                    && source_checkout_id == &context.facts.source_checkout_id,
-                "the rule scope must match the linked task and the planning checkout"
+                settings.matches_scope(&context.facts),
+                "The rule scope must match the selected task or backlog and its planning checkout"
             );
         }
         let preview = self.execute(move |db| {
@@ -452,13 +536,9 @@ fn inspect_selected(
     }
     let allows_human = outcome == ApprovalRuleOutcome::HumanRequired
         || (outcome != ApprovalRuleOutcome::ConditionsMet
-            && matches!(
-                settings,
-                ApprovalRuleSettings::Automatic {
-                    if_unmet: UnmetApproval::Human,
-                    ..
-                }
-            ));
+            && settings
+                .automatic_terms()
+                .is_some_and(|(_, if_unmet)| if_unmet == UnmetApproval::Human));
     Ok(WorkflowApprovalPreview {
         revision,
         settings,
@@ -478,7 +558,9 @@ pub(in crate::workflows) fn activate_selected_approval(
 ) -> Result<bool> {
     let node_id = &node.instance.id;
     let rule = load_rule(db, &run.project_id, &run.version.id, node_id)?;
-    if !matches!(&rule, Some((_, ApprovalRuleSettings::Automatic { .. })))
+    if !rule
+        .as_ref()
+        .is_some_and(|(_, settings)| settings.automatic_terms().is_some())
         || !super::super::registry::supports_pinned_execution(&node.definition)
     {
         return Ok(false);
@@ -507,19 +589,13 @@ pub(in crate::workflows) fn activate_selected_approval(
 }
 
 fn outcome(settings: &ApprovalRuleSettings, facts: &ApprovalFacts) -> ApprovalRuleOutcome {
-    let ApprovalRuleSettings::Automatic {
-        task_id,
-        source_checkout_id,
-        maximum_units,
-        ..
-    } = settings
-    else {
+    let Some((maximum_units, _)) = settings.automatic_terms() else {
         return ApprovalRuleOutcome::HumanRequired;
     };
-    if task_id != &facts.task_id || source_checkout_id != &facts.source_checkout_id {
+    if !settings.matches_scope(facts) {
         return ApprovalRuleOutcome::ScopeDoesNotMatch;
     }
-    if facts.unit_count == 0 || facts.unit_count > *maximum_units {
+    if facts.unit_count == 0 || facts.unit_count > maximum_units {
         return ApprovalRuleOutcome::UnitLimitExceeded;
     }
     ApprovalRuleOutcome::ConditionsMet
@@ -649,6 +725,16 @@ pub(super) fn rule_authorizes(db: &Connection, decision: &ApprovalDecision) -> R
     else {
         return Ok(false);
     };
+    if let ApprovalRuleSettings::BacklogAutomatic { scope, .. } = &settings {
+        let Some(run) =
+            load_workflow_run(db, &decision.task.project_id, &decision.workflow_run_id)?
+        else {
+            return Ok(false);
+        };
+        if backlog_scope(db, &run, &decision.task.task_id)?.as_ref() != Some(scope) {
+            return Ok(false);
+        }
+    }
     Ok(revision == evidence.revision
         && decision.plan_revision == evidence.facts.plan_revision
         && decision.task_artifact_id == evidence.facts.task_artifact_id

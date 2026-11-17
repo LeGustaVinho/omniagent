@@ -29,6 +29,7 @@ export type ExecutionControl = {
   reason?: string | null;
   sourceRunId?: string | null;
   dependencies?: { from: WorkflowWire["from"]; toPort: string; selected: boolean; artifactId?: string | null }[];
+  forwardedOutputs?: Record<string, { input: string; artifactId: string }>;
 };
 export type ExecutionSubflow = {
   path: string;
@@ -53,7 +54,9 @@ export type ExecutionRolePin = {
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
   launch?: {
-    origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string };
+    sourceCommit?: string;
+    origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string } |
+      { kind: "backlog"; workId: string; parentRunId: string; nodeId: string };
     checklistItem?: { itemId: string; revision: number; checked: boolean };
   } | null;
   layout?: WorkflowLayout;
@@ -66,6 +69,13 @@ export type WorkflowExecutionSnapshot = {
   control: ExecutionControl[];
   pendingDecisions?: WorkflowPendingDecision[];
   comparisonStages?: ExecutionComparisonStage[];
+  automaticAgentWaits?: { nodeId: string; unitId: string | null; reason: string | null }[];
+  automaticPreparationWaits?: { nodeId: string; reason: string | null }[];
+  testPhaseWaits?: { nodeId: string; unitId: string; reason: string | null }[];
+  integratedChecksWaits?: { nodeId: string; reason: string | null }[];
+  githubWaits?: { nodeId: string; unitId: string | null; reason: string | null }[];
+  backlogExecutions?: { nodeId: string; backlogArtifactId: string; state: "pending" | "completed" | "failed"; reason: string | null;
+    tasks: { key: string; taskId: string; workflowRunId: string }[] }[];
 };
 
 export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: string, unit?: ExecutionUnit) {
@@ -77,24 +87,37 @@ export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: stri
     (receipt.unitId ?? null) === (scope?.unit.id ?? null) && (receipt.planRevision ?? null) === plan);
 }
 
+function outputInScope(snapshot: WorkflowExecutionSnapshot, output: ExecutionOutput, unit?: ExecutionUnit) {
+  return snapshot.unitNodeIds.includes(output.artifact.nodeInstanceId)
+    ? Boolean(unit && output.artifact.unitId === unit.unit.id) : output.current;
+}
+
+export function executionOutputForWire(snapshot: WorkflowExecutionSnapshot, from: WorkflowWire["from"],
+  unit?: ExecutionUnit, control = false) {
+  const forwarded = controlForNode(snapshot, from.node, unit)?.forwardedOutputs?.[from.port];
+  return snapshot.outputs.findLast((output) => outputInScope(snapshot, output, unit) &&
+    (forwarded ? output.artifact.id === forwarded.artifactId
+      : output.artifact.nodeInstanceId === from.node && (control || output.artifact.port === from.port)));
+}
+
 export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit) {
   const inputs: Inputs = {};
   for (const port of node.definition.inputs) {
     const wire = snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === port.name);
     if (!wire) {
       if (node.definition.kind === "agent" && port.name === "comparison") continue;
+      if (["implement", "review_candidate"].includes(node.definition.kind) && port.name === "brief") continue;
+      if (node.definition.kind === "accept_candidate" && node.instance.configuration.kind === "none"
+        && ["quality", "build"].includes(port.name)) continue;
       return null;
     }
-    const sourceForUnit = snapshot.unitNodeIds.includes(wire.from.node);
     const selected = controlForNode(snapshot, wire.from.node, unit);
     if (selected?.state === "skipped") return null;
     if (port.value.kind === "control" && selected) {
       if (!selected.selectedPorts.includes(wire.from.port)) return null;
       continue;
     }
-    const output = snapshot.outputs.findLast(({ artifact, current }) =>
-      artifact.nodeInstanceId === wire.from.node && (sourceForUnit ? artifact.unitId === unit?.unit.id : current) &&
-      (port.value.kind === "control" || artifact.port === wire.from.port));
+    const output = executionOutputForWire(snapshot, wire.from, unit, port.value.kind === "control");
     if (!output) return null;
     if (port.value.kind === "data") inputs[port.name] = output.artifact.id;
   }
@@ -127,15 +150,13 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
 } {
   const nodeId = node.instance.id;
   const unitScoped = snapshot.unitNodeIds.includes(nodeId);
-  const eligible = (output: ExecutionOutput) => snapshot.unitNodeIds.includes(output.artifact.nodeInstanceId)
-    ? Boolean(unit && output.artifact.unitId === unit.unit.id) : output.current;
   if (unitScoped && !unit) return { status: "waiting", reason: "Waiting for an approved logical unit." };
   const scoped = snapshot.jobs.filter((entry) => entry.nodeId === nodeId && entry.job.origin.type !== "agent" &&
     (unitScoped ? entry.unitId === unit?.unit.id : entry.job.pipeline?.planRevision == null || entry.job.pipeline.planRevision === snapshot.run.planRevision));
   const pending = (entry: ExecutionJob) => entry.job.queueState !== "cancelled" &&
     (entry.job.queuedRecovery || !entry.job.latestAttempt || ["starting", "running", "waiting_for_input"].includes(entry.job.latestAttempt.status));
   const job = (scoped.findLast(pending) ?? scoped.at(-1))?.job;
-  const completed = snapshot.outputs.some((output) => output.artifact.nodeInstanceId === nodeId && eligible(output));
+  const completed = snapshot.outputs.some((output) => output.artifact.nodeInstanceId === nodeId && outputInScope(snapshot, output, unit));
   if (job) {
     if (job.queueState !== "cancelled") {
       if (job.downstreamWait) return { status: "waiting", reason: "Waiting for recorded downstream work." };
@@ -158,8 +179,7 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
     if (decision?.state === "skipped") return true;
     if (decision && control) return !decision.selectedPorts.includes(from.port);
     if (decision?.state === "failed") return true;
-    return !snapshot.outputs.some((output) => output.artifact.nodeInstanceId === from.node && eligible(output) &&
-      (control || output.artifact.port === from.port));
+    return !executionOutputForWire(snapshot, from, unit, control);
   });
   if (missing.length > 0) return { status: "waiting", missing };
   if (job?.latestAttempt?.status === "succeeded") return { status: "waiting", reason: "Waiting for the recorded result of this attempt." };

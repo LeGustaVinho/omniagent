@@ -143,7 +143,12 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     <header className="workflow-run-summary">
       <div><h2>{definition.name}</h2>
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
+        {launch?.sourceCommit && <p>Source commit <code className="break-all">{launch.sourceCommit}</code></p>}
         {launch && launch.origin.kind !== "editor" && <p>Agile work <code className="break-all">{launch.origin.workId}</code></p>}
+        {launch?.origin.kind === "backlog" && <Button type="button" variant="outline"
+          onClick={() => { if (launch.origin.kind === "backlog") navigation.openWorkspace("pipelines", workflowRunTarget(launch.origin.parentRunId)); }}>
+          Open parent workflow
+        </Button>}
         {launch?.checklistItem && <p>Checklist item <code className="break-all">{launch.checklistItem.itemId}</code>
           {" · "}Revision {launch.checklistItem.revision} · {launch.checklistItem.checked ? "Checked" : "Reopened"}</p>}
       </div>
@@ -193,6 +198,36 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
           </section>}
           <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity}
             initialComparison={review?.nodeId === active.node.instance.id ? review.selection : undefined} />
+          {snapshot.automaticAgentWaits?.filter(({ nodeId, unitId }) => nodeId === active.node.instance.id
+            && (unitId === null || unitId === unit?.unit.id))
+            .map(({ reason }, index) => <p className="pipeline-note" key={index} role="status">
+              {reason ?? "Waiting for automatic dispatch"}
+            </p>)}
+          {snapshot.automaticPreparationWaits?.filter(({ nodeId }) => nodeId === active.node.instance.id)
+            .map(({ nodeId, reason }) => <p className="pipeline-note" key={nodeId} role="status">
+              {reason ?? "Waiting for automatic worktree preparation"}
+            </p>)}
+          {snapshot.testPhaseWaits?.filter(({ nodeId, unitId }) => nodeId === active.node.instance.id && unitId === unit?.unit.id)
+            .map(({ unitId, reason }) => <p className="pipeline-note" key={unitId} role="status">
+              {reason ?? "Waiting for the registered test check"}
+            </p>)}
+          {snapshot.integratedChecksWaits?.filter(({ nodeId }) => nodeId === active.node.instance.id)
+            .map(({ nodeId, reason }) => <p className="pipeline-note" key={nodeId} role="status">
+              {reason ?? "Waiting for checks on the integrated revision"}
+            </p>)}
+          {snapshot.githubWaits?.filter(({ nodeId, unitId }) => nodeId === active.node.instance.id &&
+            (unitId === null || unitId === unit?.unit.id))
+            .map(({ nodeId, reason }) => <p className="pipeline-note" key={nodeId} role="status">
+              {reason ?? "Waiting for confirmed GitHub evidence"}
+            </p>)}
+          {snapshot.backlogExecutions?.filter(({ nodeId }) => nodeId === active.node.instance.id)
+            .map(({ backlogArtifactId, state, tasks, reason }) => <section key={backlogArtifactId} aria-label="Backlog child workflows" className="pipeline-stack">
+              {state === "pending" && <p role="status">{reason ?? "Waiting for eligible tasks and verified merges."}</p>}
+              {tasks.map(({ key, workflowRunId }) => <Button type="button" variant="outline" key={workflowRunId}
+                onClick={() => navigation.openWorkspace("pipelines", workflowRunTarget(workflowRunId))}>
+                Open task workflow {key}
+              </Button>)}
+            </section>)}
           <WorkflowExecutionHost snapshot={snapshot} node={active.node} />
           <WorkflowExecutionUnitChecks key={`checks:${active.node.instance.id}`} snapshot={snapshot} node={active.node} unit={unit} />
           <WorkflowDiffStage snapshot={snapshot} node={active.node} />
@@ -209,7 +244,13 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
   const execution = useQuery({
     queryKey: ["repository-delivery", projectId, "execution", runId], queryFn: () => invoke<WorkflowExecutionSnapshot | null>("inspect_workflow_execution", { projectId, runId }),
     enabled: Boolean(runId),
-    refetchInterval: ({ state }) => state.data?.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
+    refetchInterval: ({ state }) => Boolean(state.data?.automaticAgentWaits?.length) ||
+      Boolean(state.data?.automaticPreparationWaits?.length) ||
+      Boolean(state.data?.testPhaseWaits?.length) ||
+      Boolean(state.data?.integratedChecksWaits?.length) ||
+      Boolean(state.data?.githubWaits?.length) ||
+      state.data?.backlogExecutions?.some(({ state }) => state === "pending") ||
+      state.data?.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
       state.data?.jobs.some(({ job }) => job.queuedRecovery || job.downstreamWait ||
         ["starting", "running", "waiting_for_input"].includes(job.latestAttempt?.status ?? "") || job.queueState === "queued" && !job.latestAttempt) ? 900 : false,
   });

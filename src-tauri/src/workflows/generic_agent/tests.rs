@@ -162,6 +162,86 @@ fn submit_standalone(
 }
 
 #[tokio::test]
+async fn automatic_agent_dispatch_survives_pause_restart_and_duplicate_submission() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let database = dir.path().join("automatic-agent.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, dir.path()).await?;
+    let project = repo.project_id.clone();
+    let graph = standalone_graph("Inspect the pinned inputs.", Default::default())?;
+    launch_standalone(&store, &repo, "manual-dispatch", graph.clone()).await?;
+    assert!(store.next_workflow_agent().await?.is_none());
+
+    let version = store
+        .save_workflow_revision(project.clone(), "automatic-dispatch".into(), graph)
+        .await?;
+    let run = store
+        .launch_workflow_request(serde_json::from_value(json!({
+            "projectId": project, "workflow": version, "checkoutId": repo.checkout_id,
+            "requestId": "automatic-dispatch", "inputs": {}, "automatic": true,
+        }))?)
+        .await?;
+    let stage = store
+        .next_workflow_agent()
+        .await?
+        .context("Agent was not discovered")?;
+    let snapshot = store
+        .inspect_workflow_execution(project.clone(), run.id.clone())
+        .await?
+        .context("The workflow was not launched")?;
+    assert_eq!(snapshot.automatic_agent_waits.len(), 1);
+    let prompt = snapshot
+        .outputs
+        .into_iter()
+        .find(|output| {
+            output.artifact.node_instance_id == "prompt" && output.artifact.port == "text"
+        })
+        .context("Missing pinned prompt")?
+        .artifact;
+    let submit = || submit_standalone(&repo, &run, &prompt, SessionMode::ReadOnly);
+    store.set_job_queue_paused(true).await?;
+    assert!(store.next_workflow_agent().await?.is_none());
+    assert!(stage.enqueue(&store, submit()).await.is_err());
+    assert!(
+        store
+            .workflow_operator_jobs(project.clone(), run.id.clone())
+            .await?
+            .is_empty()
+    );
+    drop(store);
+
+    let store = Store::open(database.clone())?;
+    assert!(store.next_workflow_agent().await?.is_none());
+    store.set_job_queue_paused(false).await?;
+    let stage = store
+        .next_workflow_agent()
+        .await?
+        .context("Agent dispatch was lost on restart")?;
+    stage.enqueue(&store, submit()).await?;
+    assert!(stage.enqueue(&store, submit()).await.is_err());
+    assert!(stage.reconcile(&store).await?);
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    assert!(reopened.next_workflow_agent().await?.is_none());
+    let jobs = reopened
+        .workflow_operator_jobs(project, run.id.clone())
+        .await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].node_id, "agent");
+    assert_eq!(jobs[0].inputs, submit().artifacts);
+    let attempt = reopened
+        .claim_next_job(AdmissionEnvironment {
+            runner: "fixture-agent-runner".into(),
+            bridge_available: false,
+        })
+        .await?
+        .context("Automatic job did not enter ordinary queue admission")?;
+    assert_eq!(attempt.input[0].text, "Inspect the pinned inputs.");
+    Ok(())
+}
+
+#[tokio::test]
 async fn generic_agent_queues_the_wired_prompt_and_seals_one_read_only_response() -> Result<()> {
     const PROMPT: &str = "  Read the fixture and identify the exact marker.\n";
     const ANSWER: &str = "The exact marker is fixture-blue.";

@@ -267,6 +267,7 @@ async fn simulates_conditional_subflow_and_retains_the_saved_revision_without_pr
         SampleOutcome {
             state: TraceState::Failed,
             reason: Some("Sample exit code 1".into()),
+            failure_port: None,
             outputs: BTreeMap::new(),
         },
     );

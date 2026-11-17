@@ -52,6 +52,7 @@ mod merge_policy;
 mod milestones;
 mod mode_selection;
 mod replay_acceptance;
+mod test_phases;
 
 #[tokio::test]
 async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_working_branch()

@@ -21,7 +21,8 @@ pub use agile_events::{
     AgileEventData, AgileEventOrigin, AgilePipelineLink, AgilePipelineOrigin, ProjectWorkEvent,
 };
 pub(crate) use agile_events::{
-    WorkStateChanges, bind_workflow_trigger_origin, pipeline_work_origin,
+    WorkStateChanges, bind_workflow_child_origin, bind_workflow_trigger_origin,
+    pipeline_work_origin,
 };
 pub(crate) use agile_transition::{current_work_state, transition_work_in_transaction};
 pub(crate) use checklists::bind_checklist_job_mode;
@@ -41,8 +42,8 @@ pub use delivery::milestone::{
     DeliveryCompletionMilestone, DeliveryMilestonePolicy, PendingTaskDeliveryMerge,
 };
 pub(crate) use delivery::milestone::{
-    delivery_merge_candidate, load_delivery_milestone_policy, record_verified_task_delivery,
-    record_verified_task_merge,
+    delivery_merge_candidate, load_delivery_milestone_policy, load_workflow_milestone_policy,
+    record_verified_task_delivery, record_verified_task_merge,
 };
 pub(crate) use delivery::validate_repository_delivery_open;
 pub use delivery::{
@@ -131,20 +132,8 @@ impl Store {
         project_id: String,
         title: String,
     ) -> Result<ProjectEpic> {
-        ensure!(!title.trim().is_empty(), "epic title is empty");
-        let epic = ProjectEpic {
-            id: Uuid::new_v4().to_string(),
-            project_id,
-            title,
-        };
-        self.execute(move |db| {
-            db.execute(
-                "INSERT INTO project_epics(project_id, id, title) VALUES (?1, ?2, ?3)",
-                params![epic.project_id, epic.id, epic.title],
-            )?;
-            Ok(epic)
-        })
-        .await
+        self.execute(move |db| insert_project_epic(db, project_id, title))
+            .await
     }
 
     pub async fn create_project_task_in_epic(
@@ -331,6 +320,49 @@ pub(crate) fn load_project_work_hierarchy(
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ProjectWorkHierarchy { epics, work })
+}
+
+pub(crate) fn insert_project_epic(
+    db: &Connection,
+    project_id: String,
+    title: String,
+) -> Result<ProjectEpic> {
+    ensure!(!title.trim().is_empty(), "epic title is empty");
+    let epic = ProjectEpic {
+        id: Uuid::new_v4().to_string(),
+        project_id,
+        title,
+    };
+    db.execute(
+        "INSERT INTO project_epics(project_id, id, title) VALUES (?1, ?2, ?3)",
+        params![epic.project_id, epic.id, epic.title],
+    )?;
+    Ok(epic)
+}
+
+pub(crate) fn insert_planned_epic_task(
+    db: &Connection,
+    project: &str,
+    title: String,
+    epic_id: String,
+    description: String,
+    details: TaskDetails,
+    origin: &AgileEventOrigin,
+) -> Result<ProjectTask> {
+    let placement = TaskPlacement::Task {
+        epic_id: Some(epic_id),
+    };
+    let task = insert_project_work_record(db, project.into(), title, &placement)?;
+    activity::write_task_details(db, project, &task.id, details)?;
+    descriptions::write_description(
+        db,
+        project,
+        DescriptionOwner::Work(task.id.clone()),
+        None,
+        Some(description),
+    )?;
+    publish_work_creation(db, &task, placement, origin)?;
+    Ok(task)
 }
 
 pub(crate) fn insert_project_work(

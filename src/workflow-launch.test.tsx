@@ -17,6 +17,49 @@ afterEach(() => {
   ipc.mockReset();
 });
 
+it.each(["prompt", "markdown"])("sends only the selected request source (%s)", async (source) => {
+  const submitted: unknown[] = [];
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "workflow_authoring_bases") return [{
+      version: published, name: "Request workflow",
+      start: { fields: [], requiresDocument: false, requiresWork: false, requiresEvent: false, promptOrMarkdown: true },
+    }];
+    if (command === "registered_checkouts") return [
+      { projectId: "project", checkoutId: "checkout", checkoutRoot: "Current checkout" },
+    ];
+    if (command === "project_work_hierarchy") return { work: [] };
+    if (command === "list_repository_markdown_revisions") return [note];
+    if (command === "read_repository_markdown") return { revision: note, markdown: "Pinned Markdown" };
+    if (command === "launch_workflow_manual") {
+      submitted.push(args);
+      return { id: "request-run" };
+    }
+    throw new Error(command);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}>
+    <WorkflowLaunchPicker projectId="project" checkoutId="checkout" openWorkspace={vi.fn()} />
+  </QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Run published workflow" }));
+  const prompt = await screen.findByRole("textbox", { name: "Prompt" });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Start workflow" }).disabled).toBe(true);
+  fireEvent.change(prompt, { target: { value: "Typed request" } });
+  if (source === "markdown") {
+    fireEvent.change(screen.getByRole("combobox", { name: "Request source" }), { target: { value: "markdown" } });
+    await screen.findByText("Pinned Markdown");
+  }
+  const button = screen.getByRole<HTMLButtonElement>("button", { name: "Start workflow" });
+  await waitFor(() => expect(button.disabled).toBe(false));
+  fireEvent.click(button);
+  await waitFor(() => expect(submitted).toEqual([{
+    request: {
+      projectId: "project", workflow: published, checkoutId: "checkout", workId: null,
+      requestId: expect.any(String), documentRevisionId: source === "markdown" ? note.id : null,
+      inputs: source === "prompt" ? { prompt: "Typed request" } : {},
+    },
+  }]));
+});
+
 it.each([undefined, "selected-subtask"])("launches the selected immutable version for work %s", async (workId) => {
   const submitted: unknown[] = [];
   ipc.mockImplementation(async (command, args) => {
@@ -97,6 +140,7 @@ it("launches typed inputs in the selected project without a Markdown revision an
   fireEvent.change(screen.getByRole("textbox", { name: "title" }), { target: { value: "Pinned text" } });
   fireEvent.change(screen.getByRole("combobox", { name: "enabled" }), { target: { value: "false" } });
   fireEvent.click(screen.getByRole("checkbox", { name: "Provide empty" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Dispatch ready workflow stages automatically" }));
   expect(start.disabled).toBe(false);
   fireEvent.click(start);
   expect((await screen.findByRole("alert")).textContent).toContain("Response interrupted");
@@ -104,7 +148,8 @@ it("launches typed inputs in the selected project without a Markdown revision an
   await waitFor(() => expect(target).toHaveBeenCalledWith("pipelines", "run:typed-run"));
   expect(submitted).toEqual([{
     request: { projectId: "project", workflow: published, checkoutId: "other-checkout", documentRevisionId: null,
-      workId: "scoped-work", inputs: { title: "Pinned text", enabled: false, empty: null }, requestId: expect.any(String) },
+      workId: "scoped-work", inputs: { title: "Pinned text", enabled: false, empty: null },
+      automatic: true, requestId: expect.any(String) },
   }, submitted[0]]);
   expect(ipc.mock.calls.some(([command]) => command === "list_repository_markdown_revisions")).toBe(false);
 });

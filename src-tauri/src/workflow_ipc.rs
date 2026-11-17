@@ -19,9 +19,10 @@ use crate::conversation_runtime::selected_scope;
 
 pub mod approval;
 pub mod authoring;
-pub mod decisions;
 pub mod command;
 pub mod comparison;
+pub mod decisions;
+pub mod github;
 pub mod goal;
 pub mod graph_editor;
 pub mod inspection;

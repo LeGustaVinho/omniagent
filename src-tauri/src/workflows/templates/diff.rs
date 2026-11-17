@@ -114,7 +114,10 @@ pub(super) fn review_diff() -> WorkflowPackage {
             node(
                 "check",
                 VerifyReviewDiff,
-                NodeConfiguration::RequiredChecks { names: vec![] },
+                NodeConfiguration::RequiredChecks {
+                    names: vec![],
+                    parallel_groups: vec![],
+                },
             ),
             node("join", Join, NodeConfiguration::None),
             node("report", PublishDiffReport, NodeConfiguration::None),
@@ -200,10 +203,16 @@ pub(in crate::workflows) async fn verify(
     project: &str,
     git: &WorkflowArtifact,
     required: Vec<String>,
+    parallel_groups: Vec<Vec<String>>,
 ) -> Result<ScopedEvidence> {
     let candidate = &inspection(git)?.candidate;
     let checks = store
-        .verify_frozen_selected_candidate(project.into(), candidate.clone(), required)
+        .verify_frozen_selected_candidate(
+            project.into(),
+            candidate.clone(),
+            required,
+            parallel_groups,
+        )
         .await?;
     Ok(ScopedEvidence {
         task: super::super::TaskReference {

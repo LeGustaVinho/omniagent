@@ -78,7 +78,10 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
         (
             "verify-candidate",
             VerifyCandidate,
-            NodeConfiguration::RequiredChecks { names: Vec::new() },
+            NodeConfiguration::RequiredChecks {
+                names: Vec::new(),
+                parallel_groups: Vec::new(),
+            },
         ),
         ("accept", AcceptCandidate, None),
         ("commit", VerifyCommit, None),

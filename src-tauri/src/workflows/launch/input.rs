@@ -55,6 +55,12 @@ pub struct WorkflowStartField {
 #[serde(deny_unknown_fields)]
 pub struct TypedStartConfiguration {
     fields: Vec<WorkflowStartField>,
+    #[serde(rename = "promptOrMarkdown", default, skip_serializing_if = "is_false")]
+    prompt_or_markdown: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl TypedStartConfiguration {
@@ -63,7 +69,11 @@ impl TypedStartConfiguration {
     }
 
     pub(crate) fn accepts_automation(&self) -> bool {
-        self.fields.iter().all(|field| !field.required)
+        !self.prompt_or_markdown && self.fields.iter().all(|field| !field.required)
+    }
+
+    pub(crate) fn prompt_or_markdown(&self) -> bool {
+        self.prompt_or_markdown
     }
 
     pub(crate) fn valid(&self) -> bool {
@@ -77,6 +87,10 @@ impl TypedStartConfiguration {
         );
         let mut names = BTreeSet::new();
         for field in &self.fields {
+            ensure!(
+                !self.prompt_or_markdown || !matches!(field.name.as_str(), "prompt" | "request"),
+                "The Start request reserves the prompt and request field names"
+            );
             let mut chars = field.name.bytes();
             ensure!(
                 !field.name.is_empty()
@@ -116,11 +130,36 @@ impl TypedStartConfiguration {
         }
         for name in values.keys() {
             ensure!(
-                self.fields.iter().any(|field| &field.name == name),
+                self.fields.iter().any(|field| &field.name == name)
+                    || self.prompt_or_markdown && name == "prompt",
                 "Start input {name:?} is not declared by this revision"
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn launch_values(
+        &self,
+        submitted: &Map<String, Value>,
+        markdown: Option<&str>,
+    ) -> Result<Map<String, Value>> {
+        self.validate_values(submitted)?;
+        let mut values = submitted.clone();
+        if self.prompt_or_markdown {
+            let prompt = values.remove("prompt");
+            let request = match (prompt.as_ref(), markdown) {
+                (Some(Value::String(prompt)), None) => prompt.as_str(),
+                (None, Some(markdown)) => markdown,
+                _ => anyhow::bail!("Provide either a prompt or a saved Markdown revision"),
+            };
+            ensure!(!request.trim().is_empty(), "The Start request is empty");
+            ensure!(
+                request.len() <= MAX_START_BYTES,
+                "The Start request exceeds the workflow input size limit"
+            );
+            values.insert("request".into(), Value::String(request.into()));
+        }
+        Ok(values)
     }
 }
 
@@ -132,6 +171,8 @@ pub struct WorkflowStartSchema {
     pub(crate) requires_document: bool,
     pub(crate) requires_work: bool,
     pub(crate) requires_event: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) requires_backlog_plan: bool,
 }
 
 impl WorkflowStartSchema {
@@ -155,10 +196,28 @@ impl WorkflowStartSchema {
             requires_document: wired("document"),
             requires_work: wired("task"),
             requires_event: wired("event"),
+            requires_backlog_plan: wired("plan"),
         })
     }
 
     pub(crate) fn accepts_automation(&self) -> bool {
-        self.configuration.accepts_automation()
+        !self.requires_backlog_plan && self.configuration.accepts_automation()
+    }
+
+    pub(crate) fn validate_backlog_child(&self) -> Result<()> {
+        ensure!(
+            !self.requires_document
+                && !self.requires_event
+                && !self.configuration.prompt_or_markdown,
+            "Backlog children start with the dispatched task and cannot require another launch source"
+        );
+        ensure!(
+            self.requires_backlog_plan && self.requires_work,
+            "Connect the child's Start plan and task outputs to its delivery graph"
+        );
+        self.configuration.validate_values(&Map::from_iter([(
+            "backlog".into(),
+            Value::Object(Map::new()),
+        )]))
     }
 }

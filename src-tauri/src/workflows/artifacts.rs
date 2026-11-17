@@ -60,9 +60,20 @@ pub struct ApprovalReference {
 pub enum ArtifactValue {
     AgentResponse(super::generic_agent::WorkflowAgentResponse),
     AgileEvent(super::launch::WorkflowLaunchEvent),
-    ResultSummary { summary: String, artifacts: Vec<String> },
+    ResultSummary {
+        summary: String,
+        artifacts: Vec<String>,
+    },
     WorkflowContext(super::agile_nodes::WorkflowContext),
     JsonObject(serde_json::Map<String, serde_json::Value>),
+    EvidenceSet(Vec<super::data_nodes::WorkflowEvidence>),
+    TestPhaseEvidence(super::test_phase::TestPhaseEvidence),
+    IntegratedRevision(super::integrated_checks::IntegratedRevision),
+    IntegratedChecksEvidence(super::integrated_checks::IntegratedChecksEvidence),
+    GithubResearch(super::github::ResearchEvidence),
+    GithubPullRequest(super::github::PullEvidence),
+    GithubCi(super::github::CiEvidence),
+    Backlog(super::backlog::BacklogReceipt),
     RenderedText(String),
     ComparisonResults(super::comparison::stage::WorkflowComparisonResults),
     AgileTarget(super::agile_nodes::AgileTarget),
@@ -72,6 +83,7 @@ pub enum ArtifactValue {
         run_id: String,
         event_sequence: i64,
     },
+    BacklogPlan(super::backlog::BacklogDeliveryPlan),
     Review {
         run_id: String,
     },
@@ -105,11 +117,19 @@ impl ArtifactValue {
             Self::ResultSummary { .. } => ArtifactKind::ResultSummary,
             Self::WorkflowContext(_) => ArtifactKind::WorkflowContext,
             Self::JsonObject(_) => ArtifactKind::JsonObject,
+            Self::EvidenceSet(_) => ArtifactKind::EvidenceSet,
+            Self::TestPhaseEvidence(_) => ArtifactKind::TestPhaseEvidence,
+            Self::IntegratedRevision(_) => ArtifactKind::IntegratedRevision,
+            Self::IntegratedChecksEvidence(_) => ArtifactKind::IntegratedChecksEvidence,
+            Self::GithubResearch(_) => ArtifactKind::GithubResearch,
+            Self::GithubPullRequest(_) => ArtifactKind::GithubPullRequest,
+            Self::GithubCi(_) => ArtifactKind::GithubCi,
+            Self::Backlog(_) => ArtifactKind::Backlog,
             Self::RenderedText(_) => ArtifactKind::RenderedText,
             Self::ComparisonResults(_) => ArtifactKind::ComparisonResults,
             Self::AgileTarget(_) => ArtifactKind::AgileTarget,
             Self::AgileProgressReceipt(_) => ArtifactKind::AgileProgressReceipt,
-            Self::Plan { .. } => ArtifactKind::Plan,
+            Self::Plan { .. } | Self::BacklogPlan(_) => ArtifactKind::Plan,
             Self::Review { .. } => ArtifactKind::Review,
             Self::Task(_) => ArtifactKind::Task,
             Self::Approval(_) => ArtifactKind::Approval,
@@ -320,6 +340,23 @@ impl Store {
                     .await?;
                 self.workflow_plan_text(run_id.clone(), *event_sequence)
                     .await?;
+            }
+            ArtifactValue::BacklogPlan(plan) => {
+                let launch = self
+                    .workflow_launch(project.into(), run.into())
+                    .await?
+                    .context("The backlog plan has no owning launch")?;
+                ensure!(
+                    matches!(&launch.origin, super::WorkflowLaunchOrigin::Backlog { parent_run_id, work_id, .. }
+                        if parent_run_id == &plan.parent_run_id && work_id == &plan.task.task.task_id)
+                        && launch.checkout_id == plan.checkout_id
+                        && plan.task.task.project_id == project
+                        && self
+                            .pinned_workflow_node(project.into(), run.into(), node.into())
+                            .await?
+                            .is_some_and(|pinned| pinned.instance.kind == BuiltinNode::TypedStart),
+                    "The plan is outside its dispatched backlog task"
+                );
             }
             ArtifactValue::Review { run_id } => {
                 self.check_artifact_attempt(
@@ -534,11 +571,20 @@ impl Store {
             | ArtifactValue::ResultSummary { .. }
             | ArtifactValue::WorkflowContext(_)
             | ArtifactValue::JsonObject(_)
+            | ArtifactValue::EvidenceSet(_)
+            | ArtifactValue::TestPhaseEvidence(_)
+            | ArtifactValue::IntegratedRevision(_)
+            | ArtifactValue::IntegratedChecksEvidence(_)
+            | ArtifactValue::GithubResearch(_)
+            | ArtifactValue::GithubPullRequest(_)
+            | ArtifactValue::GithubCi(_)
+            | ArtifactValue::Backlog(_)
             | ArtifactValue::RenderedText(_)
             | ArtifactValue::ComparisonResults(_)
             | ArtifactValue::AgileTarget(_)
             | ArtifactValue::AgileProgressReceipt(_)
-            | ArtifactValue::JsonItem(_) | ArtifactValue::IterationResults(_) => {
+            | ArtifactValue::JsonItem(_)
+            | ArtifactValue::IterationResults(_) => {
                 // These values are issued only by the control scheduler for a pinned port.
             }
         }
@@ -674,17 +720,33 @@ pub(super) fn insert_scoped_artifact(
         }),
         "artifact kind does not match the pinned output port"
     );
-    let stage_scoped = matches!(pinned.definition.kind, BuiltinNode::RequestInput | BuiltinNode::Approval
-        | BuiltinNode::SetFields | BuiltinNode::FilterMapList | BuiltinNode::BuildText
-        | BuiltinNode::FindWork | BuiltinNode::UpdateProgress | BuiltinNode::CompareModels
-        | BuiltinNode::Agent | BuiltinNode::SummarizeResult | BuiltinNode::LoadWorkContext | BuiltinNode::ManageWork);
+    let stage_scoped = matches!(
+        pinned.definition.kind,
+        BuiltinNode::RequestInput
+            | BuiltinNode::Approval
+            | BuiltinNode::SetFields
+            | BuiltinNode::FilterMapList
+            | BuiltinNode::BuildText
+            | BuiltinNode::ValidateOutput
+            | BuiltinNode::CollectEvidence
+            | BuiltinNode::QualityGate
+            | BuiltinNode::FindWork
+            | BuiltinNode::UpdateProgress
+            | BuiltinNode::CompareModels
+            | BuiltinNode::Agent
+            | BuiltinNode::SummarizeResult
+            | BuiltinNode::LoadWorkContext
+            | BuiltinNode::ManageWork
+    );
     if stage_scoped {
         let workflow = super::runtime::load_workflow_run(db, project, &run)?
             .context("The workflow owning the artifact is unavailable")?;
         let definition = super::runtime::load_definition(db, project, &workflow.version)?
             .context("The workflow definition owning the artifact is unavailable")?;
-        ensure!(super::control::unit_nodes(&definition).contains(node.as_str()) == unit_id.is_some(),
-            "artifact must use its derived unit scope");
+        ensure!(
+            super::control::unit_nodes(&definition).contains(node.as_str()) == unit_id.is_some(),
+            "artifact must use its derived unit scope"
+        );
         if let Some(unit) = &unit_id {
             let current: bool = db.query_row(
                 "SELECT EXISTS (SELECT 1 FROM workflow_delivery_units
@@ -694,8 +756,10 @@ pub(super) fn insert_scoped_artifact(
             ensure!(current, "artifact must use the active plan's unit scope");
         }
     } else {
-        ensure!(pinned.definition.kind.per_unit() == unit_id.is_some(),
-            "artifact must use its pinned unit scope");
+        ensure!(
+            pinned.definition.kind.per_unit() == unit_id.is_some(),
+            "artifact must use its pinned unit scope"
+        );
     }
     let bytes = serde_json::to_vec(&(&run, &node, &port, &unit_id, &value))?;
     let artifact = WorkflowArtifact {

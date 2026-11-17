@@ -270,6 +270,8 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
             version: first,
             checkout_id: original.revision.checkout_id.clone(),
             source: Some(original.revision),
+            source_commit: None,
+            automatic: false,
             origin: WorkflowLaunchOrigin::Agile {
                 request_id: request.request_id.clone(),
                 work_id: subtask.id,
@@ -360,6 +362,7 @@ async fn typed_start_records_exact_inputs_without_markdown_and_deduplicates_laun
         request_id: Uuid::new_v4().to_string(),
         work_id: Some(work.id.clone()),
         inputs,
+        automatic: false,
     };
     for invalid in [
         TypedWorkflowLaunch {
@@ -446,6 +449,128 @@ async fn typed_start_records_exact_inputs_without_markdown_and_deduplicates_laun
 }
 
 #[tokio::test]
+async fn typed_start_normalizes_one_request_and_pins_its_checkout_head() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let root = std::path::Path::new(&repo.checkout_root);
+    let note = root.join("brief.md");
+    std::fs::write(&note, "# Exact saved request")?;
+    let saved = store
+        .capture_repository_markdown(repo.checkout_id.clone(), note.clone())
+        .await?;
+    std::fs::write(&note, "# New draft")?;
+    let workflow = store.save_workflow_revision(
+        repo.project_id.clone(),
+        "request-intake".into(),
+        serde_json::from_value(json!({
+            "name": "Request intake",
+            "nodes": [
+                {"id":"entry","kind":"typed_start","configuration":{
+                    "kind":"typed_start","fields":[],"promptOrMarkdown":true
+                }},
+                {"id":"validate","kind":"validate_output","configuration":{"kind":"validate_output",
+                    "schema":{"type":"object","required":["request"],"properties":{"request":{"type":"string"}}}
+                }},
+                {"id":"size","kind":"validate_output","configuration":{"kind":"validate_output",
+                    "schema":{"type":"object","properties":{"request":{"type":"string","maxLength":20}}}
+                }},
+                {"id":"render","kind":"build_text","configuration":{"kind":"build_text","template":"{{request}}"}},
+                {"id":"collect","kind":"collect_evidence","configuration":{"kind":"none"}},
+                {"id":"gate","kind":"quality_gate","configuration":{"kind":"quality_gate","rules":{
+                    "The exact typed request is approved":{"op":"equals","pointer":"/0/value/evidence/request","value":"Exact typed request"}
+                }}}
+            ],
+            "wires": [
+                {"from":{"node":"entry","port":"start"},"to":{"node":"validate","port":"ready"}},
+                {"from":{"node":"entry","port":"inputs"},"to":{"node":"validate","port":"source"}},
+                {"from":{"node":"entry","port":"start"},"to":{"node":"size","port":"ready"}},
+                {"from":{"node":"entry","port":"inputs"},"to":{"node":"size","port":"source"}},
+                {"from":{"node":"validate","port":"completed"},"to":{"node":"render","port":"ready"}},
+                {"from":{"node":"validate","port":"object"},"to":{"node":"render","port":"values"}},
+                {"from":{"node":"entry","port":"start"},"to":{"node":"collect","port":"ready"}},
+                {"from":{"node":"validate","port":"object"},"to":{"node":"collect","port":"evidence"}},
+                {"from":{"node":"size","port":"object"},"to":{"node":"collect","port":"evidence"}},
+                {"from":{"node":"collect","port":"completed"},"to":{"node":"gate","port":"ready"}},
+                {"from":{"node":"collect","port":"evidence"},"to":{"node":"gate","port":"evidence"}}
+            ]
+        }))?,
+    ).await?;
+    let request = TypedWorkflowLaunch {
+        project_id: repo.project_id.clone(),
+        workflow,
+        checkout_id: repo.checkout_id,
+        document_revision_id: None,
+        request_id: "request-intake".into(),
+        work_id: None,
+        inputs: Default::default(),
+        automatic: false,
+    };
+    let prompt: Map<String, Value> =
+        serde_json::from_value(json!({"prompt": "Exact typed request"}))?;
+    for (inputs, document_revision_id) in [
+        (Map::new(), None),
+        (serde_json::from_value(json!({"prompt": "  "}))?, None),
+        (prompt.clone(), Some(saved.revision.id.clone())),
+    ] {
+        assert!(
+            store
+                .launch_workflow_request(WorkflowLaunchRequest::Typed(TypedWorkflowLaunch {
+                    inputs,
+                    document_revision_id,
+                    ..request.clone()
+                }))
+                .await
+                .is_err()
+        );
+    }
+    for (inputs, document_revision_id, expected, gate) in [
+        (prompt, None, "Exact typed request", "passed"),
+        (
+            Map::new(),
+            Some(saved.revision.id),
+            "# Exact saved request",
+            "blocked",
+        ),
+        (
+            serde_json::from_value(json!({"prompt":"Needs revision"}))?,
+            None,
+            "Needs revision",
+            "revise",
+        ),
+    ] {
+        let request = WorkflowLaunchRequest::Typed(TypedWorkflowLaunch {
+            request_id: Uuid::new_v4().to_string(),
+            inputs,
+            document_revision_id,
+            ..request.clone()
+        });
+        let run = store.launch_workflow_request(request.clone()).await?;
+        assert_eq!(store.launch_workflow_request(request).await?, run);
+        let receipt = store
+            .workflow_launch(repo.project_id.clone(), run.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(receipt.source_commit, crate::repository::base_commit(root)?);
+        let outputs = store
+            .workflow_run_artifacts(repo.project_id.clone(), run.id)
+            .await?;
+        assert!(outputs.iter().any(|artifact| artifact.port == "text"
+            && artifact.node_instance_id == "render"
+            && artifact.value == ArtifactValue::RenderedText(expected.into())));
+        let decision = outputs
+            .iter()
+            .find(|artifact| artifact.node_instance_id == "gate")
+            .context("Missing quality decision")?;
+        let ArtifactValue::JsonObject(decision) = &decision.value else {
+            anyhow::bail!("Expected a structured quality decision");
+        };
+        assert_eq!(decision["decision"], gate);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn typed_start_requires_a_pinned_markdown_revision_when_document_is_wired() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let store = Store::open(directory.path().join("store.sqlite"))?;
@@ -474,6 +599,7 @@ async fn typed_start_requires_a_pinned_markdown_revision_when_document_is_wired(
         request_id: Uuid::new_v4().to_string(),
         work_id: None,
         inputs: Map::new(),
+        automatic: false,
     };
     assert!(
         store

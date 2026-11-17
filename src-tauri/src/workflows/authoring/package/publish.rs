@@ -954,7 +954,18 @@ impl<'a> GraphCompiler<'a> {
                     artifact.name
                 )),
                 PackageArtifactBody::Pipeline { .. } => {
-                    anyhow::bail!("A pipeline reference requires a published subflow")
+                    ensure!(
+                        node.kind == BuiltinNode::RunBacklog,
+                        "The pipeline reference for {slot} requires a Run backlog node"
+                    );
+                    let NodeConfiguration::RunBacklog(configuration) = &mut node.configuration
+                    else {
+                        anyhow::bail!("Run backlog node {slot} needs a dispatch configuration");
+                    };
+                    configuration.child = WorkflowRevision {
+                        id: artifact.version.id.clone(),
+                        revision: artifact.version.revision.clone(),
+                    };
                 }
             }
         }
@@ -1002,6 +1013,16 @@ impl<'a> GraphCompiler<'a> {
                 validate_command_binding(self.db, self.project, command).with_context(|| {
                     format!("The Command registration for {} is unavailable", node.id)
                 })?;
+            }
+            if self.validate_bindings
+                && let NodeConfiguration::RunBacklog(config) = &node.configuration
+            {
+                crate::workflows::backlog::execution::validate_child_binding(
+                    self.db,
+                    self.project,
+                    config,
+                )
+                .with_context(|| format!("Could not resolve the child workflow for {}", node.id))?;
             }
             if !declared_mcp.contains(node.id.as_str())
                 && let NodeConfiguration::McpTool(tool) = &node.configuration

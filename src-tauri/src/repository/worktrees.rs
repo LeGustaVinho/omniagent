@@ -251,6 +251,85 @@ pub async fn provision_task_worktree(
     task_id: String,
     source_checkout_id: String,
 ) -> Result<ManagedWorktree> {
+    provision_task_worktree_at(
+        store,
+        default_root,
+        project_id,
+        task_id,
+        source_checkout_id,
+        None,
+    )
+    .await
+}
+
+pub(crate) struct IntegratedWorktreeBase {
+    pub branch: String,
+    pub prerequisite_commits: Vec<String>,
+    pub verified_tip: Option<String>,
+}
+
+impl IntegratedWorktreeBase {
+    pub(crate) fn registered_tip(
+        &self,
+        db: &Connection,
+        project: &str,
+        checkout: &str,
+    ) -> Result<String> {
+        let source = db
+            .query_row(
+                "SELECT c.root, c.git_dir, p.git_common_dir
+             FROM checkouts c JOIN projects p ON c.project_id = p.id
+             WHERE p.id = ?1 AND c.id = ?2",
+                params![project, checkout],
+                |row| {
+                    Ok(Source {
+                        root: PathBuf::from(row.get::<_, String>(0)?),
+                        git_dir: row.get(1)?,
+                        common: row.get(2)?,
+                        override_root: None,
+                    })
+                },
+            )
+            .context("The integration checkout is unavailable")?;
+        validate_source(&source)?;
+        self.verify(&git_path()?, &source, None)
+    }
+
+    fn verify(&self, git: &Path, source: &Source, reserved: Option<&str>) -> Result<String> {
+        let head = match &self.verified_tip {
+            Some(head) => head.clone(),
+            None => branch_head(git, &source.root, &self.branch)?
+                .context("The pinned integration branch is unavailable in the task repository")?,
+        };
+        let base = reserved.unwrap_or(&head);
+        require_ancestor(git, &source.root, base, &head)
+            .context("The saved worktree base is outside the current integration branch")?;
+        for prerequisite in &self.prerequisite_commits {
+            require_ancestor(git, &source.root, prerequisite, base)
+                .context("The worktree base does not contain every verified prerequisite merge")?;
+        }
+        Ok(base.into())
+    }
+}
+
+fn require_ancestor(git: &Path, source: &Path, ancestor: &str, tip: &str) -> Result<()> {
+    super::git_review::validate_oid(ancestor)?;
+    super::git_review::validate_oid(tip)?;
+    let output = git_command(git, source)
+        .args(["merge-base", "--is-ancestor", ancestor, tip])
+        .output()?;
+    check(output, "verify worktree base ancestry")?;
+    Ok(())
+}
+
+pub(crate) async fn provision_task_worktree_at(
+    store: &Store,
+    default_root: PathBuf,
+    project_id: String,
+    task_id: String,
+    source_checkout_id: String,
+    integration: Option<IntegratedWorktreeBase>,
+) -> Result<ManagedWorktree> {
     let scope = task_id;
     let (project, task) = (project_id.clone(), scope.clone());
     let source = store
@@ -285,9 +364,17 @@ pub async fn provision_task_worktree(
         })
         .await?;
     let task_id = target.owner;
+    ensure!(
+        integration.is_none() || scope == task_id,
+        "A backlog delivery requires a dedicated task worktree"
+    );
     if let Some((worktree, git_dir, common)) = existing {
         let (_gate, worktree) = tokio::task::spawn_blocking(move || {
             verify_managed(&worktree, &git_dir, &common)?;
+            if let Some(integration) = integration {
+                validate_source(&source)?;
+                integration.verify(&git_path()?, &source, Some(&worktree.base_commit))?;
+            }
             Ok::<_, anyhow::Error>((gate, worktree))
         })
         .await??;
@@ -312,16 +399,34 @@ pub async fn provision_task_worktree(
         ).optional()?)
     }).await?;
     let new_intent = pending.is_none();
-    let (gate, source, git, provision) = tokio::task::spawn_blocking({
+    let (gate, source, git, provision, integration) = tokio::task::spawn_blocking({
         let (project, task) = (project_id.clone(), task_id.clone());
         move || {
             let git = git_path()?;
             validate_source(&source)?;
+            let integration_base = integration
+                .as_ref()
+                .map(|integration| {
+                    integration.verify(
+                        &git,
+                        &source,
+                        pending.as_ref().map(|saved| saved.base_commit.as_str()),
+                    )
+                })
+                .transpose()?;
             let provision = match pending {
                 Some(saved) => saved,
-                None => prepare_provision(&source, &git, &default_root, &project, &task)?,
+                None => prepare_named_provision_at(
+                    &source,
+                    &git,
+                    &default_root,
+                    &project,
+                    &task,
+                    "task",
+                    integration_base,
+                )?,
             };
-            Ok::<_, anyhow::Error>((gate, source, git, provision))
+            Ok::<_, anyhow::Error>((gate, source, git, provision, integration))
         }
     })
     .await??;
@@ -363,6 +468,9 @@ pub async fn provision_task_worktree(
     let (gate, checkout, inventory) = tokio::task::spawn_blocking({
         let provision = provision.clone();
         move || {
+            if let Some(integration) = integration {
+                integration.verify(&git, &source, Some(&provision.base_commit))?;
+            }
             let checkout = materialize(&git, &source, &provision)?;
             let inventory = customizations::inspect(&provision.root, &provision.root)?;
             Ok::<_, anyhow::Error>((gate, checkout, inventory))
@@ -419,16 +527,6 @@ fn validate_source(source: &Source) -> Result<()> {
     Ok(())
 }
 
-fn prepare_provision(
-    source: &Source,
-    git: &Path,
-    default_root: &Path,
-    project_id: &str,
-    task_id: &str,
-) -> Result<Provision> {
-    prepare_named_provision(source, git, default_root, project_id, task_id, "task")
-}
-
 fn prepare_named_provision(
     source: &Source,
     git: &Path,
@@ -436,6 +534,26 @@ fn prepare_named_provision(
     project_id: &str,
     reservation_id: &str,
     branch_kind: &str,
+) -> Result<Provision> {
+    prepare_named_provision_at(
+        source,
+        git,
+        default_root,
+        project_id,
+        reservation_id,
+        branch_kind,
+        None,
+    )
+}
+
+fn prepare_named_provision_at(
+    source: &Source,
+    git: &Path,
+    default_root: &Path,
+    project_id: &str,
+    reservation_id: &str,
+    branch_kind: &str,
+    pinned_base: Option<String>,
 ) -> Result<Provision> {
     let project_component = Uuid::parse_str(project_id)?.to_string();
     let task_component = Uuid::parse_str(reservation_id)?.to_string();
@@ -464,8 +582,10 @@ fn prepare_named_provision(
         branch_head(git, &source.root, &branch)?.is_none(),
         "the requested worktree branch already exists"
     );
-    let base_commit =
-        base_commit(&source.root)?.context("the source checkout has no base commit")?;
+    let base_commit = match pinned_base {
+        Some(base) => base,
+        None => base_commit(&source.root)?.context("the source checkout has no base commit")?,
+    };
     Ok(Provision {
         root,
         branch,

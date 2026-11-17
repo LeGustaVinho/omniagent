@@ -7,7 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
-import { WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
+import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { connectionProblem, defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -254,6 +254,39 @@ it("configures a typed list and a bounded iteration in the package graph", async
     kind: "for_each", maxItems: 12, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "check",
   });
   expect(edited.wires).toContainEqual(wire("list", "items", "for-each", "items"));
+});
+
+it("exposes a typed port when a pinned Repeat until output is selected", async () => {
+  const repeat: WorkflowDefinition = { kind: "repeat_until", title: "Repeat until", revision: 1,
+    configuration: "repeat_until", executor: "repeat_subflow", effect: "none", inputs: [], outputs: [] };
+  const body = { ...context, inputs: [control("ready"), data("document", "markdown")],
+    outputs: [control("completed"), data("result", "markdown"), data("failed", "checks")] };
+  let edited: WorkflowGraph = { name: "Approved output", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "repeat", kind: "repeat_until", configuration: defaultConfiguration("repeat_until") },
+    { id: "context", kind: "load_context", configuration: { kind: "none" } },
+  ], wires: [] };
+  const catalog = [start, repeat, context];
+  function Editor() {
+    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
+    edited = state.graph;
+    const subflow = (id: string) => id === "repeat" ? body : undefined;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState}
+      definitions={editorDefinitions(state, { start, repeat, context }, catalog, subflow)} catalog={catalog}
+      problems={[]} disabled={false} subflowDefinitionForNode={subflow} />;
+  }
+  render(<Editor />);
+  const user = userEvent.setup();
+  const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "repeat");
+  const exports = within(inspector.getByRole("group", { name: "Export from the approved iteration" }));
+  expect(exports.queryByRole("checkbox", { name: "failed" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Connect from repeat.result" })).toBeNull();
+  await user.click(exports.getByRole("checkbox", { name: "result" }));
+  expect(edited.nodes.find(({ id }) => id === "repeat")?.configuration.exports).toEqual(["result"]);
+  await user.click(screen.getByRole("button", { name: "Connect from repeat.result" }));
+  await user.click(screen.getByRole("button", { name: "Connect to context.document" }));
+  expect(edited.wires).toContainEqual(wire("repeat", "result", "context", "document"));
 });
 
 it("connects named ports with the keyboard, validates replacements, and restores the exact graph on undo", async () => {

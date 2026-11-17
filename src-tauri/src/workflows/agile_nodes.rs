@@ -266,6 +266,7 @@ pub(super) fn find_work(
         .and_then(|receipt| receipt.checklist_item.as_ref());
     let pinned_task = launch.as_ref().and_then(|receipt| match &receipt.origin {
         super::WorkflowLaunchOrigin::Agile { work_id, .. }
+        | super::WorkflowLaunchOrigin::Backlog { work_id, .. }
         | super::WorkflowLaunchOrigin::Rule { work_id, .. } => Some(work_id.as_str()),
         super::WorkflowLaunchOrigin::Editor { .. } => None,
     });
@@ -451,6 +452,19 @@ pub(super) fn stage_port(
                 && inputs.contains_key("task") == action.needs_task()
                 && inputs.contains_key("title") == action.needs_title()
         }
+        NodeConfiguration::None if node.instance.kind == super::BuiltinNode::MaterializeBacklog => {
+            ["plan", "sdd", "bdd"]
+                .iter()
+                .all(|port| inputs.contains_key(*port))
+                && inputs.keys().all(|port| {
+                    !matches!(port.as_str(), "ready")
+                        && node
+                            .definition
+                            .inputs
+                            .iter()
+                            .any(|input| input.name == *port)
+                })
+        }
         _ => false,
     };
     ensure!(
@@ -605,17 +619,27 @@ fn apply_stage(db: &Connection, stage: &PendingStage) -> Result<()> {
                 bail!("The pinned Agile action requires a typed work target");
             };
             let receipt = update_progress(db, &stage.project, &stage.run, &target, action)?;
-            [
+            vec![
                 ("target", ArtifactValue::AgileTarget(receipt.target.clone())),
                 ("progress", ArtifactValue::AgileProgressReceipt(receipt)),
             ]
         }
         NodeConfiguration::ManageWork { action } => {
             let target = manage_work(db, stage, &inputs, *action)?;
-            [
+            vec![
                 ("task", ArtifactValue::Task(target.task.clone())),
                 ("target", ArtifactValue::AgileTarget(target)),
             ]
+        }
+        NodeConfiguration::None if node.instance.kind == super::BuiltinNode::MaterializeBacklog => {
+            let ArtifactValue::JsonObject(plan) =
+                stage_artifact(db, stage, &inputs, "plan", ArtifactKind::JsonObject)?
+            else {
+                bail!("The backlog plan needs a validated JSON object");
+            };
+            let backlog =
+                super::backlog::materialize(db, &stage.project, &stage.run, plan, &inputs)?;
+            vec![("backlog", ArtifactValue::Backlog(backlog))]
         }
         _ => bail!("The pending Agile action does not match its pinned node"),
     };

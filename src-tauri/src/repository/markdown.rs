@@ -238,7 +238,7 @@ fn insert_revision(
     Ok(())
 }
 
-fn load_markdown(
+pub(crate) fn load_markdown(
     db: &Connection,
     checkout: &str,
     revision: &str,

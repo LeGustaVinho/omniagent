@@ -85,6 +85,10 @@ impl Store {
                     validate_command_binding(&tx, &project, command)
                         .with_context(|| format!("Could not resolve the Command binding for {}", node.instance.id))?;
                 }
+                if let NodeConfiguration::RunBacklog(config) = &node.instance.configuration {
+                    crate::workflows::backlog::execution::validate_child_binding(&tx, &project, config)
+                        .with_context(|| format!("Could not resolve the child workflow for {}", node.instance.id))?;
+                }
             }
             if !reviewed.layout.is_empty() {
                 // Include reviewed canvas content in identity without changing

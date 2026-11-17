@@ -16,6 +16,7 @@ fn repeat_gates_writers_and_waits_for_their_outcomes() -> Result<()> {
             pointer: String::new(),
         },
         feedback: None,
+        exports: Vec::new(),
     };
 
     let outside_gate = expand_repeat(body("always", false)?, &configuration)

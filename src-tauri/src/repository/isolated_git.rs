@@ -21,6 +21,36 @@ pub(super) struct IsolatedGit {
 
 impl IsolatedGit {
     pub(super) fn open(paths: &CheckoutPaths, source: &Path, head: &str) -> Result<Self> {
+        let mut view = Self::open_objects(paths, source, head)?;
+        let git_dir = view.scratch.path().join(".git");
+        for file in ["info/exclude", "info/attributes"] {
+            let source_file = view.common.join(file);
+            if plain_metadata(&source_file)?.is_some_and(|metadata| metadata.is_file()) {
+                fs::create_dir_all(git_dir.join("info"))?;
+                copy_file(&source_file, &git_dir.join(file))?;
+            }
+        }
+        for key in [
+            "core.autocrlf",
+            "core.eol",
+            "core.filemode",
+            "core.ignorecase",
+        ] {
+            let output = git_command(&view.git, source)
+                .args(["config", "--get", key])
+                .output()?;
+            if output.status.code() == Some(1) && output.stderr.is_empty() {
+                continue;
+            }
+            let value = String::from_utf8(check(output, "read passive Git checkout settings")?)?;
+            view.passive_options
+                .push(format!("{key}={}", value.trim_end_matches(['\r', '\n'])));
+        }
+        Ok(view)
+    }
+
+    /// Use the registered object store with app-owned Git metadata and no checkout settings.
+    pub(super) fn open_objects(paths: &CheckoutPaths, source: &Path, head: &str) -> Result<Self> {
         let git = git_path()?;
         let scratch = tempfile::tempdir()?;
         let format = git_query(&git, source, &["rev-parse", "--show-object-format"])?;
@@ -34,36 +64,12 @@ impl IsolatedGit {
         )?;
         let git_dir = scratch.path().join(".git");
         fs::write(git_dir.join("HEAD"), format!("{head}\n"))?;
-        let common = PathBuf::from(&paths.git_common_dir);
-        for file in ["info/exclude", "info/attributes"] {
-            let source_file = common.join(file);
-            if plain_metadata(&source_file)?.is_some_and(|metadata| metadata.is_file()) {
-                fs::create_dir_all(git_dir.join("info"))?;
-                copy_file(&source_file, &git_dir.join(file))?;
-            }
-        }
-        let mut passive_options = Vec::new();
-        for key in [
-            "core.autocrlf",
-            "core.eol",
-            "core.filemode",
-            "core.ignorecase",
-        ] {
-            let output = git_command(&git, source)
-                .args(["config", "--get", key])
-                .output()?;
-            if output.status.code() == Some(1) && output.stderr.is_empty() {
-                continue;
-            }
-            let value = String::from_utf8(check(output, "read passive Git checkout settings")?)?;
-            passive_options.push(format!("{key}={}", value.trim_end_matches(['\r', '\n'])));
-        }
         Ok(Self {
             scratch,
             git,
             checkout: PathBuf::from(&paths.checkout_root),
-            common,
-            passive_options,
+            common: PathBuf::from(&paths.git_common_dir),
+            passive_options: Vec::new(),
         })
     }
 

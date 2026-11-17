@@ -22,7 +22,8 @@ type Member = {
   changesTruncated: boolean; dependencies: Record<string, Reference>;
   affectedUses: { consumer: Version; name: string; slot: string; pinnedRevision: string }[];
   diagnostics: string[]; requirements: string[]; simulatable: boolean;
-  sampleInputs: string[]; startSchema?: WorkflowStartSchema; sampleNodes: { nodeId: string; title: string; outputs: string[] }[];
+  sampleInputs: string[]; startSchema?: WorkflowStartSchema;
+  sampleNodes: { nodeId: string; title: string; outputs: string[]; failurePorts?: string[] }[];
   graphDefinitions?: WorkflowDefinitions;
 };
 type Preview = { revision: string; revisions: string[]; members: Member[] };
@@ -83,8 +84,10 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         setCanvas={(canvas) => changeCanvas(graph.key, canvas)}
         pinned={pinned} catalog={registry.data} disabled={disabled} graphs={graphs} memberKey={graph.key} edit={(next, references) => edit(graph.key, next, references)}
         openDraftSubflow={(key) => {
-          const child = graphs.find((member) => member.key === key && member.kind === "subflow");
-          return child ? <Button type="button" variant="outline" onClick={() => select(child.key)}>Open draft subflow</Button> : null;
+          const child = graphs.find((member) => member.key === key && ["subflow", "pipeline"].includes(member.kind ?? ""));
+          return child ? <Button type="button" variant="outline" onClick={() => select(child.key)}>
+            {child.kind === "subflow" ? "Open draft subflow" : "Open draft child workflow"}
+          </Button> : null;
         }} />}
   </section>;
 }
@@ -113,7 +116,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   const bindings = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<{ version: Version & { destination: "project" | "library" }; name: string }[]>("workflow_package_catalog", { projectId }),
-    enabled: graph.nodes.some(({ kind, configuration }) => ["subflow", "repeat_until", "for_each"].includes(kind)
+    enabled: graph.nodes.some(({ kind, configuration }) => ["subflow", "repeat_until", "for_each", "run_backlog"].includes(kind)
       || configuration.kind === "agent_role"),
   });
   const error = queries.find((query) => query.error)?.error;
@@ -152,23 +155,24 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     return { ...base, title: child.name, inputs: ports(child.inputs, "outputs"), outputs: ports(child.outputs, "outputs") };
   }
   const definitions = editorDefinitions(state, discovered, catalog, subflowDefinition);
+  const backlogBound = (id: string) => graph.nodes.some((node) => node.id === id && node.kind === "run_backlog") && Boolean(references[id]);
   function referencePicker(id: string) {
     const node = graph.nodes.find((candidate) => candidate.id === id);
     if (!node) return null;
     const kind = ["subflow", "repeat_until", "for_each"].includes(node.kind) ? "subflow"
-      : node.configuration.kind === "agent_role" ? "role" : null;
+      : node.kind === "run_backlog" ? "pipeline" : node.configuration.kind === "agent_role" ? "role" : null;
     if (!kind) return null;
     const reference = references[id];
     const choices: { label: string; reference: ReusableReference }[] = (bindings.data ?? [])
-      .filter(({ version }) => version.kind === kind)
+      .filter(({ version }) => version.kind === kind && (kind !== "pipeline" || version.destination === "project"))
       .map(({ version, name }) => ({ label: `${name} · ${version.destination} · ${version.revision.slice(0, 10)}`,
         reference: { source: "published", version } }));
-    if (kind === "subflow") choices.unshift(...graphs.filter(({ key, kind }) => key !== memberKey && kind === "subflow")
+    if (kind !== "role") choices.unshift(...graphs.filter((child) => child.key !== memberKey && child.kind === kind)
       .map(({ key, name }) => ({ label: `${name} · This draft`, reference: { source: "draft" as const, key } })));
     if (reference && !choices.some((option) => JSON.stringify(option.reference) === JSON.stringify(reference))) {
       choices.unshift({ label: "Current pinned reference", reference });
     }
-    return <label>{kind === "subflow" ? "Subflow revision" : "Role revision"}
+    return <label>{kind === "subflow" ? "Subflow revision" : kind === "pipeline" ? "Backlog child revision" : "Role revision"}
       <select disabled={disabled} value={reference ? JSON.stringify(reference) : ""} onChange={(event) => {
         const match = choices.find((choice) => JSON.stringify(choice.reference) === event.currentTarget.value);
         const next = { ...references };
@@ -213,7 +217,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     <ReusableCatalog projectId={projectId} disabled={disabled} onAdd={add} />
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
-      problems={graphProblems(presented, definitions)} disabled={disabled}
+      problems={graphProblems(presented, definitions, backlogBound)} disabled={disabled} backlogBound={backlogBound}
       allowDefinitionUpdates={(id) => !references[id] || graph.nodes.find((node) => node.id === id)?.configuration.kind === "agent_role"}
       editablePresetFields={Object.fromEntries([...presets.entries()].map(([id, preset]) => [id, preset.fields]))}
       goalRoleForNode={(id) => {
@@ -339,7 +343,12 @@ function SimulationTrace({ trace }: { trace: Trace }) {
   </section>;
 }
 
-type SampleOutcome = { state: "completed" | "failed" | "waiting"; outputs?: Record<string, unknown>; reason?: string };
+type SampleOutcome = {
+  state: "completed" | "failed" | "waiting";
+  outputs?: Record<string, unknown>;
+  reason?: string;
+  failurePort?: string;
+};
 
 function SimulateMember({ projectId, draftId, revision, member }: { projectId: string; draftId: string; revision: string; member: Member }) {
   const [inputs, setInputs] = useState<Record<string, unknown>>(() => Object.fromEntries(member.sampleInputs.map((name) =>
@@ -347,11 +356,22 @@ function SimulateMember({ projectId, draftId, revision, member }: { projectId: s
       : name === "inputs" && member.startSchema ? initialWorkflowStartFields(member.startSchema)
       : name === "inputs" ? {} : ""])));
   const [outcomes, setOutcomes] = useState<Record<string, SampleOutcome>>({});
+  const [source, setSource] = useState<"prompt" | "markdown">("prompt");
+  const [sampleRequest, setSampleRequest] = useState("");
+  const values = (inputs.inputs as Record<string, unknown> | undefined) ?? {};
+  const requestMode = member.startSchema?.promptOrMarkdown === true;
   const run = useMutation({ mutationFn: () => invoke<Trace>("simulate_workflow_package_revision", {
-    projectId, draftId, revision, memberKey: member.key, scenario: { inputs, outcomes },
+    projectId, draftId, revision, memberKey: member.key, scenario: {
+      inputs: requestMode ? {
+        ...inputs,
+        ...(source === "prompt"
+          ? { inputs: { ...values, prompt: sampleRequest } }
+          : { document: sampleRequest }),
+      } : inputs,
+      outcomes,
+    },
   }) });
   const stale = run.data && (run.data.revision !== revision || run.data.memberKey !== member.key);
-  const values = (inputs.inputs as Record<string, unknown> | undefined) ?? {};
   const missingStartField = member.startSchema?.fields.some(({ name, required }) => required && !Object.hasOwn(values, name));
   function setStartValue(name: string, value: unknown) {
     const updated = { ...values };
@@ -373,8 +393,19 @@ function SimulateMember({ projectId, draftId, revision, member }: { projectId: s
     });
   }
   return <section className="pipeline-stack" aria-label="Simulate selected artifact">
-    {member.sampleInputs.length > 0 && <fieldset className="pipeline-form grid gap-2" disabled={run.isPending}>
+    {(member.sampleInputs.length > 0 || requestMode) && <fieldset className="pipeline-form grid gap-2" disabled={run.isPending}>
       <legend>Sample inputs</legend>
+      {requestMode && <>
+        <label>Sample request source<select value={source} onChange={(event) => {
+          setSource(event.currentTarget.value === "markdown" ? "markdown" : "prompt");
+          run.reset();
+        }}>
+          <option value="prompt">Prompt</option>
+          <option value="markdown">Markdown</option>
+        </select></label>
+        <label>{source === "prompt" ? "Sample prompt" : "Sample Markdown"}<textarea value={sampleRequest}
+          onChange={(event) => { setSampleRequest(event.currentTarget.value); run.reset(); }} /></label>
+      </>}
       {member.sampleInputs.map((name) => name === "inputs" && member.startSchema
         ? member.startSchema.fields.map((field) => <div key={field.name} className="pipeline-stack">
           {!field.required && <label className="pipeline-inline-field">
@@ -393,7 +424,7 @@ function SimulateMember({ projectId, draftId, revision, member }: { projectId: s
     </fieldset>}
     {member.sampleNodes.length > 0 && <details className="pipeline-evidence"><summary>Sample outcomes</summary>
       <div className="pipeline-stack pt-2">
-        {member.sampleNodes.map(({ nodeId, title, outputs }) => {
+        {member.sampleNodes.map(({ nodeId, title, outputs, failurePorts = [] }) => {
           const outcome = outcomes[nodeId];
           return <fieldset key={nodeId} className="pipeline-form grid gap-2" disabled={run.isPending}>
             <legend>{title} · {nodeId}</legend>
@@ -409,6 +440,12 @@ function SimulateMember({ projectId, draftId, revision, member }: { projectId: s
               <option value="failed">Failed</option>
               <option value="waiting">Waiting</option>
             </select></label>
+            {outcome?.state === "failed" && failurePorts.length > 1 && <label>Failure branch
+              <select value={outcome.failurePort ?? "failed"} onChange={(event) =>
+                setOutcome(nodeId, { ...outcome, failurePort: event.currentTarget.value })}>
+                {failurePorts.map((port) => <option key={port} value={port}>{kindName(port)}</option>)}
+              </select>
+            </label>}
             {outcome && <label>Reason for {nodeId}<input value={outcome.reason ?? ""}
               onChange={(event) => setOutcome(nodeId, { ...outcome, reason: event.currentTarget.value })} /></label>}
             {outcome?.state === "completed" && outputs.map((name) =>
@@ -418,7 +455,9 @@ function SimulateMember({ projectId, draftId, revision, member }: { projectId: s
         })}
       </div>
     </details>}
-    <Button type="button" variant="outline" className="w-fit" disabled={run.isPending || missingStartField} onClick={() => run.mutate()}>Simulate</Button>
+    <Button type="button" variant="outline" className="w-fit"
+      disabled={run.isPending || missingStartField || (requestMode && !sampleRequest.trim())}
+      onClick={() => run.mutate()}>Simulate</Button>
     {run.isPending && <p role="status">Simulating saved revision…</p>}
     {run.error && <p role="alert">{String(run.error)}</p>}
     {run.data && !stale && <SimulationTrace trace={run.data} />}

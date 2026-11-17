@@ -25,6 +25,7 @@ import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
 import { ProjectSubagentControls } from "@/subagent-quota";
 import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { WorkflowGithubSettings } from "@/workflow-github-settings";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowMaintenanceSettings } from "@/workflow-maintenance";
 import "./settings-dialog.css";
@@ -303,6 +304,7 @@ function SettingsSession({
         return checkout && <>
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
           <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
+          <WorkflowGithubSettings key={`github-${checkout.projectId}`} projectId={checkout.projectId} />
         </>;
       case "automation":
         if (simulation || !checkout) return policy("automation");

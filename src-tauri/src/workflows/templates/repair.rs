@@ -34,6 +34,7 @@ pub(super) fn fix_failed_checks() -> WorkflowPackage {
             evidence_output: "checks".into(),
             until: ConditionPredicate::CandidateChecksPassed,
             feedback: None,
+            exports: Vec::new(),
         }),
     ));
     graph.wires.extend([
@@ -85,7 +86,10 @@ pub(super) fn fix_failed_checks() -> WorkflowPackage {
                     node(
                         "verify",
                         VerifyCandidate,
-                        NodeConfiguration::RequiredChecks { names: vec![] },
+                        NodeConfiguration::RequiredChecks {
+                            names: vec![],
+                            parallel_groups: vec![],
+                        },
                     ),
                 ],
                 wires: vec![

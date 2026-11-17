@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     os::windows::fs::OpenOptionsExt,
@@ -16,9 +17,14 @@ use super::{
 use crate::repository::{
     CheckoutPaths,
     documents::lock_directories,
-    git_command, git_path, inspect,
+    git_command, git_path,
+    github::RemoteMergeProof,
+    inspect,
     isolated_git::{IsolatedGit, check},
 };
+
+mod sync;
+pub(super) use sync::SourceSyncHead;
 
 pub(super) struct MergeRepository {
     git: PathBuf,
@@ -274,6 +280,50 @@ impl MergeRepository {
         Ok(())
     }
 
+    pub(super) fn delivery_paths(&self, commits: &[VerifiedCommit]) -> Result<Vec<String>> {
+        let first = commits
+            .first()
+            .context("delivery has no verified commits")?;
+        let view = self.objects(&first.base_commit)?;
+        let mut paths = BTreeSet::new();
+        for commit in commits {
+            paths.extend(changed_paths(&view, &commit.base_commit, &commit.sha)?);
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    pub(super) fn github_effective_paths(&self, base: &str, head: &str) -> Result<Vec<String>> {
+        validate_oid(head)?;
+        let view = self.merge_objects(base)?;
+        let tree = merge_tree(&view, base, head)?
+            .context("The tested GitHub head has no clean integration tree")?;
+        changed_paths(&view, base, &tree)
+    }
+
+    pub(super) fn verify_github_integration(
+        &self,
+        request: &DeliveryMergeRequest,
+        proof: &RemoteMergeProof,
+        commits: &[VerifiedCommit],
+    ) -> Result<()> {
+        let view = self.merge_objects(&proof.base_sha)?;
+        let integration = read_commit(&view, &proof.merge_sha)?;
+        ensure!(
+            integration.parents == [proof.base_sha.as_str(), proof.head_sha.as_str()]
+                && integration.tree == proof.tree_sha,
+            "The fetched GitHub merge does not have the approved parents and tested tree"
+        );
+        ensure!(
+            merge_tree(&view, &proof.base_sha, &proof.head_sha)?.as_ref() == Some(&proof.tree_sha),
+            "The GitHub merge tree differs from the locally recomputed integration"
+        );
+        ensure!(
+            is_ancestor(&view, &proof.merge_sha, &proof.destination_sha)?,
+            "The verified GitHub merge is absent from the fetched destination"
+        );
+        self.verify_incorporation(request, &proof.merge_sha, commits)
+    }
+
     pub(super) fn require_tree(&self, sha: &str, tree: Option<&str>) -> Result<()> {
         if let Some(tree) = tree {
             ensure!(
@@ -495,6 +545,11 @@ impl MergeRepository {
         IsolatedGit::open(&self.paths, &self.root, head)
     }
 
+    fn merge_objects(&self, head: &str) -> Result<IsolatedGit> {
+        validate_oid(head)?;
+        IsolatedGit::open_objects(&self.paths, &self.root, head)
+    }
+
     fn command(&self) -> Command {
         let mut command = git_command(&self.git, &self.root);
         command
@@ -539,6 +594,25 @@ fn is_ancestor(view: &IsolatedGit, ancestor: &str, tip: &str) -> Result<bool> {
     }
     check(output, "verify integration ancestry")?;
     Ok(true)
+}
+
+fn changed_paths(view: &IsolatedGit, base: &str, tree: &str) -> Result<Vec<String>> {
+    let changed = view.read(&[
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        base,
+        tree,
+        "--",
+    ])?;
+    changed
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| Ok(String::from_utf8(path.to_vec())?))
+        .collect()
 }
 
 fn merge_tree(view: &IsolatedGit, destination: &str, source: &str) -> Result<Option<String>> {

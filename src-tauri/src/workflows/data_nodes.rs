@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{ConditionPredicate, iteration::WorkflowJsonList};
+use super::{ConditionPredicate, Endpoint, iteration::WorkflowJsonList};
 
 const MAX_DATA_BYTES: usize = 192 * 1024;
 const MAX_POINTER_BYTES: usize = 2048;
@@ -246,6 +246,145 @@ pub(super) fn data_view(artifact: &Value) -> &Value {
         _ => return artifact,
     };
     artifact.pointer(pointer).unwrap_or(artifact)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowEvidence {
+    pub source: Endpoint,
+    #[serde(flatten)]
+    pub outcome: EvidenceOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum EvidenceOutcome {
+    Completed { artifact_id: String, value: Value },
+    Failed,
+    Skipped,
+}
+
+pub(super) fn evidence_text(evidence: &[WorkflowEvidence]) -> Result<String> {
+    let text = serde_json::to_string(evidence)?;
+    ensure!(
+        text.len() <= MAX_DATA_BYTES,
+        "The evidence set exceeds the node data size limit"
+    );
+    Ok(text)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualityGateConfiguration {
+    pub rules: std::collections::BTreeMap<String, ConditionPredicate>,
+}
+
+impl QualityGateConfiguration {
+    pub(super) fn valid(&self) -> bool {
+        !self.rules.is_empty()
+            && bounded_data(self).is_ok()
+            && self.rules.iter().all(|(label, predicate)| {
+                !label.trim().is_empty()
+                    && predicate.valid()
+                    && !matches!(predicate, ConditionPredicate::CandidateChecksPassed)
+            })
+    }
+
+    pub(super) fn evaluate(
+        &self,
+        evidence: &[WorkflowEvidence],
+    ) -> Result<(&'static str, Map<String, Value>)> {
+        ensure!(self.valid(), "Set at least one valid quality gate rule");
+        let blockers = evidence
+            .iter()
+            .filter_map(|entry| match &entry.outcome {
+                EvidenceOutcome::Completed { .. } => None,
+                _ => Some(format!("{}.{}", entry.source.node, entry.source.port)),
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::to_value(evidence)?;
+        let findings = self
+            .rules
+            .iter()
+            .filter_map(|(label, predicate)| (!predicate.test(&value)).then_some(label))
+            .collect::<Vec<_>>();
+        let decision = if evidence.is_empty() || !blockers.is_empty() {
+            "blocked"
+        } else if findings.is_empty() {
+            "passed"
+        } else {
+            "revise"
+        };
+        Ok((
+            decision,
+            Map::from_iter([
+                ("decision".into(), Value::String(decision.into())),
+                ("blockers".into(), serde_json::to_value(blockers)?),
+                ("findings".into(), serde_json::to_value(findings)?),
+            ]),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateOutputConfiguration {
+    pub schema: Value,
+}
+
+struct InlineSchema;
+
+impl jsonschema::Retrieve for InlineSchema {
+    fn retrieve(
+        &self,
+        _uri: &jsonschema::Uri<String>,
+    ) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err("Schemas must bundle their references".into())
+    }
+}
+
+impl ValidateOutputConfiguration {
+    pub(super) fn validate(&self) -> Result<jsonschema::Validator> {
+        bounded_data(&self.schema)?;
+        ensure!(self.schema.is_object(), "Set an output JSON Schema object");
+        jsonschema::options()
+            .with_retriever(InlineSchema)
+            .build(&self.schema)
+            .map_err(|_| {
+                anyhow::anyhow!("The output JSON Schema is invalid or has an external reference")
+            })
+    }
+
+    pub(super) fn parse(&self, text: &str) -> Result<Map<String, Value>> {
+        ensure!(
+            text.len() <= MAX_DATA_BYTES,
+            "The output exceeds the node data size limit"
+        );
+        let value = serde_json::from_str(text)
+            .map_err(|_| anyhow::anyhow!("The output must be one complete JSON object"))?;
+        self.evaluate(value)
+    }
+
+    pub(super) fn evaluate(&self, value: Value) -> Result<Map<String, Value>> {
+        bounded_data(&value)?;
+        ensure!(
+            value.is_object(),
+            "The output must be one complete JSON object"
+        );
+        let policy = self.validate()?;
+        ensure!(
+            policy.is_valid(&value),
+            "The output did not match the pinned JSON Schema"
+        );
+        let Value::Object(object) = value else {
+            unreachable!("the output object was checked")
+        };
+        Ok(object)
+    }
 }
 
 fn bounded_data(value: &impl Serialize) -> Result<()> {

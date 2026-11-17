@@ -3,6 +3,37 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn validate_output_requires_one_object_and_a_self_contained_schema() -> Result<()> {
+    let output = ValidateOutputConfiguration {
+        schema: json!({
+            "type": "object",
+            "properties": {"plan": {"$ref": "#/$defs/plan"}},
+            "required": ["plan"],
+            "additionalProperties": false,
+            "$defs": {"plan": {"type": "string", "minLength": 1}}
+        }),
+    };
+    assert_eq!(
+        Value::Object(output.parse(r#"{"plan":"Implement the check"}"#)?),
+        json!({"plan": "Implement the check"})
+    );
+    for invalid in [
+        r#"{"plan":false}"#,
+        r#"{"plan":""}"#,
+        "[]",
+        "{} {}",
+        "Draft: {}",
+    ] {
+        assert!(output.parse(invalid).is_err());
+    }
+    let remote = ValidateOutputConfiguration {
+        schema: json!({"$ref": "file:///untrusted-schema.json"}),
+    };
+    assert!(remote.validate().is_err());
+    Ok(())
+}
+
+#[test]
 fn set_fields_builds_nested_objects_from_literals_and_exact_input_paths() -> Result<()> {
     let configuration: SetFieldsConfiguration = serde_json::from_value(json!({
         "mode": "build",

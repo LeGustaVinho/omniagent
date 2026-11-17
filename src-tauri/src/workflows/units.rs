@@ -93,15 +93,28 @@ pub(super) fn parse_plan_units(
                         .all(|criterion| !criterion.trim().is_empty()),
                 "a logical unit needs explicit completion criteria"
             );
-            let ordinal = u32::try_from(index + 1)?;
-            Ok(WorkflowPlanUnit {
-                id: digest(&serde_json::to_vec(&(plan_revision, ordinal))?),
-                ordinal,
-                purpose: proposal.purpose,
-                completion_criteria: proposal.completion_criteria,
-            })
+            plan_unit(
+                plan_revision,
+                u32::try_from(index + 1)?,
+                proposal.purpose,
+                proposal.completion_criteria,
+            )
         })
         .collect()
+}
+
+fn plan_unit(
+    revision: &str,
+    ordinal: u32,
+    purpose: String,
+    completion_criteria: Vec<String>,
+) -> Result<WorkflowPlanUnit> {
+    Ok(WorkflowPlanUnit {
+        id: digest(&serde_json::to_vec(&(revision, ordinal))?),
+        ordinal,
+        purpose,
+        completion_criteria,
+    })
 }
 
 fn requires_single_unit(db: &Connection, project: &str, workflow: &str) -> Result<bool> {
@@ -127,14 +140,17 @@ fn parse_scoped_plan_units(
     value: ArtifactValue,
     single_unit: bool,
 ) -> Result<Vec<WorkflowPlanUnit>> {
-    let ArtifactValue::Plan {
-        run_id,
-        event_sequence,
-    } = value
-    else {
-        anyhow::bail!("plan has the wrong artifact kind");
+    let units = match value {
+        ArtifactValue::Plan {
+            run_id,
+            event_sequence,
+        } => parse_plan_units(revision, &load_plan_text(db, &run_id, event_sequence)?)?,
+        ArtifactValue::BacklogPlan(plan) => {
+            let (purpose, criteria) = plan.unit_scope();
+            vec![plan_unit(revision, 1, purpose.into(), criteria.to_vec())?]
+        }
+        _ => anyhow::bail!("plan has the wrong artifact kind"),
     };
-    let units = parse_plan_units(revision, &load_plan_text(db, &run_id, event_sequence)?)?;
     ensure!(
         !single_unit || units.len() == 1,
         "an implementation workflow without a verified commit requires exactly one logical unit"
@@ -148,6 +164,18 @@ pub(crate) fn validate_selected_plan_revision(
     workflow: &str,
     revision: &str,
 ) -> Result<()> {
+    let backlog_child: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workflow_backlog_task_runs WHERE child_run_id = ?1)",
+        [workflow],
+        |row| row.get(0),
+    )?;
+    if backlog_child {
+        ensure!(
+            load_artifact(db, project, workflow, revision, ArtifactKind::Plan)?
+                .is_some_and(|artifact| matches!(artifact.value, ArtifactValue::BacklogPlan(_))),
+            "The task plan is pinned to the approved backlog"
+        );
+    }
     if requires_single_unit(db, project, workflow)? {
         let plan = load_artifact(db, project, workflow, revision, ArtifactKind::Plan)?
             .context("selected plan is not part of this workflow")?;

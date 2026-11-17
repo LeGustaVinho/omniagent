@@ -14,12 +14,14 @@ type LaunchFields = TypedLaunchFields | { source: Source; workId: string | null 
 type LaunchRequest = LaunchFields & { projectId: string; workflow: Version; requestId: string };
 type LaunchOrigin = { kind: "editor"; requestId: string }
   | { kind: "agile"; requestId: string; workId: string }
-  | { kind: "rule"; ruleId: string; eventId: string; workId: string };
+  | { kind: "rule"; ruleId: string; eventId: string; workId: string }
+  | { kind: "backlog"; parentRunId: string; nodeId: string; workId: string };
 export type WorkflowLaunchReceipt = {
   workflowRunId: string;
   version: Version;
   origin: LaunchOrigin;
   checkoutId?: string;
+  sourceCommit?: string;
   source?: { id: string; checkoutId: string; relativePath: string } | null;
   inputs?: Record<string, unknown>;
 };
@@ -88,7 +90,9 @@ export function WorkflowLaunchPicker({ projectId, checkoutId, pinnedDocumentRevi
           </option>)}
         </select>
       </label> : versions.data && <p>Publish a workflow revision to run it here.</p>}
-      {available?.start?.requiresEvent ? <div className="pipeline-stack">
+      {available?.start?.requiresBacklogPlan ? <p className="pipeline-note">
+        Launch this child revision from a Run backlog node.
+      </p> : available?.start?.requiresEvent ? <div className="pipeline-stack">
         <p className="pipeline-note">This workflow uses an Agile event from an automation rule.</p>
         <Button type="button" variant="outline" className="justify-self-start"
           onClick={() => openWorkspace("pipelines", "automations")}>Open automation rules</Button>

@@ -167,7 +167,15 @@ impl Store {
         let state = self
             .execute({
                 let request = request.clone();
-                move |db| load_delivery(db, &request)
+                move |db| {
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let state = load_delivery(&tx, &request)?;
+                    if let DeliveryRead::Current(state) = &state {
+                        crate::workflows::github::pin_before_workflow_commit(&tx, &state.unit)?;
+                    }
+                    tx.commit()?;
+                    Ok(state)
+                }
             })
             .await?;
         let state = match state {
@@ -197,6 +205,7 @@ impl Store {
                     state.policy == policy,
                     "Git delivery policy changed; retry the commit action"
                 );
+                crate::workflows::github::pin_before_workflow_commit(&tx, &state.unit)?;
                 let evidence = settle_commit(&tx, request, state)?;
                 tx.commit()?;
                 Ok(evidence)
