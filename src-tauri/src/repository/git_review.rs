@@ -26,12 +26,14 @@ use super::{
 mod comments;
 mod commit;
 mod comparison;
+mod conflicts;
 mod content;
 mod history;
 mod hunks;
 mod permalink;
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
+pub use conflicts::GitConflictReview;
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
 pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
 pub use hunks::GitReviewHunk;
@@ -51,6 +53,15 @@ pub struct GitPathStatus {
     pub path: String,
     pub staged: Option<char>,
     pub working: Option<char>,
+}
+
+impl GitPathStatus {
+    fn unmerged(&self) -> bool {
+        matches!(
+            (self.staged, self.working),
+            (Some('U'), _) | (_, Some('U')) | (Some('A'), Some('A')) | (Some('D'), Some('D'))
+        )
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -429,20 +440,17 @@ fn stage_path(
         .into_iter()
         .find(|entry| entry.path == path)
         .context("the reviewed path no longer has a change")?;
+    ensure!(
+        !status.unmerged(),
+        "review the conflict before changing this path's index"
+    );
     if staged {
         ensure!(
             status.working.is_some(),
             "the path has no working change to stage"
         );
         if let Some(_locks) = content::lock_staging_file(&scope.root, path)? {
-            review.view.read(&[
-                "-c",
-                "core.splitIndex=false",
-                "--literal-pathspecs",
-                "add",
-                "--",
-                path,
-            ])?;
+            stage_existing_file(&review, path)?;
         } else {
             review.view.read(&[
                 "-c",
@@ -478,6 +486,18 @@ fn stage_path(
         }
     }
     install_index(&review, &index)
+}
+
+fn stage_existing_file(review: &LiveReview, path: &str) -> Result<()> {
+    review.view.read(&[
+        "-c",
+        "core.splitIndex=false",
+        "--literal-pathspecs",
+        "add",
+        "--",
+        path,
+    ])?;
+    Ok(())
 }
 
 fn install_index(review: &LiveReview, index: &Path) -> Result<()> {

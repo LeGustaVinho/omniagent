@@ -489,6 +489,8 @@ fn main() {
             git_review_runtime::git_compare_file_versions,
             git_review_runtime::git_file_permalink,
             git_review_runtime::git_checkout_diff,
+            git_review_runtime::git_conflict_review,
+            git_review_runtime::git_mark_conflict_resolved,
             git_review_runtime::git_branch_comparison,
             git_review_runtime::git_branch_comparison_diff,
             git_review_runtime::git_review_comments,

@@ -258,6 +258,7 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 .diff-file-row[aria-expanded="true"] { box-shadow: inset 2px 0 var(--primary); }
 .context-actions-target.diff-hunk-menu { align-items: flex-start; }
 .diff-patch-line .context-actions-more { height: 1.25rem; }
+.file-dialog.git-conflict-dialog { width: min(48rem, calc(100vw - 2rem)); }
 .diff-review-comment-lines { outline: 1px solid color-mix(in srgb, var(--primary) 45%, transparent); outline-offset: -1px; }
 .monaco-editor .diff-review-comment-marker::after {
   content: "";

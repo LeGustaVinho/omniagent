@@ -2,7 +2,7 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
+        GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
         GitPermalinkLines, GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface,
         GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
@@ -90,6 +90,31 @@ pub async fn git_checkout_diff(
 ) -> Result<GitReviewDiff, String> {
     store
         .git_checkout_diff(checkout_id, path, source)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_conflict_review(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+) -> Result<GitConflictReview, String> {
+    store
+        .git_conflict_review(checkout_id, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_mark_conflict_resolved(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    expected: String,
+) -> Result<(), String> {
+    store
+        .git_mark_conflict_resolved(checkout_id, path, expected)
         .await
         .map_err(review_error)
 }

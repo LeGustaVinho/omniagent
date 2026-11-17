@@ -177,6 +177,74 @@ it("anchors a comment to the clicked hunk line and adds the retained feedback to
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
 });
 
+it("reviews conflict stages from the clicked path and stages only the explicitly reviewed working snapshot", async () => {
+  const path = "src/conflicted.ts";
+  const openWorkspace = vi.fn();
+  let snapshot = "first-reviewed-result";
+  let staged = false;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, worktrees, branches, managed: false,
+      revision: originalRevision, changes: staged ? [] : [{ path, working: "U", staged: "D" }],
+    };
+    if (command === "git_review_comments") return [];
+    if (command === "git_conflict_review") return {
+      path, revision: originalRevision, snapshot, resolutionBlocked: null,
+      base: { objectId: "base-blob", mode: "100644", file: { status: "text", content: "original version" } },
+      local: { objectId: "local-blob", mode: "100644", file: { status: "text", content: "locally changed version" } },
+      incoming: null,
+      working: { status: "text", content: snapshot === "first-reviewed-result" ? "reviewed result" : "updated result" },
+    };
+    if (command === "git_mark_conflict_resolved") {
+      if ((payload as { expected: string }).expected !== snapshot) throw new Error("The working result changed.");
+      staged = true;
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  openGit({ openWorkspace });
+  const user = userEvent.setup();
+  const files = within(await screen.findByRole("region", { name: "Changed files" }));
+  async function openConflict() {
+    fireEvent.contextMenu(await files.findByRole("button", { name: /conflicted\.ts\s*Unmerged/ }));
+    const menu = within(await screen.findByRole("menu"));
+    expect(menu.queryByRole("menuitem", { name: "Stage file" })).toBeNull();
+    expect(menu.queryByRole("menuitem", { name: "Unstage file" })).toBeNull();
+    await user.click(menu.getByRole("menuitem", { name: "Review conflict…" }));
+    return within(await screen.findByRole("dialog", { name: "Review Git conflict" }));
+  }
+  const review = await openConflict();
+  expect(await review.findByText("reviewed result")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_conflict_review", { checkoutId: checkout.checkoutId, path });
+  await user.click(review.getByRole("button", { name: "Base · stage 1" }));
+  expect(review.getByText("original version")).toBeTruthy();
+  await user.click(review.getByRole("button", { name: "Local · stage 2" }));
+  expect(review.getByText("locally changed version")).toBeTruthy();
+  await user.click(review.getByRole("button", { name: "Incoming · stage 3" }));
+  expect(review.getByText("File absent in this version.")).toBeTruthy();
+  await user.click(review.getByRole("button", { name: "Open working result in editor" }));
+  expect(openWorkspace).toHaveBeenCalledWith("ide", path);
+  expect(invoke).not.toHaveBeenCalledWith("git_mark_conflict_resolved", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+
+  const resolution = await openConflict();
+  const stage = await resolution.findByRole("button", { name: "Stage reviewed result" });
+  expect(stage).toHaveProperty("disabled", true);
+  await user.click(await resolution.findByRole("checkbox", { name: /I reviewed this working result/ }));
+  snapshot = "updated-reviewed-result";
+  await user.click(stage);
+  expect(await resolution.findByText(/The working result changed/)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_mark_conflict_resolved", { checkoutId: checkout.checkoutId, path, expected: "first-reviewed-result" });
+  await user.click(resolution.getByRole("button", { name: "Refresh review" }));
+  expect(await resolution.findByText("updated result")).toBeTruthy();
+  expect(stage).toHaveProperty("disabled", true);
+  await user.click(resolution.getByRole("checkbox", { name: /I reviewed this working result/ }));
+  await user.click(stage);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review Git conflict" })).toBeNull());
+  expect(invoke).toHaveBeenCalledWith("git_mark_conflict_resolved", { checkoutId: checkout.checkoutId, path, expected: snapshot });
+  expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;

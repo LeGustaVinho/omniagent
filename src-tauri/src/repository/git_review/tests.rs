@@ -28,6 +28,184 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_result() -> Result<()> {
+    use crate::store::DraftKey;
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("conflict worktree");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "conflict [literal].txt";
+    let deleted = "deleted-incoming.txt";
+    fs::write(root.join(path), "base\n")?;
+    fs::write(root.join(deleted), "before deletion\n")?;
+    fs::write(root.join("unrelated.txt"), "unrelated base\n")?;
+    commit_fixture(&root, "Base")?;
+    git(&root, &["checkout", "--quiet", "-b", "incoming"])?;
+    fs::write(root.join(path), "incoming\n")?;
+    fs::remove_file(root.join(deleted))?;
+    commit_fixture(&root, "Incoming")?;
+    git(&root, &["checkout", "--quiet", "main"])?;
+    fs::write(root.join(path), "local\n")?;
+    fs::write(root.join(deleted), "updated locally\n")?;
+    commit_fixture(&root, "Local")?;
+    assert!(
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "merge",
+                "--no-edit",
+                "incoming"
+            ]
+        )
+        .is_err()
+    );
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let original = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    let details = serde_json::to_value(&original)?;
+    assert_eq!(details["base"]["file"]["content"], "base\n");
+    assert_eq!(details["local"]["file"]["content"], "local\n");
+    assert_eq!(details["incoming"]["file"]["content"], "incoming\n");
+    assert!(
+        details["working"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("<<<<<<<")
+    );
+    assert!(original.resolution_blocked.is_some());
+    let deleted_before = git(&root, &["ls-files", "--unmerged", "--", deleted])?;
+    let missing = serde_json::to_value(
+        store
+            .git_conflict_review(checkout.clone(), deleted.into())
+            .await?,
+    )?;
+    assert_eq!(missing["incoming"], serde_json::Value::Null);
+    assert_eq!(missing["local"]["file"]["content"], "updated locally\n");
+    assert!(
+        store
+            .git_conflict_review(checkout.clone(), "unrelated.txt".into())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .set_git_path_staged(
+                checkout.clone(),
+                path.into(),
+                true,
+                original.revision.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .set_git_path_staged(
+                checkout.clone(),
+                path.into(),
+                false,
+                original.revision.clone()
+            )
+            .await
+            .is_err()
+    );
+    let original_snapshot = original.snapshot.context("snapshot of unedited conflict")?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), original_snapshot.clone())
+            .await
+            .is_err()
+    );
+
+    let merged = "checked and combined\n";
+    fs::write(root.join(path), merged)?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), original_snapshot)
+            .await
+            .is_err()
+    );
+    let ready = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    assert!(ready.resolution_blocked.is_none());
+    let snapshot = ready.snapshot.context("reviewed working resolution")?;
+    let draft = || DraftKey::CheckoutFile {
+        checkout_id: checkout.clone(),
+        relative_path: path.to_uppercase(),
+    };
+    store
+        .save_draft(draft(), b"unsaved edit".to_vec())
+        .await?;
+    assert!(
+        store
+            .git_conflict_review(checkout.clone(), path.into())
+            .await?
+            .resolution_blocked
+            .is_some()
+    );
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), snapshot.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.load_draft(draft()).await?,
+        Some(b"unsaved edit".to_vec())
+    );
+    store.delete_draft(draft()).await?;
+
+    fs::write(root.join("unrelated.txt"), "separately staged change\n")?;
+    git(&root, &["add", "--", "unrelated.txt"])?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), snapshot)
+            .await
+            .is_err()
+    );
+    let fresh = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    store
+        .git_mark_conflict_resolved(
+            checkout.clone(),
+            path.into(),
+            fresh.snapshot.context("refreshed conflict review")?,
+        )
+        .await?;
+    assert!(
+        store
+            .git_conflict_review(checkout, path.into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git(&root, &["show", &format!(":{path}")])?,
+        merged.trim_end()
+    );
+    assert_eq!(
+        git(&root, &["show", ":unrelated.txt"])?,
+        "separately staged change"
+    );
+    assert_eq!(
+        git(&root, &["ls-files", "--unmerged", "--", deleted])?,
+        deleted_before
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, merged);
+    Ok(())
+}
+
+#[tokio::test]
 async fn persists_reviewed_line_ranges_and_rejects_stale_or_cross_checkout_anchors() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("comment-repo");

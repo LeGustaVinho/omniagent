@@ -147,7 +147,7 @@ pub(super) fn read_tree(view: &IsolatedGit, revision: &str, path: &str) -> Resul
     Ok(GitFileSide::Missing)
 }
 
-fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
+pub(super) fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
     if !matches!(mode, "100644" | "100755") {
         return Ok(GitFileSide::unavailable(
             "This Git entry is not an ordinary text file.",
@@ -195,16 +195,18 @@ pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
     };
     let file = open_locked_local_file(&path);
     match file {
-        Ok(file) => {
-            let mut bytes = Vec::new();
-            file.take(MAX_DIFF_SIDE_BYTES + 1).read_to_end(&mut bytes)?;
-            Ok(classify(bytes))
-        }
+        Ok(file) => read_locked_worktree(&file),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(GitFileSide::Missing),
         Err(error) => Ok(GitFileSide::unavailable(format!(
             "The worktree file could not be opened safely: {error}"
         ))),
     }
+}
+
+pub(super) fn read_locked_worktree(file: &File) -> Result<GitFileSide> {
+    let mut bytes = Vec::new();
+    file.take(MAX_DIFF_SIDE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(classify(bytes))
 }
 
 fn classify(bytes: Vec<u8>) -> GitFileSide {
