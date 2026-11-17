@@ -237,7 +237,7 @@ pub(super) fn require_admission(
     Ok(())
 }
 
-fn stage_job(
+pub(super) fn stage_job(
     db: &Connection,
     project: &str,
     workflow: &str,
@@ -358,13 +358,13 @@ pub(super) fn evaluate(
     }))
 }
 
-enum GoalResult {
+pub(super) enum GoalResult {
     Waiting,
     Failed,
     Ready { job_id: String, run_id: String },
 }
 
-fn goal_result_run(db: &Connection, project: &str, initial: &str) -> Result<GoalResult> {
+pub(super) fn goal_result_run(db: &Connection, project: &str, initial: &str) -> Result<GoalResult> {
     let cancelled: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM goal_revisions r JOIN goal_revision_controls c
           ON c.revision_id = r.id WHERE r.initial_job_id = ?1 AND c.state = 'cancelled')",
@@ -423,7 +423,7 @@ fn record_response(
     })
 }
 
-fn load_response(
+pub(super) fn load_response(
     db: &Connection,
     project: &str,
     checkout: &str,
@@ -560,10 +560,15 @@ impl Store {
                     )
                     .optional()?;
                 if let Some((project, workflow, node)) = origin
-                    && super::runtime::load_pinned_node(&tx, &project, &workflow, &node)?
-                        .is_some_and(|node| node.definition.kind == BuiltinNode::Agent)
+                    && let Some(node) =
+                        super::runtime::load_pinned_node(&tx, &project, &workflow, &node)?
                 {
-                    super::control::refresh(&tx, &project, &workflow)?;
+                    let kind = node.definition.kind;
+                    if kind == BuiltinNode::Agent
+                        || super::automation::agents_delivery::enabled_for(&tx, &workflow, &node)?
+                    {
+                        super::control::refresh(&tx, &project, &workflow)?;
+                    }
                 }
                 tx.commit()?;
                 Ok(())

@@ -193,6 +193,19 @@ pub(super) fn complete_manual_delivery(
     note: Option<String>,
 ) -> Result<TaskDelivery> {
     validate_repository_delivery_open(db, project, task)?;
+    let requires_verified_merge: bool = db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM workflow_backlog_task_runs task
+            JOIN workflow_run_pins child ON child.pipeline_run_id = task.child_run_id
+            WHERE child.project_id = ?1 AND task.task_id = ?2
+        )",
+        params![project, task],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !requires_verified_merge,
+        "This backlog task requires a verified merge to complete"
+    );
     let state = load_delivery_state(db, project, task)?;
     ensure!(
         state.active_workflow_run_id.is_none(),

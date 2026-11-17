@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BuiltinNode, ConditionPredicate, Endpoint, NodeConfiguration, NodeInstance, Port, PortType,
-    Wire, WorkflowGraph, builtin_registry, compile_resolved_graph,
+    ArtifactKind, BuiltinNode, ConditionPredicate, Endpoint, NodeConfiguration, NodeDefinition,
+    NodeInstance, Port, PortType, Wire, WorkflowGraph, builtin_registry, compile_resolved_graph,
     iteration::validate_loop_body,
     subflow::{self, BoundSubflow},
 };
@@ -30,7 +30,11 @@ pub struct RepeatUntilConfiguration {
     pub until: ConditionPredicate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<RepeatFeedback>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<String>,
 }
+
+const MAX_EXPORTS: usize = 32;
 
 impl RepeatUntilConfiguration {
     pub(super) fn valid(&self) -> bool {
@@ -43,12 +47,134 @@ impl RepeatUntilConfiguration {
             .iter()
             .all(|port| !port.trim().is_empty())
             && self.until.valid()
+            && self.exports.len() <= MAX_EXPORTS
+            && self.exports.iter().all(|name| valid_export_name(name))
+            && self.exports.iter().collect::<HashSet<_>>().len() == self.exports.len()
             && self.feedback.as_ref().is_none_or(|feedback| {
                 feedback.input != self.ready_input
                     && !feedback.input.trim().is_empty()
                     && !feedback.output.trim().is_empty()
             })
     }
+}
+
+fn valid_export_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= 128 && !matches!(name, "completed" | "failed")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepeatOutputConfiguration {
+    pub(super) rounds: u16,
+    pub(super) exports: BTreeMap<String, ArtifactKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RepeatSignal {
+    Skipped,
+    Waiting,
+    Selected,
+}
+
+pub(super) enum RepeatSelection {
+    Skipped,
+    Waiting,
+    MissingOutput,
+    Approved(u16),
+}
+
+impl RepeatOutputConfiguration {
+    pub(super) fn valid(&self) -> bool {
+        (1..=32).contains(&self.rounds)
+            && (1..=MAX_EXPORTS).contains(&self.exports.len())
+            && self.exports.keys().all(|name| valid_export_name(name))
+    }
+
+    fn define_ports(&self, definition: &mut NodeDefinition) {
+        for (name, kind) in &self.exports {
+            definition.outputs.push(Port {
+                name: name.clone(),
+                value: PortType::Data(*kind),
+            });
+        }
+        for round in 1..=self.rounds {
+            definition.inputs.push(Port {
+                name: Self::round_port(round),
+                value: PortType::Control,
+            });
+            for (name, kind) in &self.exports {
+                definition.inputs.push(Port {
+                    name: Self::value_port(round, name),
+                    value: PortType::Data(*kind),
+                });
+            }
+        }
+    }
+
+    fn round_port(round: u16) -> String {
+        format!("round:{round}")
+    }
+
+    pub(super) fn value_port(round: u16, name: &str) -> String {
+        format!("round:{round}:{name}")
+    }
+
+    pub(super) fn select(&self, signal: impl Fn(&str) -> RepeatSignal) -> Result<RepeatSelection> {
+        let mut chosen = None;
+        for round in 1..=self.rounds {
+            match signal(&Self::round_port(round)) {
+                RepeatSignal::Waiting => return Ok(RepeatSelection::Waiting),
+                RepeatSignal::Selected => ensure!(
+                    chosen.replace(round).is_none(),
+                    "Multiple iterations reached the approval gate"
+                ),
+                RepeatSignal::Skipped => {}
+            }
+        }
+        let Some(round) = chosen else {
+            return Ok(RepeatSelection::Skipped);
+        };
+        let signals: Vec<_> = self
+            .exports
+            .keys()
+            .map(|name| signal(&Self::value_port(round, name)))
+            .collect();
+        if signals.contains(&RepeatSignal::Waiting) {
+            Ok(RepeatSelection::Waiting)
+        } else if signals.contains(&RepeatSignal::Skipped) {
+            Ok(RepeatSelection::MissingOutput)
+        } else {
+            Ok(RepeatSelection::Approved(round))
+        }
+    }
+}
+
+pub(super) fn matches_output_definition(base: &NodeDefinition, pinned: &NodeDefinition) -> bool {
+    let exports = pinned
+        .outputs
+        .iter()
+        .filter_map(|port| {
+            let PortType::Data(kind) = port.value else {
+                return None;
+            };
+            Some((port.name.clone(), kind))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let rounds = pinned
+        .inputs
+        .iter()
+        .filter(|port| port.value == PortType::Control)
+        .count();
+    let Ok(rounds) = u16::try_from(rounds) else {
+        return false;
+    };
+    let configuration = RepeatOutputConfiguration { exports, rounds };
+    if !configuration.valid() {
+        return false;
+    }
+    let mut definition = base.clone();
+    configuration.define_ports(&mut definition);
+    &definition == pinned
 }
 
 pub(super) fn expand_repeat(
@@ -112,6 +238,20 @@ pub(super) fn expand_repeat(
         &body.outputs[&configuration.completion_output],
         &body.outputs[&configuration.evidence_output],
     )?;
+    let exports = configuration
+        .exports
+        .iter()
+        .map(|name| {
+            let PortType::Data(kind) = output_type(name)? else {
+                anyhow::bail!("Repeat export {name} must be a typed data output");
+            };
+            Ok((name.clone(), kind))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let export_configuration = (!exports.is_empty()).then_some(RepeatOutputConfiguration {
+        rounds: configuration.max_iterations,
+        exports,
+    });
 
     let node = |id: &str, kind, configuration| NodeInstance {
         id: id.into(),
@@ -137,6 +277,14 @@ pub(super) fn expand_repeat(
         })
         .collect::<Result<Vec<_>>>()?;
     let name = format!("Repeat {}", body.name);
+    let stop = match &export_configuration {
+        Some(configuration) => node(
+            "stop",
+            BuiltinNode::RepeatOutput,
+            NodeConfiguration::RepeatOutput(configuration.clone()),
+        ),
+        None => node("stop", BuiltinNode::Join, NodeConfiguration::None),
+    };
     let mut graph = WorkflowGraph {
         name: name.clone(),
         nodes: vec![
@@ -147,7 +295,7 @@ pub(super) fn expand_repeat(
                     outputs: start_ports,
                 },
             ),
-            node("stop", BuiltinNode::Join, NodeConfiguration::None),
+            stop,
             node(
                 "limit",
                 BuiltinNode::IterationLimit,
@@ -156,6 +304,15 @@ pub(super) fn expand_repeat(
         ],
         wires: Vec::new(),
     };
+    if export_configuration.is_some() {
+        graph
+            .nodes
+            .push(node("failure", BuiltinNode::Join, NodeConfiguration::None));
+        graph.wires.extend([
+            wire("limit", "failed", "failure", "branches"),
+            wire("stop", "failed", "failure", "branches"),
+        ]);
+    }
     let mut calls = BTreeMap::<String, BoundSubflow>::new();
     for index in 1..=configuration.max_iterations {
         let iteration = format!("iteration-{index}");
@@ -197,8 +354,27 @@ pub(super) fn expand_repeat(
                 "ready",
             ),
             wire(&iteration, &configuration.evidence_output, &decide, "value"),
-            wire(&decide, "matched", "stop", "branches"),
         ]);
+        if let Some(configuration) = &export_configuration {
+            graph.wires.push(wire(
+                &decide,
+                "matched",
+                "stop",
+                &RepeatOutputConfiguration::round_port(index),
+            ));
+            graph.wires.extend(configuration.exports.keys().map(|name| {
+                wire(
+                    &iteration,
+                    name,
+                    "stop",
+                    &RepeatOutputConfiguration::value_port(index, name),
+                )
+            }));
+        } else {
+            graph
+                .wires
+                .push(wire(&decide, "matched", "stop", "branches"));
+        }
         if index == configuration.max_iterations {
             graph
                 .wires
@@ -214,17 +390,29 @@ pub(super) fn expand_repeat(
         .nodes
         .iter()
         .map(|node| {
-            Ok((
-                node.id.clone(),
-                subflow::entry_definition(node, &registry[&node.kind])?,
-            ))
+            let mut definition = subflow::entry_definition(node, &registry[&node.kind])?;
+            if let NodeConfiguration::RepeatOutput(configuration) = &node.configuration {
+                configuration.define_ports(&mut definition);
+            }
+            Ok((node.id.clone(), definition))
         })
         .collect::<Result<_>>()?;
-    let exports = [
-        ("completed".into(), endpoint("stop", "joined")),
-        ("failed".into(), endpoint("limit", "failed")),
-    ]
-    .into();
+    let exports = match &export_configuration {
+        Some(configuration) => configuration
+            .exports
+            .keys()
+            .map(|name| (name.clone(), endpoint("stop", name)))
+            .chain([
+                ("completed".into(), endpoint("stop", "completed")),
+                ("failed".into(), endpoint("failure", "joined")),
+            ])
+            .collect(),
+        None => [
+            ("completed".into(), endpoint("stop", "joined")),
+            ("failed".into(), endpoint("limit", "failed")),
+        ]
+        .into(),
+    };
     let expanded = subflow::expand(graph, definitions, calls, &exports)?;
     let mut workflow = compile_resolved_graph(
         body.version.id.clone(),

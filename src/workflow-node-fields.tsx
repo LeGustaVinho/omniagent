@@ -1,4 +1,6 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
@@ -20,7 +22,9 @@ function text(value: unknown) {
 
 export function StartInputFields({ configuration, disabled, onChange }: Fields) {
   const fields: WorkflowStartField[] = Array.isArray(configuration.fields) ? configuration.fields : [];
-  const update = (fields: WorkflowStartField[]) => onChange({ kind: "typed_start", fields });
+  const fromRequest = configuration.promptOrMarkdown === true;
+  const update = (fields: WorkflowStartField[], promptOrMarkdown = fromRequest) =>
+    onChange({ kind: "typed_start", fields, ...(promptOrMarkdown ? { promptOrMarkdown } : {}) });
   function add() {
     let ordinal = fields.length + 1;
     while (fields.some(({ name }) => name === `input-${ordinal}`)) ordinal += 1;
@@ -28,6 +32,9 @@ export function StartInputFields({ configuration, disabled, onChange }: Fields) 
   }
   return <fieldset className="pipeline-stack" disabled={disabled}>
     <legend>Launch inputs</legend>
+    <label className="workflow-check"><input type="checkbox" checked={fromRequest}
+      onChange={(event) => update(fields, event.currentTarget.checked)} />Accept a prompt or saved Markdown</label>
+    {fromRequest && <p className="pipeline-meta">The inputs port provides the request as <code>/request</code>.</p>}
     {fields.map((field, index) => {
       const replace = (next: WorkflowStartField) => update(fields.map((entry, position) => position === index ? next : entry));
       const edit = (patch: Partial<WorkflowStartField>) => replace({ ...field, ...patch });
@@ -126,6 +133,9 @@ export function LoopFields({ configuration, disabled, subflow, onChange }: Field
   const limit = repeat ? "maxIterations" : "maxItems";
   const feedback = structuredObject(configuration.feedback);
   const feedbackInput = subflow?.inputs.find(({ name }) => name === feedback.input)?.value;
+  const exports = Array.isArray(configuration.exports) ? configuration.exports.filter((name): name is string => typeof name === "string") : [];
+  const exportOptions = subflow?.outputs.filter(({ name, value }) => value.kind === "data" && !["completed", "failed"].includes(name))
+    .map(({ name }) => name) ?? [];
   return <>
     <label>{repeat ? "Maximum iterations" : "Maximum items"}<input type="number" min={1} max={MAX_ITERATION_ITEMS} step={1} disabled={disabled}
       value={typeof configuration[limit] === "number" ? configuration[limit] as number : ""}
@@ -141,6 +151,17 @@ export function LoopFields({ configuration, disabled, subflow, onChange }: Field
         disabled={disabled} onChange={(evidenceOutput) => onChange({ ...configuration, evidenceOutput })} />
       <PredicateFields label="Stopping condition" value={configuration.until} disabled={disabled}
         onChange={(until) => onChange({ ...configuration, until })} />
+      {!!(exportOptions.length || exports.length) && <fieldset disabled={disabled}>
+        <legend>Export from the approved iteration</legend>
+        {[...new Set([...exportOptions, ...exports])].map((name) => <label className="workflow-check" key={name}>
+          <input type="checkbox" checked={exports.includes(name)}
+            onChange={(event) => {
+              const next = event.currentTarget.checked ? [...exports, name] : exports.filter((entry) => entry !== name);
+              const { exports: _previous, ...rest } = configuration;
+              onChange(next.length ? { ...rest, exports: next } : rest);
+            }} />{name}
+        </label>)}
+      </fieldset>}
       <label className="workflow-check"><input type="checkbox" checked={Boolean(configuration.feedback)} disabled={disabled}
         onChange={(event) => {
           const { feedback: _previous, ...rest } = configuration;
@@ -155,6 +176,174 @@ export function LoopFields({ configuration, disabled, subflow, onChange }: Field
       </>}
     </> : <SubflowPortField label="Subflow result output" value={text(configuration.resultOutput)} ports={subflow?.outputs.filter(data)}
       disabled={disabled} onChange={(resultOutput) => onChange({ ...configuration, resultOutput })} />}
+  </>;
+}
+
+export function RunBacklogFields({ projectId, configuration, backlogBound, disabled, onChange }: Fields & {
+  projectId: string;
+  backlogBound?: boolean;
+}) {
+  type Child = { name: string; version: { id: string; revision: string };
+    start?: { fields: WorkflowStartField[]; requiresBacklogPlan?: boolean } };
+  const query = useQuery({ queryKey: ["workflow-authoring-bases", projectId], enabled: !backlogBound,
+    queryFn: () => invoke<Child[]>("workflow_authoring_bases", { projectId }) });
+  const choices = (query.data ?? []).filter(({ start }) =>
+    start?.requiresBacklogPlan && start.fields.some(({ name, valueType }) => name === "backlog" && valueType === "object"));
+  const child = structuredObject(configuration.child);
+  const failed = structuredObject(configuration.failed);
+  const key = (version: { id?: unknown; revision?: unknown }) => JSON.stringify([version.id, version.revision]);
+  const selected = text(child.id) ? key(child) : "";
+  return <fieldset className="pipeline-stack" disabled={disabled}>
+    <legend>Child workflow dispatch</legend>
+    {!backlogBound && <label>Published child revision<select value={selected} onChange={(event) => {
+      const revision = choices.find(({ version }) => key(version) === event.currentTarget.value)?.version;
+      onChange({ ...configuration, child: revision ?? { id: "", revision: "" } });
+    }}>
+      <option value="">Choose a workflow with a backlog input</option>
+      {selected && !choices.some(({ version }) => key(version) === selected) &&
+        <option value={selected}>{text(child.id)} · {text(child.revision).slice(0, 12)}</option>}
+      {choices.map(({ name, version }) => <option key={key(version)} value={key(version)}>
+        {name} · {version.revision.slice(0, 12)}
+      </option>)}
+    </select></label>}
+    <label>Maximum parallel tasks<input type="number" min={1} max={MAX_ITERATION_ITEMS} step={1}
+      value={typeof configuration.maxParallel === "number" ? configuration.maxParallel : ""}
+      onChange={(event) => onChange({ ...configuration, maxParallel: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} /></label>
+    <label>Child failure node<input value={text(failed.node)}
+      onChange={(event) => onChange({ ...configuration, failed: { ...failed, node: event.currentTarget.value } })} /></label>
+    <label>Child failure control port<input value={text(failed.port)}
+      onChange={(event) => onChange({ ...configuration, failed: { ...failed, port: event.currentTarget.value } })} /></label>
+  </fieldset>;
+}
+
+export function TestPhaseFields({ projectId, configuration, disabled, onChange }: Fields & { projectId: string }) {
+  const policy = useQuery({ queryKey: ["candidate-gate-policy", projectId],
+    queryFn: () => invoke<{ gates: { name: string; action: { type: string } }[] }>("candidate_gate_policy", { projectId }) });
+  const check = text(configuration.check);
+  const options = (policy.data?.gates ?? []).filter(({ action }) => action.type === "command").map(({ name }) => name);
+  const paths = Array.isArray(configuration.allowedTestPaths) ? configuration.allowedTestPaths.join("\n") : "";
+  return <fieldset className="pipeline-stack" disabled={disabled}>
+    <legend>Test verification</legend>
+    <label>Test phase<select value={text(configuration.phase)} onChange={(event) => {
+      const phase = event.currentTarget.value;
+      const { allowedTestPaths, ...current } = configuration;
+      onChange({ ...current, phase, ...(phase === "red" ? { allowedTestPaths: allowedTestPaths ?? [] } : {}) });
+    }}>
+      <option value="baseline">Baseline</option>
+      <option value="red">Red</option>
+      <option value="green">Green</option>
+    </select></label>
+    <label>Registered test check<select value={check} onChange={(event) =>
+      onChange({ ...configuration, check: event.currentTarget.value })}>
+      <option value="">Choose a project check</option>
+      {check && !options.includes(check) && <option value={check}>{check}</option>}
+      {options.map((name) => <option key={name} value={name}>{name}</option>)}
+    </select></label>
+    {configuration.phase === "red" && <label>Allowed test paths<textarea rows={3} value={paths}
+      onChange={(event) => onChange({ ...configuration, allowedTestPaths: event.currentTarget.value.split("\n") })} />
+      <small>One file, directory prefix such as tests/, or suffix such as *.test.ts per line.</small>
+    </label>}
+    <p>The check must write one JSON report to stdout with the suite status and test IDs, statuses and failure reasons.</p>
+    <details>
+      <summary>Test report format</summary>
+      <pre className="workflow-evidence-json">{JSON.stringify({
+        status: "completed",
+        tests: [{ id: "BDD-1", status: "failed", reason: "feature missing" }],
+      }, null, 2)}</pre>
+      <p>Use passed or skipped for other test outcomes. Use build_error, environment_error or tool_error for a suite that could not run.</p>
+    </details>
+  </fieldset>;
+}
+
+export function IntegratedChecksFields({ projectId, configuration, disabled, onChange }: Fields & { projectId: string }) {
+  const policy = useQuery({ queryKey: ["candidate-gate-policy", projectId],
+    queryFn: () => invoke<{ gates: { name: string; action: { type: string } }[] }>("candidate_gate_policy", { projectId }) });
+  const checks = Array.isArray(configuration.checks) ? configuration.checks.filter((value) => typeof value === "string") : [];
+  const registered = (policy.data?.gates ?? []).filter(({ action }) => action.type === "command").map(({ name }) => name);
+  const options = [...new Set([...checks, ...registered])];
+  return <fieldset className="pipeline-stack" disabled={disabled}>
+    <legend>Integrated revision checks</legend>
+    {options.map((name) => <label key={name} className="workflow-check">
+      <input type="checkbox" checked={checks.includes(name)} onChange={(event) =>
+        onChange({ ...configuration, checks: event.currentTarget.checked ? [...checks, name] : checks.filter((check) => check !== name) })} />
+      {name}
+    </label>)}
+    {!policy.isPending && !policy.isError && options.length === 0 && <p>Register command checks in the project settings.</p>}
+    {policy.isError && <p role="alert">The project checks could not be loaded.</p>}
+  </fieldset>;
+}
+
+export function CandidateAcceptanceFields({ configuration, disabled, onChange }: Fields) {
+  const aggregated = configuration.kind === "candidate_acceptance";
+  return <fieldset className="pipeline-stack" disabled={disabled}>
+    <legend>Acceptance evidence</legend>
+    <label className="workflow-check"><input type="checkbox" checked={aggregated}
+      onChange={(event) => onChange(event.currentTarget.checked
+        ? { kind: "candidate_acceptance", buildCheck: "", minimumReviews: 1, requireGreen: false } : { kind: "none" })} />
+      Require aggregate quality evidence and a build
+    </label>
+    {aggregated && <>
+      <label>Required build check<input value={text(configuration.buildCheck)}
+        onChange={(event) => onChange({ ...configuration, buildCheck: event.currentTarget.value })} /></label>
+      <label>Minimum independent reviews<input type="number" min={1} max={32} step={1}
+        value={typeof configuration.minimumReviews === "number" ? configuration.minimumReviews : ""}
+        onChange={(event) => onChange({ ...configuration, minimumReviews: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} /></label>
+      <label className="workflow-check"><input type="checkbox" checked={configuration.requireGreen === true}
+        onChange={(event) => onChange({ ...configuration, requireGreen: event.currentTarget.checked })} />Require verified green tests</label>
+    </>}
+  </fieldset>;
+}
+
+export function RequiredChecksFields({ configuration, disabled, fixedNames, fixedGroups, stageOptions, strategyOptions, onChange }: Fields & {
+  fixedNames: boolean;
+  fixedGroups: boolean;
+  stageOptions: boolean;
+  strategyOptions: boolean;
+}) {
+  const groups: string[][] = Array.isArray(configuration.parallelGroups) ? configuration.parallelGroups : [];
+  const update = (parallelGroups: string[][]) => {
+    const { parallelGroups: _previous, ...rest } = configuration;
+    onChange(parallelGroups.length ? { ...rest, parallelGroups } : rest);
+  };
+  return <>
+    <label>Required checks<textarea rows={3} disabled={disabled || fixedNames}
+      value={Array.isArray(configuration.names) ? configuration.names.join("\n") : ""}
+      onChange={(event) => onChange({ ...configuration, names: event.currentTarget.value ? event.currentTarget.value.split("\n") : [] })} />
+      <small>Enter one check name per line.</small>
+    </label>
+    <fieldset className="pipeline-stack" disabled={disabled || fixedGroups}>
+      <legend>Parallel check groups</legend>
+      {groups.map((group, index) => <div key={index} className="workflow-inspector-item">
+        <label>Group {index + 1}<textarea rows={2} value={group.join("\n")}
+          onChange={(event) => update(groups.map((current, position) => position === index
+            ? event.currentTarget.value.split("\n") : current))} /></label>
+        <Button type="button" variant="ghost" aria-label={"Remove group " + (index + 1)}
+          onClick={() => update(groups.filter((_, position) => position !== index))}><Trash2 size={15} /> Remove group</Button>
+      </div>)}
+      <Button type="button" variant="outline" onClick={() => update([...groups, [""]])}><Plus size={15} /> Add check group</Button>
+      {!!groups.length && <small>Checks in each group run in order. Groups run independently.</small>}
+    </fieldset>
+    {stageOptions && <label>Checks deferred to a later stage<textarea rows={2} disabled={disabled}
+      value={Array.isArray(configuration.deferredNames) ? configuration.deferredNames.join("\n") : ""}
+      onChange={(event) => {
+        const { deferredNames: _previous, strategyChecks, ...current } = configuration;
+        const value = event.currentTarget.value;
+        onChange(value ? { ...current, kind: "staged_checks", deferredNames: value.split("\n"),
+          ...(Array.isArray(strategyChecks) ? { strategyChecks } : {}) }
+          : { ...current, kind: "required_checks" });
+      }} />
+      <small>The acceptance step still requires the complete project policy.</small>
+    </label>}
+    {strategyOptions && configuration.kind === "staged_checks" && <label>Checks selectable by approved test strategy
+      <textarea rows={2} disabled={disabled}
+        value={Array.isArray(configuration.strategyChecks) ? configuration.strategyChecks.join("\n") : ""}
+        onChange={(event) => {
+          const { strategyChecks: _previous, ...current } = configuration;
+          const value = event.currentTarget.value;
+          onChange(value ? { ...current, strategyChecks: value.split("\n") } : current);
+        }} />
+      <small>Connect a strategy object with a requiredChecks array to select any of these registered checks.</small>
+    </label>}
   </>;
 }
 

@@ -108,6 +108,15 @@ pub struct ControlStageReceipt {
     pub reason: Option<String>,
     pub source_run_id: Option<String>,
     pub dependencies: Vec<ControlDependency>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub forwarded_outputs: std::collections::BTreeMap<String, ForwardedOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardedOutput {
+    input: String,
+    pub artifact_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +137,9 @@ fn is_control(kind: BuiltinNode) -> bool {
             | BuiltinNode::IterationLimit
             | BuiltinNode::BuildList
             | BuiltinNode::SetFields
+            | BuiltinNode::ValidateOutput
+            | BuiltinNode::CollectEvidence
+            | BuiltinNode::QualityGate
             | BuiltinNode::FilterMapList
             | BuiltinNode::BuildText
             | BuiltinNode::RequestInput
@@ -138,19 +150,29 @@ fn is_control(kind: BuiltinNode) -> bool {
             | BuiltinNode::Agent
             | BuiltinNode::LoadWorkContext
             | BuiltinNode::ManageWork
+            | BuiltinNode::MaterializeBacklog
+            | BuiltinNode::RunBacklog
+            | BuiltinNode::VerifyTestPhase
+            | BuiltinNode::VerifyIntegratedChecks
+            | BuiltinNode::SearchPublicRepositories
+            | BuiltinNode::OpenOrUpdatePullRequest
+            | BuiltinNode::WaitForCi
+            | BuiltinNode::MergePullRequest
             | BuiltinNode::SummarizeResult
     ) || kind.generated_iteration()
 }
 
 pub(super) fn uses_control(definition: &WorkflowDefinition) -> bool {
-    definition
-        .nodes
+    definition.nodes.iter().any(|node| {
+        is_control(node.instance.kind)
+            || matches!(
+                node.instance.kind,
+                BuiltinNode::McpTool | BuiltinNode::TypedStart
+            )
+    }) || definition
+        .wires
         .iter()
-        .any(|node| is_control(node.instance.kind) || matches!(node.instance.kind, BuiltinNode::McpTool | BuiltinNode::TypedStart))
-        || definition
-            .wires
-            .iter()
-            .any(|wire| wire.from.port == "failed")
+        .any(|wire| wire.from.port == "failed")
 }
 
 pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Result<()> {
@@ -169,7 +191,7 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
     for step in nodes.iter().filter(|node| {
         matches!(
             node.instance.kind,
-            BuiltinNode::Implement | BuiltinNode::Command
+            BuiltinNode::Implement | BuiltinNode::Command | BuiltinNode::VerifyTestPhase
         )
     }) {
         let node = step.instance.id.as_str();
@@ -513,6 +535,18 @@ impl<'a> Evaluation<'a> {
         self.receipts.get(&(node.into(), unit.map(str::to_owned)))
     }
 
+    fn automatic_unit_action(&self, node: &PinnedNode) -> Result<bool> {
+        Ok(matches!(
+            node.instance.kind,
+            BuiltinNode::VerifyCandidate | BuiltinNode::AcceptCandidate | BuiltinNode::VerifyCommit
+        ) && node
+            .definition
+            .outputs
+            .iter()
+            .any(|port| port.name == "failed")
+            && super::automation::enabled(self.db, &self.run.id)?)
+    }
+
     fn save(&mut self, receipt: ControlStageReceipt) -> Result<()> {
         let bytes = protection::protect(&serde_json::to_vec(&receipt)?)?;
         self.db.execute(
@@ -623,7 +657,8 @@ impl<'a> Evaluation<'a> {
     ) -> Result<Option<ControlStageReceipt>> {
         use BuiltinNode::*;
         let node_id = node.instance.id.as_str();
-        if self.receipt(node_id, unit).is_some() || matches!(node.instance.kind, Start | TypedStart) {
+        if self.receipt(node_id, unit).is_some() || matches!(node.instance.kind, Start | TypedStart)
+        {
             return Ok(None);
         }
         let dependencies = self
@@ -645,14 +680,22 @@ impl<'a> Evaluation<'a> {
             dependencies
                 .iter()
                 .filter_map(|(wire, outcome)| match outcome {
-                    Arrival::Selected(Some(artifact)) => Some((wire.to.port.clone(), artifact.clone())),
+                    Arrival::Selected(Some(artifact)) => {
+                        Some((wire.to.port.clone(), artifact.clone()))
+                    }
                     _ => None,
                 })
                 .collect::<std::collections::BTreeMap<String, WorkflowArtifact>>()
         };
-        let input_ids = || pinned_inputs().into_iter().map(|(port, artifact)| (port, artifact.id)).collect();
+        let input_ids = || {
+            pinned_inputs()
+                .into_iter()
+                .map(|(port, artifact)| (port, artifact.id))
+                .collect()
+        };
         let mut diagnostic = None;
         let mut source_run = None;
+        let mut forwarded_outputs = std::collections::BTreeMap::new();
         let relevant = if node.instance.kind == ForEachCollect {
             let count = selected_artifact("items")
                 .map(super::iteration::list_value)
@@ -677,18 +720,56 @@ impl<'a> Evaluation<'a> {
         } else {
             dependencies.iter().collect()
         };
-        let ignored = relevant
-            .iter()
-            .any(|(_, outcome)| matches!(outcome, Arrival::Ignored));
+        let ignored = relevant.iter().any(|(wire, outcome)| {
+            matches!(outcome, Arrival::Ignored)
+                && (node.instance.kind != CollectEvidence || wire.to.port == "ready")
+        });
         let pending = relevant
             .iter()
             .any(|(_, outcome)| matches!(outcome, Arrival::Pending));
         let selected = relevant
             .iter()
             .any(|(_, outcome)| matches!(outcome, Arrival::Selected(_)));
-        let (state, port, reason, attempt) = if ignored
-            && (node.instance.kind != Join || !pending && !selected)
+        let (state, port, reason, attempt) = if let NodeConfiguration::RepeatOutput(configuration) =
+            &node.instance.configuration
         {
+            use super::repetition::{RepeatOutputConfiguration, RepeatSelection, RepeatSignal};
+            match configuration.select(|port| {
+                match dependencies
+                    .iter()
+                    .find(|(wire, _)| wire.to.port == port)
+                    .map(|(_, arrival)| arrival)
+                {
+                    Some(Arrival::Selected(_)) => RepeatSignal::Selected,
+                    Some(Arrival::Ignored) => RepeatSignal::Skipped,
+                    _ => RepeatSignal::Waiting,
+                }
+            })? {
+                RepeatSelection::Waiting => return Ok(None),
+                RepeatSelection::Skipped => (ControlStageState::Skipped, None, None, None),
+                RepeatSelection::MissingOutput => (
+                    ControlStageState::Failed,
+                    Some("failed"),
+                    Some("The approved iteration did not produce every configured export"),
+                    None,
+                ),
+                RepeatSelection::Approved(round) => {
+                    for name in configuration.exports.keys() {
+                        let input = RepeatOutputConfiguration::value_port(round, name);
+                        let artifact = selected_artifact(&input)
+                            .context("The approved iteration lost an export")?;
+                        forwarded_outputs.insert(
+                            name.clone(),
+                            ForwardedOutput {
+                                input,
+                                artifact_id: artifact.id.clone(),
+                            },
+                        );
+                    }
+                    (ControlStageState::Completed, Some("completed"), None, None)
+                }
+            }
+        } else if ignored && (node.instance.kind != Join || !pending && !selected) {
             (
                 ControlStageState::Skipped,
                 None,
@@ -699,7 +780,86 @@ impl<'a> Evaluation<'a> {
             return Ok(None);
         } else {
             match node.instance.kind {
-                SetFields | FilterMapList | BuildText | FindWork => {
+                QualityGate => {
+                    let inputs = pinned_inputs();
+                    let NodeConfiguration::QualityGate(config) = &node.instance.configuration
+                    else {
+                        anyhow::bail!("Invalid pinned quality gate");
+                    };
+                    let Some(ArtifactValue::EvidenceSet(evidence)) =
+                        inputs.get("evidence").map(|entry| &entry.value)
+                    else {
+                        anyhow::bail!("The quality gate lost its pinned evidence set");
+                    };
+                    let (port, report) = config.evaluate(evidence)?;
+                    self.record_stage_artifact(
+                        node_id,
+                        unit,
+                        "decision",
+                        ArtifactValue::JsonObject(report),
+                        &inputs,
+                    )?;
+                    (ControlStageState::Completed, Some(port), None, None)
+                }
+                CollectEvidence => {
+                    use super::data_nodes::{EvidenceOutcome, WorkflowEvidence, evidence_text};
+                    let mut inputs = std::collections::BTreeMap::new();
+                    let mut evidence = Vec::new();
+                    for (wire, arrival) in &dependencies {
+                        if wire.to.port != "evidence" {
+                            continue;
+                        }
+                        let outcome = if let Arrival::Selected(Some(artifact)) = arrival {
+                            inputs.insert(
+                                format!("evidence.{}", evidence.len() + 1),
+                                artifact.clone(),
+                            );
+                            EvidenceOutcome::Completed {
+                                artifact_id: artifact.id.clone(),
+                                value: serde_json::to_value(&artifact.value)?,
+                            }
+                        } else {
+                            let source_unit =
+                                unit.filter(|_| self.unit_nodes.contains(wire.from.node.as_str()));
+                            if self
+                                .receipt(&wire.from.node, source_unit)
+                                .is_some_and(|receipt| receipt.state == ControlStageState::Failed)
+                            {
+                                EvidenceOutcome::Failed
+                            } else {
+                                EvidenceOutcome::Skipped
+                            }
+                        };
+                        evidence.push(WorkflowEvidence {
+                            source: wire.from.clone(),
+                            outcome,
+                        });
+                    }
+                    match evidence_text(&evidence) {
+                        Ok(text) => {
+                            self.record_stage_artifact(
+                                node_id,
+                                unit,
+                                "evidence",
+                                ArtifactValue::EvidenceSet(evidence),
+                                &inputs,
+                            )?;
+                            self.record_stage_artifact(
+                                node_id,
+                                unit,
+                                "text",
+                                ArtifactValue::RenderedText(text),
+                                &inputs,
+                            )?;
+                            (ControlStageState::Completed, Some("completed"), None, None)
+                        }
+                        Err(error) => {
+                            diagnostic = Some(crate::diagnostics::preview(&error.to_string()));
+                            (ControlStageState::Failed, Some("failed"), None, None)
+                        }
+                    }
+                }
+                SetFields | FilterMapList | BuildText | FindWork | ValidateOutput => {
                     let inputs = pinned_inputs();
                     let outputs = self.transform_stage(node, &inputs);
                     match outputs {
@@ -716,26 +876,147 @@ impl<'a> Evaluation<'a> {
                     }
                 }
                 RequestInput | Approval => {
-                    let Some(port) = super::decision_nodes::stage_port(self.db, self.run, node, unit, &input_ids())? else {
+                    let Some(port) = super::decision_nodes::stage_port(
+                        self.db,
+                        self.run,
+                        node,
+                        unit,
+                        &input_ids(),
+                    )?
+                    else {
                         return Ok(None);
                     };
                     (ControlStageState::Completed, Some(port), None, None)
                 }
-                UpdateProgress | ManageWork => {
+                UpdateProgress | ManageWork | MaterializeBacklog => {
                     use super::agile_nodes::AgileStageOutcome;
-                    let Some(outcome) = super::agile_nodes::stage_port(self.db, self.run, node, unit, &input_ids())? else {
+                    let Some(outcome) = super::agile_nodes::stage_port(
+                        self.db,
+                        self.run,
+                        node,
+                        unit,
+                        &input_ids(),
+                    )?
+                    else {
                         return Ok(None);
                     };
                     match outcome {
-                        AgileStageOutcome::Completed => (ControlStageState::Completed, Some("completed"), None, None),
+                        AgileStageOutcome::Completed => {
+                            (ControlStageState::Completed, Some("completed"), None, None)
+                        }
                         AgileStageOutcome::Failed { reason } => {
                             diagnostic = Some(reason);
                             (ControlStageState::Failed, Some("failed"), None, None)
                         }
                     }
                 }
+                RunBacklog => {
+                    use super::backlog::execution::{ExecutionState, stage_state};
+                    let backlog =
+                        selected_artifact("backlog").context("The backlog input is unavailable")?;
+                    match stage_state(self.db, self.run, node, unit, &backlog.id)? {
+                        ExecutionState::Waiting(_) => return Ok(None),
+                        ExecutionState::Completed => {
+                            (ControlStageState::Completed, Some("completed"), None, None)
+                        }
+                        ExecutionState::Failed(reason) => {
+                            diagnostic = Some(reason);
+                            (ControlStageState::Failed, Some("failed"), None, None)
+                        }
+                    }
+                }
+                SearchPublicRepositories
+                | OpenOrUpdatePullRequest
+                | WaitForCi
+                | MergePullRequest => {
+                    let inputs = input_ids();
+                    let Some(port) =
+                        super::github::stage_port(self.db, self.run, node, unit, &inputs)?
+                    else {
+                        return Ok(None);
+                    };
+                    let state = if matches!(port, "failed" | "stale") {
+                        diagnostic =
+                            super::github::stage_reason(self.db, self.run, node, unit, &inputs)?;
+                        ControlStageState::Failed
+                    } else {
+                        ControlStageState::Completed
+                    };
+                    (state, Some(port), None, None)
+                }
+                VerifyIntegratedChecks => {
+                    let inputs = input_ids();
+                    let Some(port) = super::integrated_checks::stage_port(
+                        self.db, self.run, node, None, &inputs,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    diagnostic =
+                        super::integrated_checks::stage_reason(self.db, self.run, node, &inputs)?;
+                    (ControlStageState::Completed, Some(port), None, None)
+                }
+                VerifyTestPhase => {
+                    let Some(port) =
+                        super::test_phase::stage_port(self.db, self.run, node, unit, &input_ids())?
+                    else {
+                        return Ok(None);
+                    };
+                    (ControlStageState::Completed, Some(port), None, None)
+                }
+                PrepareWorktree => {
+                    if let (Some(decision), Some(task)) =
+                        (selected_artifact("decision"), selected_artifact("task"))
+                    {
+                        super::automation::preparation::note_ready_preparation(
+                            self.db, self.run, node_id, decision, task,
+                        )?;
+                    }
+                    return Ok(None);
+                }
+                Implement | ReviewCandidate
+                    if super::automation::agents_delivery::enabled_for(
+                        self.db,
+                        &self.run.id,
+                        node,
+                    )? =>
+                {
+                    let inputs = pinned_inputs();
+                    let Some(outcome) = super::automation::agents_delivery::evaluate(
+                        self.db, self.run, node, unit, &inputs,
+                    )?
+                    else {
+                        super::automation::note_ready_agent(
+                            self.db, self.run, node, unit, &inputs,
+                        )?;
+                        return Ok(None);
+                    };
+                    diagnostic = outcome.reason;
+                    source_run = outcome.source_run_id;
+                    (outcome.state, Some(outcome.port), None, None)
+                }
+                VerifyCandidate | AcceptCandidate | VerifyCommit
+                    if self.automatic_unit_action(node)? =>
+                {
+                    let inputs = pinned_inputs();
+                    let Some(outcome) = super::automation::unit_actions::evaluate(
+                        self.db, self.run, node, unit, &inputs,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    diagnostic = outcome.reason;
+                    source_run = outcome.source_run_id;
+                    (outcome.state, Some(outcome.port), None, None)
+                }
                 Agent => {
-                    let Some(outcome) = super::generic_agent::evaluate(self.db, self.run, node, unit, &pinned_inputs())? else {
+                    let inputs = pinned_inputs();
+                    let Some(outcome) =
+                        super::generic_agent::evaluate(self.db, self.run, node, unit, &inputs)?
+                    else {
+                        super::automation::note_ready_agent(
+                            self.db, self.run, node, unit, &inputs,
+                        )?;
                         return Ok(None);
                     };
                     diagnostic = outcome.reason;
@@ -743,21 +1024,28 @@ impl<'a> Evaluation<'a> {
                     (outcome.state, Some(outcome.port), None, None)
                 }
                 SummarizeResult => {
-                    let input = selected_artifact("summary").context("The Result has no selected summary")?;
+                    let input = selected_artifact("summary")
+                        .context("The Result has no selected summary")?;
                     let ArtifactValue::RenderedText(summary) = &input.value else {
                         anyhow::bail!("Result needs text produced by the workflow");
                     };
-                    let mut inputs = std::collections::BTreeMap::from([("summary".into(), input.clone())]);
+                    let mut inputs =
+                        std::collections::BTreeMap::from([("summary".into(), input.clone())]);
                     let mut artifacts = Vec::new();
                     for (wire, arrival) in &dependencies {
-                        if wire.to.port == "evidence" && let Arrival::Selected(Some(artifact)) = arrival
+                        if wire.to.port == "evidence"
+                            && let Arrival::Selected(Some(artifact)) = arrival
                             && !artifacts.contains(&artifact.id)
                         {
                             artifacts.push(artifact.id.clone());
-                            inputs.insert(format!("evidence.{}", artifacts.len()), artifact.clone());
+                            inputs
+                                .insert(format!("evidence.{}", artifacts.len()), artifact.clone());
                         }
                     }
-                    let value = ArtifactValue::ResultSummary { summary: summary.clone(), artifacts };
+                    let value = ArtifactValue::ResultSummary {
+                        summary: summary.clone(),
+                        artifacts,
+                    };
                     self.record_stage_artifact(node_id, unit, "summary", value, &inputs)?;
                     (ControlStageState::Completed, Some("completed"), None, None)
                 }
@@ -777,7 +1065,14 @@ impl<'a> Evaluation<'a> {
                     }
                 }
                 CompareModels => {
-                    let Some(outcome) = super::comparison::stage::evaluate(self.db, self.run, node, unit, &pinned_inputs())? else {
+                    let Some(outcome) = super::comparison::stage::evaluate(
+                        self.db,
+                        self.run,
+                        node,
+                        unit,
+                        &pinned_inputs(),
+                    )?
+                    else {
                         return Ok(None);
                     };
                     diagnostic = outcome.reason;
@@ -944,11 +1239,14 @@ impl<'a> Evaluation<'a> {
                     (ControlStageState::Completed, Some("loaded"), None, None)
                 }
                 Command
-                    if self
-                        .definition
-                        .wires
-                        .iter()
-                        .any(|wire| wire.from.node == node_id && wire.from.port == "failed") =>
+                    if self.definition.wires.iter().any(|wire| {
+                        wire.from.node == node_id
+                            && (wire.from.port == "failed"
+                                || self.nodes.get(wire.to.node.as_str()).is_some_and(|target| {
+                                    target.instance.kind == CollectEvidence
+                                        && wire.to.port == "evidence"
+                                }))
+                    }) =>
                 {
                     let Some(attempt) = self.command_attempt(node_id)? else {
                         return Ok(None);
@@ -1004,6 +1302,7 @@ impl<'a> Evaluation<'a> {
             selected_ports: port.into_iter().map(str::to_owned).collect(),
             reason: diagnostic.or_else(|| reason.map(str::to_owned)),
             source_run_id: source_run.or(attempt),
+            forwarded_outputs,
             dependencies: dependencies
                 .into_iter()
                 .filter_map(|(wire, outcome)| {
@@ -1030,35 +1329,103 @@ impl<'a> Evaluation<'a> {
     ) -> Result<Vec<(&'static str, ArtifactValue)>> {
         use super::data_nodes::data_view;
         let value = match &node.instance.configuration {
+            NodeConfiguration::ValidateOutput(config) => {
+                let source = inputs
+                    .get("source")
+                    .context("The pinned output is missing")?;
+                let values = match &source.value {
+                    ArtifactValue::AgentResponse(response) => {
+                        config.parse(&super::generic_agent::response_text(
+                            self.db,
+                            &self.run.project_id,
+                            &self.run.id,
+                            response,
+                        )?)?
+                    }
+                    ArtifactValue::RenderedText(text) => config.parse(text)?,
+                    ArtifactValue::JsonObject(values) => {
+                        config.evaluate(serde_json::Value::Object(values.clone()))?
+                    }
+                    ArtifactValue::CommandResult(result) => match &result.output {
+                        super::command::CommandData::Json(value) => {
+                            config.evaluate(value.clone())?
+                        }
+                        super::command::CommandData::Text(text) => config.parse(text)?,
+                    },
+                    _ => anyhow::bail!(
+                        "Select a saved Agent response, JSON object, text, or Command result"
+                    ),
+                };
+                ("object", ArtifactValue::JsonObject(values))
+            }
             NodeConfiguration::SetFields(config) => {
-                let source = inputs.get("source").map(|source| serde_json::to_value(&source.value)).transpose()?;
-                ("object", ArtifactValue::JsonObject(config.evaluate(source.as_ref().map(data_view))?))
+                let source = inputs
+                    .get("source")
+                    .map(|source| serde_json::to_value(&source.value))
+                    .transpose()?;
+                (
+                    "object",
+                    ArtifactValue::JsonObject(config.evaluate(source.as_ref().map(data_view))?),
+                )
             }
             NodeConfiguration::FilterMapList(config) => {
-                let input = inputs.get("items").context("The list input is unavailable")?;
+                let input = inputs
+                    .get("items")
+                    .context("The list input is unavailable")?;
                 let items = super::iteration::list_value(input)?;
-                ("items", ArtifactValue::JsonList(config.evaluate(items, &input.id)?))
+                (
+                    "items",
+                    ArtifactValue::JsonList(config.evaluate(items, &input.id)?),
+                )
             }
             NodeConfiguration::BuildText(config) => {
-                let values = inputs.get("values").map(|artifact| match &artifact.value {
-                    ArtifactValue::JsonObject(values) => Ok(values),
-                    _ => anyhow::bail!("The named template inputs must be an object"),
-                }).transpose()?;
-                ("text", ArtifactValue::RenderedText(config.evaluate(values)?))
+                let values = inputs
+                    .get("values")
+                    .map(|artifact| match &artifact.value {
+                        ArtifactValue::JsonObject(values) => Ok(values),
+                        _ => anyhow::bail!("The named template inputs must be an object"),
+                    })
+                    .transpose()?;
+                (
+                    "text",
+                    ArtifactValue::RenderedText(config.evaluate(values)?),
+                )
             }
             NodeConfiguration::LoadWorkContext { .. } => {
-                let task = inputs.get("task").map(|artifact| match &artifact.value {
-                    ArtifactValue::Task(task) => super::agile_nodes::load_task_context(self.db, &self.run.project_id, &self.run.id, task),
-                    _ => anyhow::bail!("The context node requires pinned work"),
-                }).transpose()?;
-                let document = inputs.get("document").map(|artifact| match &artifact.value {
-                    ArtifactValue::Markdown(document) => Ok(document.clone()),
-                    _ => anyhow::bail!("The context node requires pinned Markdown"),
-                }).transpose()?;
-                ("context", ArtifactValue::WorkflowContext(super::agile_nodes::WorkflowContext { task, document }))
+                let task = inputs
+                    .get("task")
+                    .map(|artifact| match &artifact.value {
+                        ArtifactValue::Task(task) => super::agile_nodes::load_task_context(
+                            self.db,
+                            &self.run.project_id,
+                            &self.run.id,
+                            task,
+                        ),
+                        _ => anyhow::bail!("The context node requires pinned work"),
+                    })
+                    .transpose()?;
+                let document = inputs
+                    .get("document")
+                    .map(|artifact| match &artifact.value {
+                        ArtifactValue::Markdown(document) => Ok(document.clone()),
+                        _ => anyhow::bail!("The context node requires pinned Markdown"),
+                    })
+                    .transpose()?;
+                (
+                    "context",
+                    ArtifactValue::WorkflowContext(super::agile_nodes::WorkflowContext {
+                        task,
+                        document,
+                    }),
+                )
             }
             NodeConfiguration::FindWork { query } => {
-                return super::agile_nodes::find_work(self.db, &self.run.project_id, &self.run.id, query);
+                return super::agile_nodes::find_work(
+                    self.db,
+                    &self.run.project_id,
+                    &self.run.id,
+                    query,
+                );
             }
             _ => anyhow::bail!("The node configuration does not match the selected operation"),
         };
@@ -1074,8 +1441,13 @@ impl<'a> Evaluation<'a> {
         inputs: &std::collections::BTreeMap<String, WorkflowArtifact>,
     ) -> Result<()> {
         let artifact = super::artifacts::insert_scoped_artifact(
-            self.db, &self.run.project_id, self.run.id.clone(), node.into(), port.into(),
-            unit.map(str::to_owned), value,
+            self.db,
+            &self.run.project_id,
+            self.run.id.clone(),
+            node.into(),
+            port.into(),
+            unit.map(str::to_owned),
+            value,
         )?;
         let plan_key = self.run.plan_revision.as_deref().unwrap_or("");
         super::inspection::record_workflow_completion_inputs(self.db, &artifact, plan_key, inputs)
@@ -1154,14 +1526,32 @@ impl<'a> Evaluation<'a> {
             .find(|port| port.name == wire.from.port)
             .context("Control wire lost its output port")?;
         let receipt = self.receipt(source_id, source_unit);
-        if receipt.is_some_and(|receipt| receipt.state == ControlStageState::Skipped
-            || receipt.state == ControlStageState::Failed && is_control(source.instance.kind) && port.value != PortType::Control) {
+        let delivery_agent = matches!(
+            source.instance.kind,
+            BuiltinNode::Implement | BuiltinNode::ReviewCandidate
+        ) && source
+            .definition
+            .outputs
+            .iter()
+            .any(|port| port.name == "failed");
+        let automatic_unit_action = self.automatic_unit_action(source)?;
+        if receipt.is_some_and(|receipt| {
+            receipt.state == ControlStageState::Skipped
+                || receipt.state == ControlStageState::Failed
+                    && (is_control(source.instance.kind) || delivery_agent || automatic_unit_action)
+                    && port.value != PortType::Control
+                    && !(source.instance.kind == BuiltinNode::WaitForCi
+                        && port.name == "ci"
+                        && receipt.selected_ports.iter().any(|port| port == "failed"))
+        }) {
             return Ok(Arrival::Ignored);
         }
         if port.value == PortType::Control
             && (is_control(source.instance.kind)
                 || source.instance.kind == BuiltinNode::McpTool
-                || source.instance.kind == BuiltinNode::Command && receipt.is_some())
+                || automatic_unit_action
+                || (source.instance.kind == BuiltinNode::Command || delivery_agent)
+                    && receipt.is_some())
         {
             return Ok(match receipt {
                 Some(receipt) if receipt.selected_ports.contains(&wire.from.port) => {
@@ -1169,6 +1559,99 @@ impl<'a> Evaluation<'a> {
                 }
                 Some(_) => Arrival::Ignored,
                 None => Arrival::Pending,
+            });
+        }
+        if delivery_agent && wire.from.port == "failed" {
+            return Ok(
+                if self
+                    .source_artifact(&wire.from, source_unit, true)?
+                    .is_some()
+                    && !super::automation::agents_delivery::enabled_for(
+                        self.db,
+                        &self.run.id,
+                        source,
+                    )?
+                {
+                    Arrival::Ignored
+                } else {
+                    Arrival::Pending
+                },
+            );
+        }
+        if wire.from.port == "failed"
+            && matches!(
+                source.instance.kind,
+                BuiltinNode::VerifyCandidate
+                    | BuiltinNode::AcceptCandidate
+                    | BuiltinNode::VerifyCommit
+            )
+            && !automatic_unit_action
+        {
+            return Ok(
+                if self
+                    .source_artifact(&wire.from, source_unit, true)?
+                    .is_some()
+                {
+                    Arrival::Ignored
+                } else {
+                    Arrival::Pending
+                },
+            );
+        }
+        if delivery_agent
+            && super::automation::agents_delivery::enabled_for(self.db, &self.run.id, source)?
+        {
+            let Some(attempt) = receipt.and_then(|receipt| receipt.source_run_id.as_deref()) else {
+                return Ok(Arrival::Pending);
+            };
+            let output = super::automation::agents_delivery::sealed_output(
+                self.db,
+                self.run,
+                source_id,
+                source_unit,
+                attempt,
+                &wire.from.port,
+            )?;
+            return Ok(output.map_or(Arrival::Pending, |artifact| {
+                Arrival::Selected(Some(artifact))
+            }));
+        }
+        if automatic_unit_action {
+            let Some(receipt) = receipt else {
+                return Ok(Arrival::Pending);
+            };
+            let output = super::automation::unit_actions::sealed_output(
+                self.db,
+                self.run,
+                source_id,
+                source_unit,
+                &wire.from.port,
+            )?;
+            return Ok(match output {
+                Some(artifact) => Arrival::Selected(Some(artifact)),
+                None if receipt.selected_ports.iter().any(|port| port == "failed") => {
+                    Arrival::Ignored
+                }
+                None => Arrival::Pending,
+            });
+        }
+        if source.instance.kind == BuiltinNode::RepeatOutput {
+            let Some(export) =
+                receipt.and_then(|receipt| receipt.forwarded_outputs.get(&wire.from.port))
+            else {
+                return Ok(Arrival::Pending);
+            };
+            let incoming = self
+                .definition
+                .wires
+                .iter()
+                .find(|incoming| incoming.to.node == source_id && incoming.to.port == export.input)
+                .context("The approved iteration lost its export wire")?;
+            return Ok(match self.dependency(incoming, source_unit)? {
+                Arrival::Selected(Some(artifact)) if artifact.id == export.artifact_id => {
+                    Arrival::Selected(Some(artifact))
+                }
+                _ => Arrival::Pending,
             });
         }
         if source.instance.kind == BuiltinNode::Command {
@@ -1204,8 +1687,13 @@ impl<'a> Evaluation<'a> {
         }
         let artifact =
             self.source_artifact(&wire.from, source_unit, port.value == PortType::Control)?;
+        if artifact.is_none()
+            && receipt.is_some_and(|receipt| receipt.state == ControlStageState::Failed)
+        {
+            return Ok(Arrival::Ignored);
+        }
         Ok(artifact.map_or(Arrival::Pending, |artifact| {
-            Arrival::Selected(Some(artifact))
+            Arrival::Selected((port.value != PortType::Control).then_some(artifact))
         }))
     }
 
@@ -1218,30 +1706,39 @@ impl<'a> Evaluation<'a> {
         let mut statement = self.db.prepare(
             "SELECT a.payload, h.execution_key, EXISTS (
                  SELECT 1 FROM workflow_completion_inputs i WHERE i.output_artifact_id = a.id
-                   AND (i.execution_key = ?5 OR (?6 AND i.execution_key = '')))
+                   AND i.execution_key = ?5) AS exact_receipt, EXISTS (
+                 SELECT 1 FROM workflow_completion_inputs i WHERE i.output_artifact_id = a.id
+                   AND ?6 AND i.execution_key = '')
              FROM workflow_artifacts a LEFT JOIN workflow_host_completions h ON h.artifact_id = a.id
              WHERE a.pipeline_run_id = ?1 AND a.node_instance_id = ?2 AND a.unit_id IS ?3
                AND (?4 IS NULL OR a.port_name = ?4)
-             ORDER BY h.execution_key = ?5 DESC, a.port_name, a.id",
+             ORDER BY CASE WHEN ?6 THEN exact_receipt ELSE 0 END DESC,
+                 h.execution_key = ?5 DESC, a.port_name, a.id",
         )?;
         let key = self.run.plan_revision.as_deref().unwrap_or("");
+        let typed_entry = self
+            .nodes
+            .get(source.node.as_str())
+            .is_some_and(|node| node.instance.kind == BuiltinNode::TypedStart);
         let mut rows = statement.query(params![
             self.run.id,
             source.node,
             unit,
             (!control).then_some(&source.port),
             key,
-            self.nodes.get(source.node.as_str()).is_some_and(|node| node.instance.kind == BuiltinNode::TypedStart),
+            typed_entry,
         ])?;
         let mut selected = None;
+        let mut selected_exact_start = false;
         while let Some(row) = rows.next()? {
             let payload: Vec<u8> = row.get(0)?;
             let host_key: Option<String> = row.get(1)?;
-            let receipt: bool = row.get(2)?;
+            let exact_receipt: bool = row.get(2)?;
+            let launch_receipt: bool = row.get(3)?;
             let artifact: WorkflowArtifact =
                 serde_json::from_slice(&protection::unprotect(&payload)?)?;
             let valid = match &artifact.value {
-                ArtifactValue::Plan { .. } => {
+                ArtifactValue::Plan { .. } | ArtifactValue::BacklogPlan(_) => {
                     self.run.plan_revision.as_deref() == Some(&artifact.id)
                 }
                 ArtifactValue::Review { run_id } => self.attempt_matches(run_id)?,
@@ -1262,7 +1759,8 @@ impl<'a> Evaluation<'a> {
                     host_key
                         .as_deref()
                         .is_some_and(|host| host.is_empty() || host == key)
-                        || receipt
+                        || exact_receipt
+                        || launch_receipt
                         || unit.is_some() && self.run.plan_revision.is_some()
                 }
             };
@@ -1270,9 +1768,14 @@ impl<'a> Evaluation<'a> {
                 if control || host_key.as_deref() == Some(key) {
                     return Ok(Some(artifact));
                 }
+                let exact_start = typed_entry && source.port == "inputs" && exact_receipt;
+                if selected_exact_start && !exact_start {
+                    break;
+                }
                 if selected.replace(artifact).is_some() {
                     return Ok(None);
                 }
+                selected_exact_start = exact_start;
             }
         }
         Ok(selected)

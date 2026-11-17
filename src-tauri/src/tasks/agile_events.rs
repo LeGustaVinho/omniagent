@@ -167,6 +167,15 @@ pub(crate) fn bind_workflow_trigger_origin(
     pipeline_run: &str,
     event: &str,
 ) -> Result<AgilePipelineOrigin> {
+    let child: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workflow_child_origins WHERE child_run_id = ?1)",
+        [pipeline_run],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !child,
+        "This child workflow already inherits its parent's Agile origin"
+    );
     let current = load_pipeline_origin(db, project, pipeline_run)?;
     if let Some(prior) = &current.event_id {
         ensure!(
@@ -283,6 +292,37 @@ pub(crate) fn pipeline_work_origin(
     })
 }
 
+pub(crate) fn bind_workflow_child_origin(
+    db: &Connection,
+    project: &str,
+    parent: &str,
+    child: &str,
+) -> Result<()> {
+    let mut origin = load_pipeline_origin(db, project, parent)?;
+    let tail = load_pipeline_origin(db, project, child)?
+        .automation_chain
+        .into_iter()
+        .next()
+        .context("Missing child workflow identity")?;
+    ensure!(
+        !origin
+            .automation_chain
+            .iter()
+            .any(|link| link.pipeline_id == tail.pipeline_id),
+        "This workflow already appears in the parent automation chain"
+    );
+    origin.automation_chain.push(tail);
+    db.execute(
+        "INSERT INTO workflow_child_origins VALUES (?1, ?2, ?3)",
+        params![
+            child,
+            origin.event_id,
+            serde_json::to_string(&origin.automation_chain)?
+        ],
+    )?;
+    Ok(())
+}
+
 pub(super) fn agent_work_origin(
     db: &Connection,
     project: &str,
@@ -309,10 +349,12 @@ pub(super) fn agent_work_origin(
 
 fn load_pipeline_origin(db: &Connection, project: &str, run: &str) -> Result<AgilePipelineOrigin> {
     let (pipeline_id, event_id, chain): (String, Option<String>, Option<String>) = db.query_row(
-        "SELECT coalesce(pin.workflow_id, pipeline.id), causal.event_id, causal.automation_chain
+        "SELECT coalesce(pin.workflow_id, pipeline.id), coalesce(causal.event_id, child.event_id),
+                coalesce(causal.automation_chain, child.automation_chain)
          FROM job_pipeline_runs pipeline
          LEFT JOIN workflow_run_pins pin ON pin.pipeline_run_id = pipeline.id
          LEFT JOIN pipeline_work_event_origins causal ON causal.pipeline_run_id = pipeline.id
+         LEFT JOIN workflow_child_origins child ON child.child_run_id = pipeline.id
          WHERE pipeline.id = ?1 AND pipeline.project_id = ?2",
         params![run, project], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?.context("pipeline run is outside the selected project")?;

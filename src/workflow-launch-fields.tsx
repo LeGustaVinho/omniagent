@@ -15,7 +15,9 @@ export type WorkflowStartSchema = {
   fields: WorkflowStartField[];
   requiresDocument: boolean;
   requiresWork: boolean;
+  requiresBacklogPlan?: boolean;
   requiresEvent: boolean;
+  promptOrMarkdown?: boolean;
 };
 
 export type TypedLaunchFields = {
@@ -23,6 +25,7 @@ export type TypedLaunchFields = {
   documentRevisionId: string | null;
   workId: string | null;
   inputs: Record<string, unknown>;
+  automatic?: boolean;
 };
 
 export function initialWorkflowStartValue(type: ValueType) {
@@ -84,6 +87,9 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
   const [requestedCheckout, chooseCheckout] = useState(initialCheckoutId);
   const [selectedWork, chooseWork] = useState("");
   const [includeDocument, setIncludeDocument] = useState(false);
+  const [automatic, setAutomatic] = useState(false);
+  const [requestSource, setRequestSource] = useState<"prompt" | "markdown">("prompt");
+  const [prompt, setPrompt] = useState("");
   const [values, setValues] = useState(() => initialWorkflowStartFields(schema));
   const [includedFields, setIncludedFields] = useState<string[]>([]);
   const checkouts = useQuery({
@@ -101,8 +107,10 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
   const work = (hierarchy.data?.work ?? []).find(({ task }) => task.id === requestedWork);
   const workAvailable = requestedWork ? Boolean(work) : !schema.requiresWork;
   const supplied = schema.fields.every(({ name, required }) => (!required && !includedFields.includes(name)) || Object.hasOwn(values, name));
-  const needsDocument = pinned || schema.requiresDocument || includeDocument;
-  const ready = Boolean(checkout && workAvailable && supplied && !pending);
+  const needsDocument = pinned || schema.requiresDocument ||
+    (schema.promptOrMarkdown ? requestSource === "markdown" : includeDocument);
+  const ready = Boolean(checkout && workAvailable && supplied && !pending
+    && (!schema.promptOrMarkdown || needsDocument || prompt.trim()));
   const error = checkouts.error ?? hierarchy.error;
 
   function setValue(name: string, value: unknown) {
@@ -121,8 +129,12 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
       checkoutId: checkout.checkoutId,
       documentRevisionId,
       workId: work?.task.id ?? null,
-      inputs: Object.fromEntries(schema.fields.filter(({ name }) => Object.hasOwn(values, name))
-        .map(({ name }) => [name, values[name]])),
+      inputs: {
+        ...Object.fromEntries(schema.fields.filter(({ name }) => Object.hasOwn(values, name))
+          .map(({ name }) => [name, values[name]])),
+        ...(schema.promptOrMarkdown && !needsDocument ? { prompt } : {}),
+      },
+      ...(automatic ? { automatic } : {}),
     });
   }
 
@@ -153,7 +165,21 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
         </div>;
       })}
     </fieldset>}
-    {!pinned && !schema.requiresDocument && <label className="pipeline-checkline"><input type="checkbox" checked={includeDocument}
+    {schema.promptOrMarkdown && !pinned && <label>Request source
+      <select value={requestSource} disabled={pending}
+        onChange={(event) => setRequestSource(event.currentTarget.value === "markdown" ? "markdown" : "prompt")}>
+        <option value="prompt">Prompt</option>
+        <option value="markdown">Saved Markdown revision</option>
+      </select>
+    </label>}
+    {schema.promptOrMarkdown && !needsDocument && <label>Prompt
+      <textarea rows={5} value={prompt} disabled={pending} onChange={(event) => setPrompt(event.currentTarget.value)} />
+    </label>}
+    <label className="pipeline-checkline"><input type="checkbox" checked={automatic} disabled={pending}
+      onChange={(event) => setAutomatic(event.currentTarget.checked)} />
+      Dispatch ready workflow stages automatically
+    </label>
+    {!pinned && !schema.requiresDocument && !schema.promptOrMarkdown && <label className="pipeline-checkline"><input type="checkbox" checked={includeDocument}
       disabled={pending} onChange={(event) => setIncludeDocument(event.currentTarget.checked)} />
       Include a Markdown revision
     </label>}

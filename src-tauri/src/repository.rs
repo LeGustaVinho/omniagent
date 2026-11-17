@@ -21,6 +21,7 @@ pub mod delivery_history;
 pub mod destination_drift;
 pub mod documents;
 pub mod git_review;
+pub(crate) mod github;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;
@@ -40,7 +41,7 @@ pub(crate) use candidates::{
     WorktreeCheckpointMismatch, save_reconciled_native_candidate, save_worktree_candidate,
 };
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
-pub(crate) use markdown::{bind_job_markdown, workflow_markdown_revision};
+pub(crate) use markdown::{bind_job_markdown, load_markdown, workflow_markdown_revision};
 pub use markdown_catalog::RepositoryNoteCatalogEntry;
 pub(crate) use worktrees::conversation::{
     ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout,
@@ -49,6 +50,7 @@ pub use worktrees::manual::{ManualGitWorktree, create_git_worktree};
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub(crate) use worktrees::strategy::{branch_strategy_for_scope, write_task_branch_strategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
+pub(crate) use worktrees::{IntegratedWorktreeBase, provision_task_worktree_at};
 pub(crate) use worktrees::{
     capture_worktree_start, observe_interrupted_writer, validate_task_worktree_checkout,
     verify_managed_recovery_candidate, verify_managed_recovery_checkout,
@@ -78,6 +80,28 @@ pub async fn checkout_root(store: &Store, checkout_id: String) -> Result<PathBuf
             Ok(path.into())
         })
         .await
+}
+
+pub(crate) fn registered_checkout_head(
+    db: &rusqlite::Connection,
+    project: &str,
+    checkout: &str,
+) -> Result<String> {
+    let (root, git_dir, common): (String, String, String) = db.query_row(
+        "SELECT c.root, c.git_dir, p.git_common_dir FROM checkouts c
+         JOIN projects p ON p.id = c.project_id WHERE c.project_id = ?1 AND c.id = ?2",
+        params![project, checkout],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let root_path = Path::new(&root);
+    let registered = inspect(root_path)?;
+    ensure!(
+        registered.checkout_root == root
+            && registered.git_dir == git_dir
+            && registered.git_common_dir == common,
+        "checkout identity changed after registration"
+    );
+    base_commit(root_path)?.context("The selected checkout needs a committed HEAD")
 }
 
 #[derive(Clone)]

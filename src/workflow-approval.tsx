@@ -11,13 +11,15 @@ type AutomaticRule = {
   maximumUnits: number;
   ifUnmet: "wait" | "human";
 };
-type ApprovalSettings = { mode: "human" } | AutomaticRule;
+type BacklogScope = { parentRunId: string; nodeId: string; childRevision: string };
+type BacklogRule = Omit<AutomaticRule, "mode" | "taskId"> & { mode: "backlog_automatic"; scope: BacklogScope };
+type ApprovalSettings = { mode: "human" } | AutomaticRule | BacklogRule;
 type ApprovalOutcome = "human_required" | "scope_does_not_match" | "unit_limit_exceeded" |
   "another_delivery_owns_task" | "conditions_met";
 type ApprovalPreview = {
   revision: string | null;
   settings: ApprovalSettings;
-  facts: { taskId: string; sourceCheckoutId: string; planRevision: string; unitCount: number };
+  facts: { taskId: string; sourceCheckoutId: string; planRevision: string; unitCount: number; backlogScope?: BacklogScope };
   outcome: ApprovalOutcome;
   allowsHuman: boolean;
   decisionArtifactId: string | null;
@@ -29,8 +31,8 @@ type ApprovalStage =
 function status(preview: ApprovalPreview) {
   switch (preview.outcome) {
     case "human_required": return "Waiting for your approval of the selected plan and task.";
-    case "scope_does_not_match": return "The rule covers a different task or source checkout.";
-    case "unit_limit_exceeded": return `The reviewed plan has ${preview.facts.unitCount} logical units. The rule permits ${preview.settings.mode === "automatic" ? preview.settings.maximumUnits : 0}.`;
+    case "scope_does_not_match": return "The selected work is outside the rule’s scope.";
+    case "unit_limit_exceeded": return `The reviewed plan has ${preview.facts.unitCount} logical units. The rule permits ${preview.settings.mode !== "human" ? preview.settings.maximumUnits : 0}.`;
     case "another_delivery_owns_task": return "Another approval stage or delivery currently owns this task.";
     case "conditions_met": return `The reviewed plan matches the approved scope and has ${preview.facts.unitCount} logical units within the rule’s limit.`;
   }
@@ -40,10 +42,11 @@ function RuleForm({ preview, onSave, busy }: {
   preview: ApprovalPreview; onSave: (settings: ApprovalSettings) => void; busy: boolean;
 }) {
   const [mode, setMode] = useState(preview.settings.mode);
-  const [limit, setLimit] = useState(String(preview.settings.mode === "automatic" ? preview.settings.maximumUnits : preview.facts.unitCount));
-  const [ifUnmet, setIfUnmet] = useState<AutomaticRule["ifUnmet"]>(preview.settings.mode === "automatic" ? preview.settings.ifUnmet : "wait");
+  const [limit, setLimit] = useState(String(preview.settings.mode !== "human" ? preview.settings.maximumUnits : preview.facts.unitCount));
+  const [ifUnmet, setIfUnmet] = useState<AutomaticRule["ifUnmet"]>(preview.settings.mode !== "human" ? preview.settings.ifUnmet : "wait");
   const count = Number(limit);
-  const valid = Number.isInteger(count) && count > 0 && count <= 4_294_967_295;
+  const scope = preview.facts.backlogScope;
+  const valid = Number.isInteger(count) && count > 0 && count <= 4_294_967_295 && (mode !== "backlog_automatic" || !!scope);
   return <details className="pipeline-evidence">
     <summary>Implementation approval settings</summary>
     <form className="pipeline-stack p-2" onSubmit={(event) => {
@@ -51,14 +54,23 @@ function RuleForm({ preview, onSave, busy }: {
       if (mode === "human") onSave({ mode });
       if (mode === "automatic" && valid) onSave({ mode, maximumUnits: count, ifUnmet,
         taskId: preview.facts.taskId, sourceCheckoutId: preview.facts.sourceCheckoutId });
+      if (mode === "backlog_automatic" && valid && scope) onSave({ mode, scope, maximumUnits: count, ifUnmet,
+        sourceCheckoutId: preview.facts.sourceCheckoutId });
     }}>
-      <label>Decision mode <select value={mode} onChange={(event) => setMode(event.currentTarget.value === "automatic" ? "automatic" : "human")}>
+      <label>Decision mode <select value={mode} onChange={(event) => {
+        const next = event.currentTarget.value;
+        if (next === "human" || next === "automatic" || next === "backlog_automatic") setMode(next);
+      }}>
         <option value="human">Human approval</option>
         <option value="automatic">Automatic approval</option>
+        {(scope || mode === "backlog_automatic") && <option value="backlog_automatic">Automatic approval for this backlog</option>}
       </select></label>
-      {mode === "automatic" && <>
+      {mode !== "human" && <>
         <dl className="pipeline-stack break-all">
-          <div><dt>Linked work</dt><dd>{preview.facts.taskId}</dd></div>
+          {mode === "backlog_automatic" ? scope && <>
+            <div><dt>Backlog execution</dt><dd>{scope.parentRunId} · {scope.nodeId}</dd></div>
+            <div><dt>Child revision</dt><dd>{scope.childRevision}</dd></div>
+          </> : <div><dt>Linked work</dt><dd>{preview.facts.taskId}</dd></div>}
           <div><dt>Planning checkout</dt><dd>{preview.facts.sourceCheckoutId}</dd></div>
           <div><dt>Reviewed plan</dt><dd>{preview.facts.planRevision}</dd></div>
         </dl>
@@ -69,7 +81,7 @@ function RuleForm({ preview, onSave, busy }: {
           <option value="human">Ask for human approval</option>
         </select></label>
       </>}
-      <Button type="submit" variant="outline" disabled={busy || (mode === "automatic" && !valid)}>Save approval settings</Button>
+      <Button type="submit" variant="outline" disabled={busy || (mode !== "human" && !valid)}>Save approval settings</Button>
     </form>
   </details>;
 }

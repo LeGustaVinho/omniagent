@@ -10,7 +10,10 @@ use crate::{
     protection,
     repository::{RepositoryMarkdownRevision, workflow_markdown_revision},
     store::Store,
-    tasks::{AgileEventData, ChecklistProgressReceipt, bind_workflow_trigger_origin},
+    tasks::{
+        AgileEventData, ChecklistProgressReceipt, bind_workflow_child_origin,
+        bind_workflow_trigger_origin,
+    },
 };
 
 use super::{
@@ -61,13 +64,20 @@ pub enum WorkflowLaunchOrigin {
         work_id: Option<String>,
         event_id: Option<String>,
     },
+    Backlog {
+        parent_run_id: String,
+        node_id: String,
+        work_id: String,
+    },
 }
 
 impl WorkflowLaunchOrigin {
     pub(super) fn work_id(&self) -> Option<&str> {
         match self {
             Self::Editor { .. } => None,
-            Self::Agile { work_id, .. } | Self::Rule { work_id, .. } => Some(work_id),
+            Self::Agile { work_id, .. }
+            | Self::Rule { work_id, .. }
+            | Self::Backlog { work_id, .. } => Some(work_id),
             Self::Conversation { work_id, .. } => work_id.as_deref(),
         }
     }
@@ -89,6 +99,11 @@ impl WorkflowLaunchOrigin {
                 conversation_id.as_str(),
                 request_id.as_str(),
             ),
+            Self::Backlog {
+                parent_run_id,
+                work_id,
+                ..
+            } => ("backlog", parent_run_id.as_str(), work_id.as_str()),
         };
         ensure!(
             !key.1.trim().is_empty() && key.1.len() <= 256,
@@ -123,6 +138,8 @@ pub struct TypedWorkflowLaunch {
     work_id: Option<String>,
     #[serde(default)]
     inputs: Map<String, Value>,
+    #[serde(default)]
+    automatic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -136,6 +153,8 @@ pub(super) struct LaunchEntry {
     pub checkout_id: String,
     pub document_revision_id: Option<String>,
     pub inputs: Map<String, Value>,
+    pub automatic: bool,
+    pub backlog_plan: Option<super::backlog::BacklogDeliveryPlan>,
 }
 
 impl From<WorkflowLaunchSource> for LaunchEntry {
@@ -144,6 +163,8 @@ impl From<WorkflowLaunchSource> for LaunchEntry {
             checkout_id: source.checkout_id,
             document_revision_id: Some(source.revision_id),
             inputs: Map::new(),
+            automatic: false,
+            backlog_plan: None,
         }
     }
 }
@@ -165,6 +186,10 @@ pub struct WorkflowLaunchReceipt {
     pub checkout_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RepositoryMarkdownRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic: bool,
     pub origin: WorkflowLaunchOrigin,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub inputs: Map<String, Value>,
@@ -211,6 +236,8 @@ impl Store {
                     checkout_id: request.checkout_id,
                     document_revision_id: request.document_revision_id,
                     inputs: request.inputs,
+                    automatic: request.automatic,
+                    backlog_plan: None,
                 },
             ),
         };
@@ -377,8 +404,33 @@ pub(crate) fn launch_workflow_in_tx(
             checkout_id: checkout_id.into(),
             document_revision_id: document_revision_id.map(str::to_owned),
             inputs: Map::new(),
+            automatic: false,
+            backlog_plan: None,
         },
         origin,
+    )
+}
+
+pub(super) fn launch_backlog_child(
+    db: &Connection,
+    launch: super::backlog::execution::BacklogChildLaunch<'_>,
+) -> Result<WorkflowRun> {
+    launch_entry_in_tx(
+        db,
+        launch.project,
+        launch.workflow,
+        LaunchEntry {
+            checkout_id: launch.checkout.into(),
+            document_revision_id: None,
+            inputs: launch.inputs,
+            automatic: true,
+            backlog_plan: Some(launch.plan),
+        },
+        &WorkflowLaunchOrigin::Backlog {
+            parent_run_id: launch.parent.into(),
+            node_id: launch.node.into(),
+            work_id: launch.work.into(),
+        },
     )
 }
 
@@ -405,6 +457,7 @@ pub(super) fn launch_entry_in_tx(
                 && receipt.source.as_ref().map(|source| &source.id)
                     == entry.document_revision_id.as_ref()
                 && receipt.inputs == entry.inputs
+                && receipt.automatic == entry.automatic
                 && receipt.origin == *origin,
             "The launch identity was already used with different inputs"
         );
@@ -417,6 +470,8 @@ pub(super) fn launch_entry_in_tx(
 
 pub(super) struct PreparedLaunch {
     pub workflow: super::WorkflowDefinition,
+    normalized: Option<Map<String, Value>>,
+    source_commit: Option<String>,
     work: Option<TaskReference>,
     event: Option<WorkflowLaunchEvent>,
     document: Option<RepositoryMarkdownRevision>,
@@ -478,6 +533,8 @@ pub(super) fn prepare_entry(
         })
         .context("The published workflow has no Start node")?;
     let schema = WorkflowStartSchema::for_definition(&workflow);
+    let mut normalized = None;
+    let mut source_commit = None;
     if let NodeConfiguration::TypedStart(configuration) = &start.instance.configuration {
         let schema = schema
             .as_ref()
@@ -486,7 +543,32 @@ pub(super) fn prepare_entry(
             !matches!(origin, WorkflowLaunchOrigin::Rule { .. }) || schema.accepts_automation(),
             "This workflow requires inputs supplied at manual launch"
         );
-        configuration.validate_values(&entry.inputs)?;
+        let saved_markdown = if configuration.prompt_or_markdown() {
+            document
+                .as_ref()
+                .map(|source| {
+                    crate::repository::load_markdown(db, &entry.checkout_id, &source.id)?
+                        .context("The saved Markdown content is unavailable")
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        normalized = Some(
+            configuration.launch_values(
+                &entry.inputs,
+                saved_markdown
+                    .as_ref()
+                    .map(|source| source.markdown.as_str()),
+            )?,
+        );
+        if configuration.prompt_or_markdown() {
+            source_commit = Some(crate::repository::registered_checkout_head(
+                db,
+                project,
+                &entry.checkout_id,
+            )?);
+        }
         ensure!(
             !schema.requires_document || document.is_some(),
             "Select a saved Markdown revision for the Start document port"
@@ -498,6 +580,10 @@ pub(super) fn prepare_entry(
         ensure!(
             !schema.requires_event || event.is_some(),
             "Select a recorded Agile event for the Start event port"
+        );
+        ensure!(
+            !schema.requires_backlog_plan || entry.backlog_plan.is_some(),
+            "This workflow receives its plan from the Run backlog node"
         );
     } else {
         ensure!(
@@ -512,6 +598,8 @@ pub(super) fn prepare_entry(
 
     Ok(PreparedLaunch {
         workflow,
+        normalized,
+        source_commit,
         work,
         event,
         document,
@@ -530,6 +618,8 @@ fn persist_entry(
 ) -> Result<WorkflowRun> {
     let PreparedLaunch {
         workflow,
+        normalized,
+        source_commit,
         work,
         event,
         document,
@@ -545,19 +635,23 @@ fn persist_entry(
             )
         })
         .context("The published workflow has no Start node")?;
-    let typed = matches!(
-        &start.instance.configuration,
-        NodeConfiguration::TypedStart(_)
-    );
-    let run = insert_workflow_run(db, project, &workflow)?;
+    let mut run = insert_workflow_run(db, project, &workflow)?;
+    if entry.automatic {
+        db.execute("INSERT INTO workflow_automatic_runs VALUES (?1)", [&run.id])?;
+    }
     if let Some(event) = &event {
         bind_workflow_trigger_origin(db, project, &run.id, &event.id)?;
+    }
+    if let WorkflowLaunchOrigin::Backlog { parent_run_id, .. } = origin {
+        bind_workflow_child_origin(db, project, parent_run_id, &run.id)?;
     }
     let receipt = WorkflowLaunchReceipt {
         workflow_run_id: run.id.clone(),
         version: revision.clone(),
         checkout_id: entry.checkout_id,
         source: document,
+        source_commit,
+        automatic: entry.automatic,
         origin: origin.clone(),
         inputs: entry.inputs,
         event,
@@ -577,14 +671,14 @@ fn persist_entry(
             )
         })
         .transpose()?;
-    if typed {
+    if let Some(inputs) = normalized {
         let input_output = record_entry_output(
             db,
             project,
             &run.id,
             &start.instance.id,
             "inputs",
-            ArtifactValue::JsonObject(receipt.inputs.clone()),
+            ArtifactValue::JsonObject(inputs),
         )?;
         record_host_completion(
             db,
@@ -593,7 +687,7 @@ fn persist_entry(
             &digest(&serde_json::to_vec(&receipt)?),
         )?;
         if let Some(work) = work {
-            record_entry_output(
+            let task = record_entry_output(
                 db,
                 project,
                 &run.id,
@@ -601,6 +695,27 @@ fn persist_entry(
                 "task",
                 ArtifactValue::Task(work),
             )?;
+            if let Some(plan) = entry.backlog_plan {
+                ensure!(
+                    task.value == ArtifactValue::Task(plan.task.task.clone())
+                        && plan.checkout_id == receipt.checkout_id,
+                    "The backlog plan and launched task must share their recorded scope"
+                );
+                let issued = insert_artifact(
+                    db,
+                    project,
+                    run.id.clone(),
+                    start.instance.id.clone(),
+                    "plan".into(),
+                    ArtifactValue::BacklogPlan(plan),
+                )?;
+                db.execute(
+                    "UPDATE job_pipeline_runs SET plan_revision = ?2 WHERE id = ?1",
+                    params![run.id, issued.id],
+                )?;
+                record_host_completion(db, &task, &issued.id, &issued.id)?;
+                run.plan_revision = Some(issued.id);
+            }
         }
         if let Some(event) = receipt.event.clone() {
             record_entry_output(

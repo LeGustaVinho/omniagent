@@ -18,6 +18,45 @@ use super::{
     artifacts::insert_scoped_artifact, units::load_delivery_unit,
 };
 
+fn selected_strategy_checks(
+    allowed: &[String],
+    strategy: Option<&ArtifactValue>,
+) -> Result<Vec<Vec<String>>> {
+    if allowed.is_empty() {
+        ensure!(
+            strategy.is_none(),
+            "This check stage accepts no strategy input"
+        );
+        return Ok(Vec::new());
+    }
+    let Some(ArtifactValue::JsonObject(document)) = strategy else {
+        anyhow::bail!("The check stage needs the selected approved test strategy");
+    };
+    let checks = document
+        .get("requiredChecks")
+        .and_then(serde_json::Value::as_array)
+        .context("The approved test strategy needs a requiredChecks array")?;
+    ensure!(
+        checks.len() <= allowed.len(),
+        "The approved test strategy has too many checks"
+    );
+    let mut selected = std::collections::BTreeSet::new();
+    for check in checks {
+        let name = check
+            .as_str()
+            .context("The approved test strategy contains a non-string check")?;
+        ensure!(
+            allowed.iter().any(|allowed| allowed == name) && selected.insert(name),
+            "The approved test strategy contains an unsupported or duplicated check {name}"
+        );
+    }
+    Ok(allowed
+        .iter()
+        .filter(|name| selected.contains(name.as_str()))
+        .map(|name| vec![name.clone()])
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "action",
@@ -252,33 +291,49 @@ impl Store {
                     "logical unit already has a verified commit"
                 );
                 let candidate = candidate.context("verification requires this unit's candidate")?;
-                let NodeConfiguration::RequiredChecks { names } = node.instance.configuration
-                else {
-                    anyhow::bail!("check executor has no pinned checks");
-                };
-                let checks = if self
+                let repair = self
                     .workflow_candidate_check_is_repair(
                         project_id.clone(),
                         run_id.clone(),
                         node_id.clone(),
                     )
-                    .await?
-                {
-                    self.verify_repair_candidate(
-                        project_id.clone(),
-                        task_id.clone(),
-                        candidate.id.clone(),
+                    .await?;
+                let checks = match node.instance.configuration {
+                    NodeConfiguration::RequiredChecks {
                         names,
-                    )
-                    .await?
-                } else {
-                    self.verify_selected_candidate_with_requirements(
-                        project_id.clone(),
-                        task_id.clone(),
-                        candidate.id.clone(),
+                        parallel_groups,
+                    } => {
+                        self.verify_selected_candidate_with_groups(
+                            project_id.clone(),
+                            task_id.clone(),
+                            candidate.id.clone(),
+                            names,
+                            parallel_groups,
+                            repair,
+                        )
+                        .await?
+                    }
+                    NodeConfiguration::StagedChecks {
                         names,
-                    )
-                    .await?
+                        mut parallel_groups,
+                        deferred_names,
+                        strategy_checks,
+                    } => {
+                        parallel_groups.extend(selected_strategy_checks(
+                            &strategy_checks,
+                            inputs.get("strategy").map(|artifact| &artifact.value),
+                        )?);
+                        self.verify_selected_candidate_with_stage(
+                            project_id.clone(),
+                            &candidate,
+                            names,
+                            parallel_groups,
+                            deferred_names,
+                            repair,
+                        )
+                        .await?
+                    }
+                    _ => anyhow::bail!("check executor has no pinned checks"),
                 };
                 (
                     "checks",
@@ -334,12 +389,25 @@ impl Store {
                     checks.task == task,
                     "check evidence belongs to a different task"
                 );
+                let verification_id = if let NodeConfiguration::CandidateAcceptance(config) =
+                    node.instance.configuration
+                {
+                    let candidate = candidate.clone();
+                    self.execute({
+                        let inputs = inputs.clone();
+                        let unit = unit.clone();
+                        move |db| config.verify(db, &unit, &candidate, &inputs)
+                    })
+                    .await?
+                } else {
+                    checks.id.clone()
+                };
                 let acceptance = self
                     .accept_candidate_verification(
                         project_id.clone(),
                         task_id.clone(),
                         candidate.id.clone(),
-                        checks.id.clone(),
+                        verification_id,
                     )
                     .await?;
                 (
@@ -495,10 +563,57 @@ impl Store {
                 &unit.plan_revision,
                 &inputs,
             )?;
+            if super::automation::enabled(&tx, &artifact.workflow_run_id)? {
+                super::control::refresh(&tx, &unit.project_id, &artifact.workflow_run_id)?;
+            }
             tx.commit()?;
             Ok(artifact)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod strategy_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn approved_test_strategy_selects_only_pinned_named_commands() -> Result<()> {
+        let allowed = [
+            "Pipeline e2e".into(),
+            "Pipeline mutation".into(),
+            "Pipeline performance".into(),
+        ];
+        let strategy = |checks: Value| -> Result<ArtifactValue> {
+            Ok(ArtifactValue::JsonObject(serde_json::from_value(
+                json!({"requiredChecks": checks}),
+            )?))
+        };
+        assert_eq!(
+            selected_strategy_checks(
+                &allowed,
+                Some(&strategy(json!(["Pipeline mutation", "Pipeline e2e"]))?)
+            )?,
+            vec![
+                vec!["Pipeline e2e".to_owned()],
+                vec!["Pipeline mutation".to_owned()]
+            ],
+        );
+        assert!(
+            selected_strategy_checks(&allowed, Some(&strategy(json!(["unbound executable"]))?))
+                .is_err()
+        );
+        assert!(
+            selected_strategy_checks(
+                &allowed,
+                Some(&strategy(json!(["Pipeline e2e", "Pipeline e2e"]))?)
+            )
+            .is_err()
+        );
+        assert!(selected_strategy_checks(&allowed, Some(&strategy(json!([]))?))?.is_empty());
+        assert!(selected_strategy_checks(&allowed, None).is_err());
+        Ok(())
     }
 }
 
@@ -519,5 +634,30 @@ pub(crate) fn validate_unit_acceptance(
         && reference.evidence.task.task_id == unit.task_id && reference.completion_criteria == unit.unit.completion_criteria),
         "candidate acceptance lacks the exact workflow review and unit criteria"
     );
+    if super::automation::enabled(db, &unit.workflow_run_id)?
+        && super::runtime::load_pinned_node(
+            db,
+            &unit.project_id,
+            &unit.workflow_run_id,
+            &artifact.node_instance_id,
+        )?
+        .is_some_and(|node| {
+            matches!(
+                node.instance.configuration,
+                NodeConfiguration::CandidateAcceptance(_)
+            )
+        })
+    {
+        let writer: String = db.query_row(
+            "SELECT j.job_id FROM candidate_acceptances a JOIN selected_candidate_revisions c ON c.id = a.candidate_id
+             JOIN job_attempts j ON j.run_id = c.capture_run_id
+             WHERE a.id = ?1 AND c.project_id = ?2 AND c.task_id = ?3 AND c.unit_id = ?4",
+            params![acceptance_id, unit.project_id, unit.task_id, unit.unit.id],
+            |row| row.get(0),
+        )?;
+        crate::jobs::load_job(db, &unit.project_id, &writer)?
+            .context("The accepted candidate lost its approved writer job")?
+            .require_workflow_writer_release(db)?;
+    }
     Ok(())
 }

@@ -145,8 +145,10 @@ impl StageGoalPin {
         else {
             anyhow::bail!("The goal stage lost its pinned role");
         };
-        ensure!(stage.definition.kind != BuiltinNode::Agent || requirements.plan.is_none(),
-            "Choose either Plan Mode or Goal Mode on the Agent stage");
+        ensure!(
+            stage.definition.kind != BuiltinNode::Agent || requirements.plan.is_none(),
+            "Choose either Plan Mode or Goal Mode on the Agent stage"
+        );
         Ok(Self {
             stage_revision: stage.revision.clone(),
             configuration_revision: digest(&serde_json::to_vec(&configuration)?),
@@ -352,7 +354,7 @@ impl Store {
         )
         .await?;
         let attempt = candidate.target.run_id.clone();
-        let required = self.execute({
+        let (required, parallel_groups) = self.execute({
             let (project, run, attempt) = (project.clone(), run.clone(), attempt.clone());
             move |db| {
                 require_current(db, &candidate)?;
@@ -366,18 +368,33 @@ impl Store {
                     .context("Finish the workflow goal turn before checking the candidate")?;
                 let workflow = super::runtime::load_workflow_run(db, &project, &run)?.context("The workflow run is unavailable")?;
                 let definition = super::runtime::load_definition(db, &project, &workflow.version)?.context("The pinned workflow definition is unavailable")?;
-                let required = definition.wires.iter()
+                let checks = definition.wires.iter()
                     .filter(|wire| wire.from.node == node && wire.from.port == "candidate" && wire.to.port == "candidate")
                     .filter_map(|wire| definition.nodes.iter().find(|target| target.instance.id == wire.to.node))
                     .filter_map(|target| match &target.instance.configuration {
-                        NodeConfiguration::RequiredChecks { names } if target.definition.kind == BuiltinNode::VerifyCandidate => Some(names),
+                        NodeConfiguration::RequiredChecks { names, parallel_groups } if target.definition.kind == BuiltinNode::VerifyCandidate =>
+                            Some((names, parallel_groups)),
                         _ => None,
-                    }).flatten().cloned().collect::<std::collections::BTreeSet<_>>();
-                Ok(required.into_iter().collect())
+                    }).collect::<Vec<_>>();
+                if let [(names, parallel_groups)] = checks.as_slice() {
+                    return Ok((names.to_vec(), parallel_groups.to_vec()));
+                }
+                // A Goal emits one verification across all of its downstream check stages.
+                let required = checks.into_iter()
+                    .flat_map(|(names, groups)| names.iter().chain(groups.iter().flatten()))
+                    .cloned().collect::<std::collections::BTreeSet<_>>();
+                Ok((required.into_iter().collect(), Vec::new()))
             }
         }).await?;
         let verification = self
-            .verify_selected_candidate_with_requirements(project, task, selection, required)
+            .verify_selected_candidate_with_groups(
+                project,
+                task,
+                selection,
+                required,
+                parallel_groups,
+                false,
+            )
             .await?;
         self.execute(move |db| require_workflow_goal_release(db, &attempt))
             .await?;

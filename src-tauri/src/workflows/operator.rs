@@ -309,6 +309,9 @@ impl Store {
             plan.map(|artifact| &artifact.value)
         {
             self.workflow_plan_checkout(project, run_id).await?
+        } else if let Some(ArtifactValue::BacklogPlan(plan)) = plan.map(|artifact| &artifact.value)
+        {
+            plan.checkout_id.clone()
         } else {
             anyhow::bail!("the agent inputs do not identify a registered checkout");
         };

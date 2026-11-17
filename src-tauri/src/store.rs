@@ -132,6 +132,16 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/115-visual-pipeline-executors.sql"),
     include_str!("../migrations/116-workflow-trigger-optional-markdown.sql"),
     include_str!("../migrations/117-conversation-library-organization.sql"),
+    include_str!("../migrations/118-workflow-automatic-agents.sql"),
+    include_str!("../migrations/119-workflow-backlog.sql"),
+    include_str!("../migrations/120-workflow-backlog-execution.sql"),
+    include_str!("../migrations/121-workflow-automatic-preparations.sql"),
+    include_str!("../migrations/122-workflow-test-phases.sql"),
+    include_str!("../migrations/123-workflow-github.sql"),
+    include_str!("../migrations/124-workflow-automatic-delivery-results.sql"),
+    include_str!("../migrations/125-workflow-integrated-checks.sql"),
+    include_str!("../migrations/126-workflow-unit-actions.sql"),
+    include_str!("../migrations/127-workflow-github-source-sync.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

@@ -49,6 +49,7 @@ pub struct PipelineAgentInput {
 pub(crate) struct WorkflowJobLaunch {
     pub inputs: WorkflowJobInput,
     pub goal_review_token: Option<String>,
+    pub automatic_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -199,6 +200,18 @@ pub(super) fn load_origin(
             })
         },
     ).optional()?)
+}
+
+impl Job {
+    pub(crate) fn require_workflow_writer_release(&self, db: &Connection) -> Result<()> {
+        ensure!(
+            self.mode == SessionMode::ApprovedWrite
+                && self.pipeline.is_some()
+                && super::history::effective_release_blocker(db, self)?.is_none(),
+            "The delivery needs current approval for its writer scope"
+        );
+        Ok(())
+    }
 }
 
 pub(super) fn release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBlocker>> {
@@ -619,7 +632,20 @@ impl Store {
                 } else {
                     None
                 };
+                let automatic_key = if let Some(launch) = &workflow
+                    && let Some(key) = &launch.automatic_key
+                {
+                    crate::workflows::automation::require_pending_agent(&tx, &binding, key, &launch.inputs)?;
+                    Some(key.clone())
+                } else {
+                    None
+                };
                 let workflow = workflow.map(|launch| launch.inputs);
+                if let Some(workflow) = &workflow {
+                    crate::workflows::automation::agents_delivery::require_unique_admission(
+                        &tx, &project, &binding, workflow,
+                    )?;
+                }
                 if let Some(workflow) = &workflow
                     && let Some(feedback) = stage_job_input_with_repair(&tx, &project, &binding, &request, workflow)?
                 {
@@ -684,6 +710,11 @@ impl Store {
                 )?;
                 if let Some(workflow) = &workflow {
                     bind_job_input(&tx, &job.id, &binding, workflow)?;
+                }
+                if let Some(key) = &automatic_key {
+                    crate::workflows::automation::confirm_agent(
+                        &tx, &binding.pipeline_run_id, &binding.node_instance_id, key, &job.id,
+                    )?;
                 }
                 if let Some(comparison) = &comparison_inputs {
                     crate::workflows::comparison::selection::bind_inputs(&tx, &job.id, &comparison.inputs)?;

@@ -198,6 +198,18 @@ impl Store {
             units.iter().all(|unit| unit.commit_evidence_id.is_some()),
             "integration requires a complete chain of verified commits"
         );
+        let definition = self.merge_workflow_definition(unit).await?;
+        if definition.wires.iter().any(|wire| {
+            wire.from.node == artifact.node_instance_id
+                && wire.from.port == artifact.port
+                && wire.to.port == "git"
+                && definition.nodes.iter().any(|node| {
+                    node.instance.id == wire.to.node
+                        && node.definition.executor == Executor::OpenOrUpdatePullRequest
+                })
+        }) {
+            return Ok(None);
+        }
 
         // The destination must already be pinned when an operator receives the
         // final commit, even when they will merge it outside OmniAgent.
@@ -216,7 +228,6 @@ impl Store {
             return Ok(None);
         }
 
-        let definition = self.merge_workflow_definition(unit).await?;
         let mut successors = definition.wires.iter().filter(|wire| {
             wire.from.node == artifact.node_instance_id
                 && wire.from.port == artifact.port

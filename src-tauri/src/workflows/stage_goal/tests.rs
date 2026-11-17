@@ -470,7 +470,10 @@ pub(super) async fn goal_delivery(
         .iter_mut()
         .find(|node| node.id == "verify-candidate")
         .unwrap()
-        .configuration = NodeConfiguration::RequiredChecks { names: checks };
+        .configuration = NodeConfiguration::RequiredChecks {
+        names: checks,
+        parallel_groups: Vec::new(),
+    };
     let version = store
         .save_workflow_revision(project.clone(), "workflow-goal".into(), graph)
         .await?;

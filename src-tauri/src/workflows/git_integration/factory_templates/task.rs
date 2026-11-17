@@ -8,6 +8,190 @@ use super::*;
 const CHECK_NAME: &str = "Check the materialized Task delivery";
 
 #[tokio::test]
+async fn grouped_candidate_checks_overlap_but_keep_policy_receipts_in_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("parallel-checks.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let project = &repo.project_id;
+    let task = store
+        .create_project_task(project.clone(), "Verify parallel checks".into())
+        .await?;
+    store.set_job_queue_capacity(2).await?;
+    let powershell =
+        PathBuf::from(std::env::var_os("SystemRoot").context("SystemRoot is unavailable")?)
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let marker = |name: &str| temp.path().join(name).to_string_lossy().replace('\'', "''");
+    let (first, second, complete) = (marker("first"), marker("second"), marker("complete"));
+    let identity =
+        "if ((Get-Content -LiteralPath 'first.txt' -Raw).Trim() -ne 'first.txt') { exit 13 }";
+    let await_marker = |path: &str| {
+        format!(
+            "$end = (Get-Date).AddSeconds(10); while (!(Test-Path -LiteralPath '{path}')) {{ if ((Get-Date) -gt $end) {{ exit 14 }}; Start-Sleep -Milliseconds 30 }}"
+        )
+    };
+    let gate = |name: &str, script: String| CandidateGate {
+        name: name.into(),
+        required: false,
+        action: CandidateGateAction::Command {
+            executable: powershell.clone(),
+            arguments: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            timeout_seconds: Some(20),
+        },
+    };
+    store.set_candidate_gate_policy(project.clone(), vec![
+        gate("tail", format!("{identity}; if (!(Test-Path -LiteralPath '{complete}')) {{ exit 15 }}; exit 0")),
+        gate("first", format!(
+            "{identity}; New-Item -Path 'isolation.txt' -ItemType File | Out-Null; New-Item -Path '{first}' -ItemType File | Out-Null; {}; New-Item -Path '{complete}' -ItemType File | Out-Null; exit 0",
+            await_marker(&second)
+        )),
+        gate("second", format!(
+            "{identity}; New-Item -Path '{second}' -ItemType File | Out-Null; {}; if (Test-Path -LiteralPath 'isolation.txt') {{ exit 16 }}; exit 0",
+            await_marker(&first)
+        )),
+    ]).await?;
+
+    let mut graph = crate::workflows::builtin_delivery_graph(Default::default());
+    let check_node = graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == BuiltinNode::VerifyCandidate)
+        .context("The graph has no candidate verification node")?;
+    check_node.configuration = NodeConfiguration::RequiredChecks {
+        names: vec![],
+        parallel_groups: vec![
+            vec!["first".into(), "tail".into()],
+            vec!["second".into(), "missing".into()],
+        ],
+    };
+    let version = store
+        .save_workflow_revision(project.clone(), "parallel-checks".into(), graph)
+        .await?;
+    let run = store.start_workflow_run(project.clone(), version).await?;
+    let fixture = approve_delivery_fixture_in_run(
+        &store,
+        temp.path(),
+        repo.clone(),
+        Some(task.id.clone()),
+        run,
+    )
+    .await?;
+    let [unit] = fixture.units.as_slice() else {
+        anyhow::bail!("Missing single logical unit")
+    };
+    let worktree = store
+        .live_managed_worktree(project.clone(), task.id.clone())
+        .await?
+        .context("The task has no managed worktree")?
+        .worktree;
+    let job = queue_implementation(&store, &fixture, &worktree, unit).await?;
+    let capture =
+        capture_implementation(&store, &fixture, &worktree, unit, &["first.txt"], job).await?;
+    let candidate = select_candidate(&store, &fixture, capture, &["first.txt"]).await?;
+    // The live checkout changes after publishing the candidate. All gates must still see the frozen tree.
+    fs::write(worktree.root.join("first.txt"), "outside the selected tree")?;
+    let checks = verify_candidate(&store, &fixture, unit, &candidate).await?;
+    let ArtifactValue::Checks(reference) = checks.value else {
+        anyhow::bail!("Missing check receipt")
+    };
+    drop(store);
+    let store = Store::open(database)?;
+    let verified = store
+        .candidate_verification(project.clone(), task.id.clone(), reference.id)
+        .await?
+        .context("The group receipts were lost after reopen")?;
+    assert_eq!(
+        verified
+            .gates
+            .iter()
+            .map(|gate| gate.gate.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tail", "first", "second", "missing"],
+    );
+    assert!(
+        verified.gates[..3].iter().all(|gate| gate.gate.required
+            && matches!(&gate.outcome, Some(CandidateGateOutcome::Passed { .. }))),
+        "{:?}",
+        verified.gates
+    );
+    assert!(verified.gates[3].gate.required);
+    assert!(
+        matches!(&verified.gates[3].outcome, Some(CandidateGateOutcome::CouldNotRun { reason })
+        if reason.contains("missing"))
+    );
+    assert!(verified.finished_at.is_some());
+    assert!(!verified.allows_acceptance());
+    assert!(!worktree.root.join("isolation.txt").exists());
+
+    let build = marker("build");
+    let mut quality = gate("quality", format!("{identity}; exit 0"));
+    quality.required = true;
+    store
+        .set_candidate_gate_policy(
+            project.clone(),
+            vec![
+                quality,
+                gate(
+                    "build",
+                    format!(
+                        "{identity}; New-Item -Path '{build}' -ItemType File | Out-Null; exit 0"
+                    ),
+                ),
+            ],
+        )
+        .await?;
+    let ArtifactValue::Candidate(selection) = &candidate.value else {
+        anyhow::bail!("The selected candidate evidence is unavailable");
+    };
+    let partial = store
+        .verify_selected_candidate_with_stage(
+            project.clone(),
+            selection,
+            vec!["quality".into()],
+            vec![],
+            vec!["build".into()],
+            false,
+        )
+        .await?;
+    assert!(partial.passes_stage_checks());
+    assert!(!partial.allows_acceptance());
+    assert!(partial.gates[1].deferred && partial.gates[1].outcome.is_none());
+    assert!(!temp.path().join("build").exists());
+    assert!(
+        store
+            .accept_candidate_verification(
+                project.clone(),
+                task.id.clone(),
+                selection.id.clone(),
+                partial.id,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("complete verification")
+    );
+    let full = store
+        .verify_selected_candidate_with_requirements(
+            project.clone(),
+            task.id.clone(),
+            selection.id.clone(),
+            vec!["build".into()],
+        )
+        .await?;
+    assert!(full.allows_acceptance());
+    assert!(temp.path().join("build").is_file());
+    store
+        .accept_candidate_verification(project.clone(), task.id, selection.id.clone(), full.id)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn published_task_delivery_preserves_order_and_requires_its_verified_merge() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = Store::open(temp.path().join("task-delivery.sqlite"))?;
@@ -50,6 +234,7 @@ async fn published_task_delivery_preserves_order_and_requires_its_verified_merge
     };
     let gate = NodeConfiguration::RequiredChecks {
         names: vec![CHECK_NAME.into()],
+        parallel_groups: Vec::new(),
     };
     graph.name = "Task delivery with explicit checks".into();
     graph

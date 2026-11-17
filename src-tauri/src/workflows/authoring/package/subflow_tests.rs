@@ -102,6 +102,7 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
                 input: "document".into(),
                 output: "context".into(),
             }),
+            exports: Vec::new(),
         };
         let root = member(
             "root",
@@ -284,6 +285,253 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
             .await?
             .is_some()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeat_exports_only_the_approved_round_in_simulation_and_execution() -> Result<()> {
+    use crate::workflows::WorkflowLaunchRequest;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir()?;
+    let database = dir.path().join("repeat-output.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, dir.path()).await?;
+    let project = &repo.project_id;
+    let wire = |from, output, to, input| Wire {
+        from: port(from, output),
+        to: port(to, input),
+    };
+    let body = member(
+        "body",
+        serde_json::from_value(json!({
+            "kind": "subflow",
+            "graph": {
+                "name": "Evaluate revised findings",
+                "nodes": [
+                    {"id":"start","kind":"start","configuration":{"kind":"subflow_entry","outputs":[
+                        {"name":"start","value":{"kind":"control"}},
+                        {"name":"state","value":{"kind":"data","artifact":"json_object"}}
+                    ]}},
+                    {"id":"revise","kind":"set_fields","configuration":{"kind":"set_fields","mode":"update","operations":[
+                        {"op":"set","path":"/accepted","value":{"source":"input","pointer":"/current"}},
+                        {"op":"set","path":"/current","value":{"source":"literal","value":true}}
+                    ]}},
+                    {"id":"render","kind":"build_text","configuration":{"kind":"build_text","template":"Approved: {{accepted}}"}}
+                ],
+                "wires": [
+                    wire("start", "start", "revise", "ready"),
+                    wire("start", "state", "revise", "source"),
+                    wire("revise", "completed", "render", "ready"),
+                    wire("revise", "object", "render", "values")
+                ]
+            },
+            "inputs": {"go": port("start", "start"), "state": port("start", "state")},
+            "outputs": {
+                "done": port("revise", "completed"),
+                "decision": port("revise", "object"),
+                "summary": port("render", "text")
+            }
+        }))?,
+        &[],
+    );
+    for max_iterations in [1, 2] {
+        let root = member(
+            "root",
+            serde_json::from_value(json!({
+                "kind":"pipeline",
+                "graph":{
+                    "name": format!("Review with {max_iterations} iterations"),
+                    "nodes": [
+                        {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+                        {"id":"seed","kind":"set_fields","configuration":{"kind":"set_fields","mode":"build","operations":[
+                            {"op":"set","path":"/current","value":{"source":"literal","value":false}}
+                        ]}},
+                        {"id":"repeat","kind":"repeat_until","configuration":{
+                            "kind":"repeat_until","maxIterations":max_iterations,"readyInput":"go",
+                            "completionOutput":"done","evidenceOutput":"decision",
+                            "until":{"op":"equals","pointer":"/evidence/accepted","value":true},
+                            "feedback":{"input":"state","output":"decision"},
+                            "exports":["decision","summary"]
+                        }},
+                        {"id":"consume","kind":"set_fields","configuration":{"kind":"set_fields","mode":"update","operations":[
+                            {"op":"set","path":"/consumed","value":{"source":"literal","value":true}}
+                        ]}},
+                        {"id":"agent","kind":"agent","configuration":{"kind":"agent_role","role":"follow-up"}},
+                        {"id":"escalate","kind":"parallel","configuration":{"kind":"none"}}
+                    ],
+                    "wires":[
+                        wire("start", "start", "seed", "ready"),
+                        wire("seed", "completed", "repeat", "go"),
+                        wire("seed", "object", "repeat", "state"),
+                        wire("repeat", "completed", "consume", "ready"),
+                        wire("repeat", "decision", "consume", "source"),
+                        wire("repeat", "completed", "agent", "ready"),
+                        wire("repeat", "summary", "agent", "prompt"),
+                        wire("repeat", "failed", "escalate", "ready")
+                    ]
+                }
+            }))?,
+            &[("repeat", "body")],
+        );
+        let draft = store
+            .create_workflow_package(
+                project.clone(),
+                None,
+                WorkflowPackage {
+                    name: "Review iteration outputs".into(),
+                    members: vec![body.clone(), root],
+                },
+            )
+            .await?;
+        let trace = serde_json::to_value(
+            store
+                .simulate_workflow_package_revision(
+                    project.clone(),
+                    draft.id.clone(),
+                    draft.revision.clone(),
+                    "root".into(),
+                    Default::default(),
+                )
+                .await?,
+        )?;
+        let exports = &trace["subflows"]
+            .as_array()
+            .context("Missing simulated subflows")?
+            .iter()
+            .find(|entry| entry["path"] == "repeat")
+            .context("Missing simulated repeat")?["outputs"];
+        assert_eq!(
+            exports["decision"]["state"],
+            if max_iterations == 1 {
+                "skipped"
+            } else {
+                "selected"
+            }
+        );
+        assert_eq!(
+            exports["failed"]["state"],
+            if max_iterations == 1 {
+                "selected"
+            } else {
+                "skipped"
+            }
+        );
+
+        let WorkflowPackagePublishOutcome::Published { publication } = store
+            .publish_reviewed_workflow_package(project.clone(), draft.id, draft.revision)
+            .await?
+        else {
+            anyhow::bail!("The repeat package could not be published");
+        };
+        let version = &publication
+            .members
+            .iter()
+            .find(|item| item.key == "root")
+            .unwrap()
+            .artifact
+            .version;
+        let request: WorkflowLaunchRequest = serde_json::from_value(json!({
+            "projectId": project, "checkoutId": repo.checkout_id,
+            "workflow": { "id": version.id, "revision": version.revision },
+            "requestId": format!("repeat-outputs-{max_iterations}"), "inputs": {}
+        }))?;
+        let run = store.launch_workflow_request(request).await?;
+        let reopened = Store::open(database.clone())?;
+        let snapshot = reopened
+            .inspect_workflow_execution(project.clone(), run.id.clone())
+            .await?
+            .context("Missing launched repeat")?;
+        let stop = snapshot
+            .control
+            .iter()
+            .find(|entry| entry.node_id == "repeat::stop")
+            .unwrap();
+        let first_prompt = snapshot
+            .outputs
+            .iter()
+            .find(|output| output.artifact.node_instance_id == "repeat::iteration-1::render")
+            .unwrap();
+        if max_iterations == 1 {
+            assert!(stop.forwarded_outputs.is_empty());
+            assert!(
+                snapshot
+                    .control
+                    .iter()
+                    .any(|receipt| receipt.node_id == "repeat::limit"
+                        && receipt.reason.as_deref()
+                            == Some("Reached the configured iteration limit"))
+            );
+            assert!(
+                snapshot
+                    .control
+                    .iter()
+                    .any(|receipt| receipt.node_id == "escalate"
+                        && receipt.selected_ports == ["branches"])
+            );
+            assert!(
+                snapshot
+                    .outputs
+                    .iter()
+                    .all(|output| output.artifact.node_instance_id != "consume")
+            );
+            continue;
+        }
+        let approved_prompt = snapshot
+            .outputs
+            .iter()
+            .find(|output| output.artifact.node_instance_id == "repeat::iteration-2::render")
+            .unwrap();
+        let approved_decision = snapshot
+            .outputs
+            .iter()
+            .find(|output| output.artifact.node_instance_id == "repeat::iteration-2::revise")
+            .unwrap();
+        assert_eq!(stop.selected_ports, ["completed"]);
+        assert_eq!(
+            stop.forwarded_outputs["summary"].artifact_id,
+            approved_prompt.artifact.id
+        );
+        assert_eq!(
+            stop.forwarded_outputs["decision"].artifact_id,
+            approved_decision.artifact.id
+        );
+        assert_eq!(
+            approved_prompt.artifact.value,
+            ArtifactValue::RenderedText("Approved: true".into())
+        );
+        let consumer = snapshot
+            .outputs
+            .iter()
+            .find(|output| output.artifact.node_instance_id == "consume")
+            .unwrap();
+        assert_eq!(
+            consumer.input_receipts[0].inputs["source"],
+            approved_decision.artifact.id
+        );
+        let agent_inputs = |id: &str| NodeInputs::from([("prompt".into(), id.into())]);
+        assert!(
+            reopened
+                .workflow_operator_agent_target(
+                    project,
+                    &run.id,
+                    "agent",
+                    None,
+                    &agent_inputs(&first_prompt.artifact.id)
+                )
+                .await
+                .is_err()
+        );
+        reopened
+            .workflow_operator_agent_target(
+                project,
+                &run.id,
+                "agent",
+                None,
+                &agent_inputs(&approved_prompt.artifact.id),
+            )
+            .await?;
+    }
     Ok(())
 }
 

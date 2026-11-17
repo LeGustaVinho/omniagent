@@ -2,9 +2,13 @@ use std::{fs, path::Path};
 
 use anyhow::{Result, bail};
 
+use crate::repository::github::RemoteMergeProof;
 use crate::repository::{git_path, git_query, inspect, verified_git::CommitSource};
 
-use super::{DeliveryMergeRequest, MergeRepository, Plan, Publication, VerifiedCommit};
+use super::{
+    DeliveryMergeRequest, GithubSyncOutcome, MergeRepository, Plan, Publication, SourceSync,
+    SourceSyncKind, VerifiedCommit,
+};
 
 struct Fixture {
     _scratch: tempfile::TempDir,
@@ -294,9 +298,274 @@ fn reports_conflicts_without_updating_the_destination() -> Result<()> {
         fixture.repo.prepare(&fixture.request, &fixture.commits)?,
         Plan::Conflicted
     ));
+    let last = &fixture.commits[1];
+    let baseline = &fixture.commits[0].base_commit;
+    let head = fixture.repo.verify_source_syncs(baseline, last, &[])?;
+    assert!(matches!(
+        fixture.repo.prepare_source_sync(
+            &head,
+            last,
+            SourceSyncKind::Destination,
+            &fixture.request.expected_destination_sha,
+        )?,
+        GithubSyncOutcome::Conflict
+    ));
     assert_eq!(
         fixture.repo.branch_tip("integration")?,
         fixture.request.expected_destination_sha
+    );
+    Ok(())
+}
+
+fn source_sync(outcome: GithubSyncOutcome) -> Result<SourceSync> {
+    match outcome {
+        GithubSyncOutcome::Ready(receipt) => Ok(receipt),
+        _ => bail!("fixture source sync should produce a merge object"),
+    }
+}
+
+fn merge_commit(root: &Path, tree: &str, first: &str, second: &str) -> Result<String> {
+    run(
+        root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            "--no-gpg-sign",
+            tree,
+            "-p",
+            first,
+            "-p",
+            second,
+            "-m",
+            "Fixture merge",
+        ],
+    )
+}
+
+#[test]
+fn github_source_sync_preserves_verified_and_destination_history_through_repair() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let Fixture {
+        root,
+        repo,
+        request,
+        commits,
+        ..
+    } = &fixture;
+    let approved = &commits[1];
+    let original_base = &commits[0].base_commit;
+    let destination = &request.expected_destination_sha;
+    let original = repo.verify_source_syncs(original_base, approved, &[])?;
+    assert_eq!(
+        repo.prepare_source_sync(
+            &original,
+            approved,
+            SourceSyncKind::Destination,
+            original_base
+        )?,
+        GithubSyncOutcome::Unchanged
+    );
+
+    run(root, &["switch", "--quiet", "delivery"])?;
+    fs::write(root.join("repair.txt"), "reviewed CI repair\n")?;
+    let repaired_sha = commit(root, "Approved CI repair")?;
+    let repaired = VerifiedCommit {
+        id: "repair-unit".into(),
+        unit_id: "repair-unit".into(),
+        base_commit: approved.sha.clone(),
+        tree: run(root, &["rev-parse", &format!("{repaired_sha}^{{tree}}")])?,
+        sha: repaired_sha,
+        ..approved.clone()
+    };
+    run(root, &["switch", "--quiet", "integration"])?;
+    fs::write(root.join("other.txt"), "new destination file\n")?;
+    let later_destination = commit(root, "Destination advances during repair")?;
+    run(root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("base.txt"), "leave this dirty\n")?;
+    let refs = run(root, &["show-ref"])?;
+    let index = fs::read(root.join(".git/index"))?;
+
+    let sync_once = || {
+        source_sync(repo.prepare_source_sync(
+            &original,
+            approved,
+            SourceSyncKind::Destination,
+            destination,
+        )?)
+    };
+    let first = sync_once()?;
+    fs::create_dir_all(root.join(".git/info"))?;
+    fs::write(root.join(".git/info/attributes"), "* merge=ours\n")?;
+    assert_eq!(sync_once()?, first);
+    assert_eq!(
+        run(root, &["show", "-s", "--format=%P", &first.head_sha])?,
+        format!("{} {destination}", approved.sha)
+    );
+    let prior = [(&first, approved.clone())];
+    let previous = repo.verify_source_syncs(original_base, &repaired, &prior)?;
+    assert_eq!(previous.accepted_id, approved.id);
+    assert_eq!(previous.sha, first.head_sha);
+    assert!(
+        repo.prepare_source_sync(
+            &previous,
+            approved,
+            SourceSyncKind::Destination,
+            original_base
+        )
+        .is_err()
+    );
+    assert!(
+        repo.prepare_source_sync(
+            &previous,
+            approved,
+            SourceSyncKind::Destination,
+            &approved.sha
+        )
+        .is_err()
+    );
+    for tampered in [
+        SourceSync {
+            head_sha: merge_commit(root, &first.tree_sha, destination, &approved.sha)?,
+            ..first.clone()
+        },
+        SourceSync {
+            head_sha: merge_commit(root, &approved.tree, &approved.sha, destination)?,
+            tree_sha: approved.tree.clone(),
+            ..first.clone()
+        },
+        SourceSync {
+            previous_head: commits[0].sha.clone(),
+            ..first.clone()
+        },
+    ] {
+        assert!(
+            repo.verify_source_syncs(original_base, &repaired, &[(&tampered, approved.clone())])
+                .is_err()
+        );
+    }
+    assert!(
+        repo.verify_source_syncs(original_base, &commits[0], &prior)
+            .is_err()
+    );
+
+    let repair = source_sync(repo.prepare_source_sync(
+        &previous,
+        &repaired,
+        SourceSyncKind::AcceptedRevision,
+        &repaired.sha,
+    )?)?;
+    assert_eq!(
+        run(root, &["show", "-s", "--format=%P", &repair.head_sha])?,
+        format!("{} {}", first.head_sha, repaired.sha)
+    );
+    let after_repair = [(&first, approved.clone()), (&repair, repaired.clone())];
+    let repaired_head = repo.verify_source_syncs(original_base, &repaired, &after_repair)?;
+    assert!(
+        repo.verify_synced_merge_base(&repaired_head, &later_destination)
+            .is_err()
+    );
+    let latest = source_sync(repo.prepare_source_sync(
+        &repaired_head,
+        &repaired,
+        SourceSyncKind::Destination,
+        &later_destination,
+    )?)?;
+    let chain = [
+        (&first, approved.clone()),
+        (&repair, repaired.clone()),
+        (&latest, repaired.clone()),
+    ];
+    let effective = repo.verify_source_syncs(original_base, &repaired, &chain)?;
+    repo.verify_synced_merge_base(&effective, &later_destination)?;
+    assert_eq!(effective.accepted_id, repaired.id);
+    assert_eq!(effective.sha, latest.head_sha);
+    assert_eq!(
+        repo.github_effective_paths(&later_destination, &effective.sha)?,
+        ["first.txt", "repair.txt", "second.txt"],
+    );
+    let merged = merge_commit(root, &latest.tree_sha, &later_destination, &effective.sha)?;
+    let proof = RemoteMergeProof {
+        pull_number: 3,
+        head_sha: effective.sha,
+        base_sha: later_destination.clone(),
+        merge_sha: merged.clone(),
+        tree_sha: latest.tree_sha,
+        destination_sha: merged,
+    };
+    let repaired_request = DeliveryMergeRequest {
+        expected_source_sha: repaired.sha.clone(),
+        expected_destination_sha: later_destination,
+        ..request.clone()
+    };
+    repo.verify_github_integration(
+        &repaired_request,
+        &proof,
+        &[commits[0].clone(), approved.clone(), repaired],
+    )?;
+    assert_eq!(run(root, &["show-ref"])?, refs);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(
+        fs::read_to_string(root.join("base.txt"))?,
+        "leave this dirty\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_merge_requires_the_tested_tree_and_exact_parents_in_the_destination() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let integration = fixture.prepare()?;
+    let request = &fixture.request;
+    let tree = run(
+        &fixture.root,
+        &["rev-parse", &format!("{integration}^{{tree}}")],
+    )?;
+    let proof = RemoteMergeProof {
+        pull_number: 7,
+        head_sha: request.expected_source_sha.clone(),
+        base_sha: request.expected_destination_sha.clone(),
+        merge_sha: integration.clone(),
+        tree_sha: tree,
+        destination_sha: integration,
+    };
+
+    let verify = |proof: &RemoteMergeProof| {
+        fixture
+            .repo
+            .verify_github_integration(request, proof, &fixture.commits)
+    };
+    verify(&proof)?;
+    assert_eq!(
+        fixture.repo.delivery_paths(&fixture.commits)?,
+        ["first.txt", "second.txt"]
+    );
+    assert!(
+        verify(&RemoteMergeProof {
+            head_sha: proof.base_sha.clone(),
+            ..proof.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        verify(&RemoteMergeProof {
+            tree_sha: fixture.commits[0].tree.clone(),
+            ..proof.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        verify(&RemoteMergeProof {
+            destination_sha: proof.base_sha.clone(),
+            ..proof
+        })
+        .is_err()
+    );
+    assert_eq!(
+        fixture.repo.branch_tip("integration")?,
+        request.expected_destination_sha
     );
     Ok(())
 }

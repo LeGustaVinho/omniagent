@@ -43,6 +43,8 @@ struct SampleNode {
     node_id: String,
     title: String,
     outputs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failure_ports: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -257,6 +259,56 @@ impl<'a> ReviewCatalog<'a> {
             &|version| self.load(version),
         )?;
         for node in &definition.nodes {
+            let named_checks = match &node.instance.configuration {
+                NodeConfiguration::VerifyTestPhase(test) => std::slice::from_ref(&test.check),
+                NodeConfiguration::IntegratedChecks(checks) => checks.checks.as_slice(),
+                NodeConfiguration::StagedChecks { names, .. } => names.as_slice(),
+                NodeConfiguration::CandidateAcceptance(acceptance) => {
+                    std::slice::from_ref(&acceptance.build_check)
+                }
+                _ => &[],
+            };
+            for name in named_checks {
+                if !crate::repository::verification::test_phase::load_test_gate(
+                    self.db,
+                    self.project,
+                    name,
+                )?
+                .has_registered_command()
+                {
+                    requirements.push(format!("Register the project check {name}."));
+                }
+            }
+            match node.instance.kind {
+                BuiltinNode::SearchPublicRepositories => {
+                    requirements.push(
+                        "Authenticate the GitHub CLI (gh) for public repository research.".into(),
+                    );
+                }
+                BuiltinNode::OpenOrUpdatePullRequest
+                | BuiltinNode::WaitForCi
+                | BuiltinNode::MergePullRequest => {
+                    let bound: bool = self.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM workflow_github_project_settings WHERE project_id = ?1)",
+                        [self.project], |row| row.get(0),
+                    )?;
+                    if !bound {
+                        requirements.push("Set the GitHub account, repository, destination and required checks in project settings.".into());
+                    }
+                }
+                BuiltinNode::RunBacklog => {
+                    if crate::tasks::load_delivery_milestone_policy(self.db, self.project)?
+                        .destination_branch
+                        .is_none()
+                    {
+                        requirements.push(
+                            "Set the delivery destination branch in the project's Agile policy."
+                                .into(),
+                        );
+                    }
+                }
+                _ => {}
+            }
             let binding = match &node.instance.configuration {
                 NodeConfiguration::Command(command) => {
                     validate_command_binding(self.db, self.project, command)
@@ -417,6 +469,10 @@ fn preview_member(
                                 SampleNode {
                                 node_id: node.instance.id,
                                 title: node.definition.title,
+                                failure_ports: node.definition.outputs.iter()
+                                    .filter(|port| port.value == PortType::Control
+                                        && matches!(port.name.as_str(), "failed" | "stale" | "blocked"))
+                                    .map(|port| port.name.clone()).collect(),
                                 outputs: node
                                     .definition
                                     .outputs
@@ -475,6 +531,7 @@ fn single_sample(member: &PackageMember) -> Vec<SampleNode> {
         node_id: member.key.clone(),
         title: member.name.clone(),
         outputs: vec!["result".into()],
+        failure_ports: vec![],
     }]
 }
 

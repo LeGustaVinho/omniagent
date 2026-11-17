@@ -44,11 +44,11 @@ async fn conversation_pipeline_turns_pin_previous_output_and_resume_in_order() -
         serde_json::from_value(json!({
             "name": name,
             "nodes": [
-                {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[
+                {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","promptOrMarkdown":true,"fields":[
                     {"name":"message","valueType":"text","required":true,"conversationSource":"message"},
                     {"name":"history","valueType":"array","required":true,"conversationSource":"history"}
                 ]}},
-                {"id":"text","kind":"build_text","configuration":{"kind":"build_text","template":"Result for {{message}}"}},
+                {"id":"text","kind":"build_text","configuration":{"kind":"build_text","template":"Result for {{request}}"}},
                 {"id":"result","kind":"summarize_result","configuration":{"kind":"none"}}
             ],
             "wires":[
@@ -130,6 +130,9 @@ async fn conversation_pipeline_turns_pin_previous_output_and_resume_in_order() -
         .await?
         .context("second launch receipt")?;
     assert_eq!(receipt.version, workflow);
+    assert!(receipt.automatic);
+    assert!(receipt.source_commit.is_some());
+    assert_eq!(receipt.inputs["prompt"], "second message");
     assert_eq!(receipt.inputs["message"], "second message");
     assert_eq!(
         receipt.inputs["history"],

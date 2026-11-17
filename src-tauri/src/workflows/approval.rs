@@ -20,8 +20,9 @@ mod rules;
 mod tests;
 pub(super) use rules::activate_selected_approval;
 pub use rules::{
-    ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval,
-    WorkflowApprovalPreview, WorkflowApprovalStage, WorkflowApprovalSubmission,
+    ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings,
+    BacklogApprovalScope, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalStage,
+    WorkflowApprovalSubmission,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

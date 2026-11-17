@@ -21,11 +21,12 @@ use crate::{
 
 use super::{
     destination_drift::{DestinationDriftOutcome, authorized_destination_drift},
+    github::RemoteMergeProof,
     verified_git::{DeliveryGitPolicy, VerifiedCommit, load_policy, load_verified_delivery_commit},
     writers::ensure_merge_destination_available,
 };
 use attached::{AttachedMergePlan, AttachedRecovery};
-use git::{AttachedPublication, MergeRepository, Plan, Publication, validate_oid};
+use git::{AttachedPublication, MergeRepository, Plan, Publication, SourceSyncHead, validate_oid};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +64,31 @@ pub enum MergeSource {
     External,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSyncKind {
+    Destination,
+    AcceptedRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceSync {
+    pub kind: SourceSyncKind,
+    pub accepted_commit_evidence_id: String,
+    pub previous_head: String,
+    pub second_parent_sha: String,
+    pub head_sha: String,
+    pub tree_sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GithubSyncOutcome {
+    Unchanged,
+    Conflict,
+    Ready(SourceSync),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifiedMerge {
@@ -75,6 +101,8 @@ pub struct VerifiedMerge {
     pub commit_evidence_ids: Vec<String>,
     pub source_branch: String,
     pub source_sha: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_syncs: Vec<SourceSync>,
     pub destination_branch: String,
     pub previous_destination_sha: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +546,228 @@ fn find_saved(
     Ok(Some(DeliveryMergeOutcome::Verified { evidence }))
 }
 
+pub(crate) fn github_delivery_paths(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+) -> Result<Vec<String>> {
+    let scope = github_scope(db, request)?;
+    scope.repo.delivery_paths(&scope.commits)
+}
+
+fn github_scope(db: &Connection, request: &DeliveryMergeRequest) -> Result<MergeScope> {
+    let scope = load_scope(
+        db,
+        &request.project_id,
+        &request.task_id,
+        &request.workflow_run_id,
+        &request.unit_id,
+        &request.commit_evidence_id,
+    )?;
+    let last = scope
+        .commits
+        .last()
+        .context("delivery has no verified commits")?;
+    ensure!(
+        last.branch == request.expected_source_branch
+            && last.sha == request.expected_source_sha
+            && last.branch != request.destination_branch,
+        "GitHub integration differs from the approved delivery"
+    );
+    scope.repo.verify_chain(&scope.commits)?;
+    Ok(scope)
+}
+
+fn source_sync_head(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    scope: &MergeScope,
+    syncs: &[SourceSync],
+) -> Result<SourceSyncHead> {
+    let last = scope
+        .commits
+        .last()
+        .context("The approved source commit is unavailable")?;
+    ensure!(
+        scope.destination_branch == request.destination_branch,
+        "The GitHub synchronization differs from the approved delivery destination"
+    );
+    let original_base: String = db
+        .query_row(
+            "SELECT base_commit FROM managed_task_worktrees
+         WHERE project_id = ?1 AND task_id = ?2 AND checkout_id = ?3 AND branch = ?4",
+            params![
+                request.project_id,
+                request.task_id,
+                last.checkout_id,
+                last.branch
+            ],
+            |row| row.get(0),
+        )
+        .context("The registered source worktree base is unavailable")?;
+    let mut history = Vec::with_capacity(syncs.len());
+    for sync in syncs {
+        let id = &sync.accepted_commit_evidence_id;
+        let approved =
+            load_verified_delivery_commit(db, &request.project_id, &request.task_id, id)?
+                .context("A source synchronization cites an unavailable verified commit")?;
+        let same_workflow: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM verified_delivery_commits c
+             JOIN workflow_delivery_units u ON u.unit_id = c.unit_id
+             WHERE c.id = ?1 AND u.pipeline_run_id = ?2 AND u.project_id = ?3
+               AND u.task_id = ?4 AND u.checkout_id = ?5 AND u.commit_evidence_id = c.id)",
+            params![
+                id,
+                request.workflow_run_id,
+                request.project_id,
+                request.task_id,
+                last.checkout_id
+            ],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            same_workflow
+                && approved.id == *id
+                && approved.branch == last.branch
+                && approved.repository == last.repository
+                && approved.checkout_id == last.checkout_id,
+            "A source synchronization cites a commit outside this delivery and checkout"
+        );
+        history.push((sync, approved));
+    }
+    scope
+        .repo
+        .verify_source_syncs(&original_base, last, &history)
+}
+
+pub(crate) fn create_github_sync(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    prior_syncs: &[SourceSync],
+    destination_base: &str,
+) -> Result<GithubSyncOutcome> {
+    let scope = github_scope(db, request)?;
+    let head = source_sync_head(db, request, &scope, prior_syncs)?;
+    let last = scope
+        .commits
+        .last()
+        .context("The approved source commit is unavailable")?;
+    scope
+        .repo
+        .prepare_source_sync(&head, last, SourceSyncKind::Destination, destination_base)
+}
+
+pub(crate) fn create_github_reattachment(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    prior_syncs: &[SourceSync],
+) -> Result<GithubSyncOutcome> {
+    let scope = github_scope(db, request)?;
+    let head = source_sync_head(db, request, &scope, prior_syncs)?;
+    let last = scope
+        .commits
+        .last()
+        .context("The approved source commit is unavailable")?;
+    scope
+        .repo
+        .prepare_source_sync(&head, last, SourceSyncKind::AcceptedRevision, &last.sha)
+}
+
+pub(crate) fn validate_github_source_sync(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    source_syncs: &[SourceSync],
+) -> Result<String> {
+    let scope = github_scope(db, request)?;
+    validated_github_head(db, request, &scope, source_syncs)
+}
+
+fn validated_github_head(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    scope: &MergeScope,
+    source_syncs: &[SourceSync],
+) -> Result<String> {
+    ensure!(
+        scope.destination_branch == request.destination_branch,
+        "GitHub integration differs from the approved delivery destination"
+    );
+    if source_syncs.is_empty() {
+        return Ok(request.expected_source_sha.clone());
+    }
+    let head = source_sync_head(db, request, scope, source_syncs)?;
+    ensure!(
+        head.accepted_id == request.commit_evidence_id,
+        "The synchronized source does not include the active approved delivery"
+    );
+    if !request.expected_destination_sha.is_empty() {
+        scope
+            .repo
+            .verify_synced_merge_base(&head, &request.expected_destination_sha)?;
+    }
+    Ok(head.sha)
+}
+
+pub(crate) fn github_effective_paths(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    source_syncs: &[SourceSync],
+) -> Result<Vec<String>> {
+    let scope = github_scope(db, request)?;
+    let effective_head = validated_github_head(db, request, &scope, source_syncs)?;
+    scope
+        .repo
+        .github_effective_paths(&request.expected_destination_sha, &effective_head)
+}
+
+pub(crate) fn record_github_delivery_merge(
+    db: &Connection,
+    request: &DeliveryMergeRequest,
+    proof: &RemoteMergeProof,
+    source_syncs: &[SourceSync],
+) -> Result<VerifiedMerge> {
+    let scope = github_scope(db, request)?;
+    let effective_head = validated_github_head(db, request, &scope, source_syncs)?;
+    ensure!(
+        proof.head_sha == effective_head && proof.base_sha == request.expected_destination_sha,
+        "GitHub integration has different approved source or destination pins"
+    );
+    scope
+        .repo
+        .verify_github_integration(request, proof, &scope.commits)?;
+    if let Some(DeliveryMergeOutcome::Verified { evidence }) = find_saved(db, request)? {
+        ensure!(
+            evidence.integration_sha == proof.merge_sha
+                && evidence.previous_destination_sha == proof.base_sha
+                && evidence.source_syncs == source_syncs,
+            "The saved integration differs from the verified GitHub merge"
+        );
+        return Ok(evidence);
+    }
+    let evidence = VerifiedMerge {
+        id: Uuid::new_v4().to_string(),
+        project_id: request.project_id.clone(),
+        task_id: request.task_id.clone(),
+        workflow_run_id: request.workflow_run_id.clone(),
+        unit_id: request.unit_id.clone(),
+        commit_evidence_id: request.commit_evidence_id.clone(),
+        commit_evidence_ids: scope.commits.into_iter().map(|commit| commit.id).collect(),
+        source_branch: request.expected_source_branch.clone(),
+        source_sha: request.expected_source_sha.clone(),
+        source_syncs: source_syncs.to_vec(),
+        destination_branch: request.destination_branch.clone(),
+        original_destination_sha: None,
+        drift_acceptance_id: None,
+        previous_destination_sha: proof.base_sha.clone(),
+        integration_sha: proof.merge_sha.clone(),
+        verified_at: db.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
+            row.get(0)
+        })?,
+        source: MergeSource::External,
+    };
+    persist_verified_merge(db, &evidence)?;
+    Ok(evidence)
+}
+
 fn prepare_merge(
     db: &Connection,
     request: &DeliveryMergeRequest,
@@ -927,6 +1177,7 @@ fn settle_merge<'a>(
         commit_evidence_ids: scope.commits.into_iter().map(|commit| commit.id).collect(),
         source_branch: request.expected_source_branch.clone(),
         source_sha: request.expected_source_sha.clone(),
+        source_syncs: Vec::new(),
         destination_branch: request.destination_branch.clone(),
         original_destination_sha: (previous_destination_sha != request.expected_destination_sha)
             .then(|| request.expected_destination_sha.clone()),
@@ -936,13 +1187,18 @@ fn settle_merge<'a>(
         verified_at,
         source,
     };
+    persist_verified_merge(db, &evidence)?;
+    Ok(DeliveryMergeOutcome::Verified { evidence })
+}
+
+fn persist_verified_merge(db: &Connection, evidence: &VerifiedMerge) -> Result<()> {
     let origin = pipeline_work_origin(db, &evidence.project_id, &evidence.workflow_run_id)?;
     let states = WorkStateChanges::capture(db, &evidence.project_id, &evidence.task_id)?;
     db.execute("INSERT INTO workflow_verified_merges(commit_evidence_id, id, project_id, task_id, workflow_run_id, verified_at, payload)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![evidence.commit_evidence_id, evidence.id, evidence.project_id, evidence.task_id, evidence.workflow_run_id, evidence.verified_at, encode(&evidence)?])?;
-    record_verified_task_merge(db, &evidence)?;
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![evidence.commit_evidence_id, evidence.id, evidence.project_id, evidence.task_id, evidence.workflow_run_id, evidence.verified_at, encode(evidence)?])?;
+    record_verified_task_merge(db, evidence)?;
     states.publish(db, &evidence.project_id, &origin)?;
-    Ok(DeliveryMergeOutcome::Verified { evidence })
+    Ok(())
 }
 
 pub(crate) fn load_verified_delivery_merge(

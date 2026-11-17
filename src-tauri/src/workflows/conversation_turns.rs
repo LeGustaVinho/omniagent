@@ -563,7 +563,14 @@ fn turn_entry(
         .context("The pinned pipeline revision is unavailable")?;
     let values = match WorkflowStartSchema::for_definition(&definition) {
         Some(schema) => {
-            schema.conversation_inputs(saved.inputs.values.clone(), &saved.request.text, history)?
+            let mut values = saved.inputs.values.clone();
+            if schema.prompt_or_markdown() && saved.inputs.document_revision_id.is_none() {
+                values.insert(
+                    "prompt".into(),
+                    Value::String(without_composer_markers(&saved.request.text)),
+                );
+            }
+            schema.conversation_inputs(values, &saved.request.text, history)?
         }
         None => saved.inputs.values.clone(),
     };
@@ -571,6 +578,8 @@ fn turn_entry(
         checkout_id: saved.checkout_id.clone(),
         document_revision_id: saved.inputs.document_revision_id.clone(),
         inputs: values,
+        automatic: true,
+        backlog_plan: None,
     })
 }
 

@@ -96,10 +96,21 @@ pub(in crate::workflows) fn repair_instruction(
                 && verifies_repair(&definition, &node.instance.id)
         })
     {
-        let NodeConfiguration::RequiredChecks { names } = &node.instance.configuration else {
+        let NodeConfiguration::RequiredChecks {
+            names,
+            parallel_groups,
+        } = &node.instance.configuration
+        else {
             anyhow::bail!("The pinned repair verification lost its check configuration");
         };
-        require_repair_check_policy(db, &unit.project_id, names.clone())?;
+        require_repair_check_policy(
+            db,
+            &unit.project_id,
+            names
+                .iter()
+                .chain(parallel_groups.iter().flatten())
+                .cloned(),
+        )?;
     }
     let source = |node: &str, port: &str| {
         definition

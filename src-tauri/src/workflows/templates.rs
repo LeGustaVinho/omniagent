@@ -17,6 +17,7 @@ use super::{
 
 pub mod diff;
 mod repair;
+mod super_pipeline;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +30,9 @@ pub enum WorkflowFactoryTemplate {
     ReviewDiff,
     FixFailedChecks,
     DeliveryLibrary,
+    SuperAiDevelopmentPlanning,
+    SuperAiDevelopmentDelivery,
+    SuperAiDevelopmentAudit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -74,6 +78,46 @@ pub fn workflow_factory_templates() -> Vec<WorkflowFactoryEntry> {
                 "Review and test",
             ],
         },
+        WorkflowFactoryEntry {
+            id: WorkflowFactoryTemplate::SuperAiDevelopmentPlanning,
+            name: super_pipeline::NAME,
+            revision: FACTORY_REVISION,
+            members: vec![
+                super_pipeline::NAME,
+                super_pipeline::MASTER_PLAN,
+                super_pipeline::SPECIFICATION,
+                super_pipeline::BACKLOG,
+            ],
+        },
+        WorkflowFactoryEntry {
+            id: WorkflowFactoryTemplate::SuperAiDevelopmentDelivery,
+            name: super_pipeline::DELIVERY_NAME,
+            revision: FACTORY_REVISION,
+            members: vec![
+                super_pipeline::DELIVERY_NAME,
+                super_pipeline::MASTER_PLAN,
+                super_pipeline::SPECIFICATION,
+                super_pipeline::BACKLOG,
+                super_pipeline::DELIVERY_MEMBER,
+                super_pipeline::DELIVERY_REVIEW,
+                super_pipeline::PULL_REQUEST_ATTEMPT,
+            ],
+        },
+        WorkflowFactoryEntry {
+            id: WorkflowFactoryTemplate::SuperAiDevelopmentAudit,
+            name: super_pipeline::AUDIT_NAME,
+            revision: FACTORY_REVISION,
+            members: vec![
+                super_pipeline::AUDIT_NAME,
+                super_pipeline::MASTER_PLAN,
+                super_pipeline::SPECIFICATION,
+                super_pipeline::BACKLOG,
+                super_pipeline::DELIVERY_MEMBER,
+                super_pipeline::DELIVERY_REVIEW,
+                super_pipeline::PULL_REQUEST_ATTEMPT,
+                super_pipeline::AUDIT_ROUND,
+            ],
+        },
     ]
 }
 
@@ -93,6 +137,15 @@ impl Store {
             WorkflowFactoryTemplate::ReviewDiff => diff::review_diff(),
             WorkflowFactoryTemplate::FixFailedChecks => repair::fix_failed_checks(),
             WorkflowFactoryTemplate::DeliveryLibrary => delivery_library(),
+            WorkflowFactoryTemplate::SuperAiDevelopmentPlanning => {
+                super_pipeline::package(super_pipeline::Scope::Planning)?
+            }
+            WorkflowFactoryTemplate::SuperAiDevelopmentDelivery => {
+                super_pipeline::package(super_pipeline::Scope::Delivery)?
+            }
+            WorkflowFactoryTemplate::SuperAiDevelopmentAudit => {
+                super_pipeline::package(super_pipeline::Scope::Audit)?
+            }
         };
         self.create_workflow_package(project, None, package).await
     }
@@ -204,7 +257,10 @@ fn review_and_test() -> PackageMember {
                     node(
                         "check",
                         VerifyCandidate,
-                        NodeConfiguration::RequiredChecks { names: vec![] },
+                        NodeConfiguration::RequiredChecks {
+                            names: vec![],
+                            parallel_groups: vec![],
+                        },
                     ),
                     node("join", Join, NodeConfiguration::None),
                 ],

@@ -44,6 +44,18 @@ pub struct WorkflowExecutionInspection {
     pub control: Vec<ControlStageReceipt>,
     pub pending_decisions: Vec<WorkflowPendingDecision>,
     pub comparison_stages: Vec<super::comparison::WorkflowComparisonStage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub automatic_agent_waits: Vec<super::automation::AutomaticAgentWait>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub automatic_preparation_waits: Vec<super::automation::preparation::AutomaticPreparationWait>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub test_phase_waits: Vec<super::test_phase::TestPhaseWait>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub integrated_checks_waits: Vec<super::integrated_checks::IntegratedChecksWait>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub github_waits: Vec<super::github::GithubWait>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub backlog_executions: Vec<super::backlog::execution::BacklogExecution>,
 }
 
 #[derive(Serialize)]
@@ -171,6 +183,14 @@ impl Store {
             let control = recorded_control(&tx, &run)?;
             let pending_decisions = pending_decisions(&tx, &run, &definition)?;
             let comparison_stages = super::comparison::stage::load_stages(&tx, &run)?;
+            let mut automatic_agent_waits = super::automation::agent_waits(&tx, &run)?;
+            automatic_agent_waits.extend(super::automation::agents_delivery::waits(&tx, &run)?);
+            automatic_agent_waits.extend(super::automation::unit_actions::waits(&tx, &run)?);
+            let automatic_preparation_waits = super::automation::preparation::waits(&tx, &run)?;
+            let test_phase_waits = super::test_phase::waits(&tx, &run)?;
+            let integrated_checks_waits = super::integrated_checks::waits(&tx, &run)?;
+            let github_waits = super::github::waits(&tx, &run)?;
+            let backlog_executions = super::backlog::execution::inspect(&tx, &run)?;
             Ok(Some(WorkflowExecutionInspection {
                 run,
                 launch,
@@ -184,6 +204,12 @@ impl Store {
                 control,
                 pending_decisions,
                 comparison_stages,
+                automatic_agent_waits,
+                automatic_preparation_waits,
+                test_phase_waits,
+                integrated_checks_waits,
+                github_waits,
+                backlog_executions,
             }))
         })
         .await
@@ -307,7 +333,7 @@ pub(super) fn load_outputs(
                 current_host
             } else {
                 match &artifact.value {
-                    ArtifactValue::Plan { .. } => selected == Some(artifact.id.as_str()),
+                    ArtifactValue::Plan { .. } | ArtifactValue::BacklogPlan(_) => selected == Some(artifact.id.as_str()),
                     ArtifactValue::Approval(_) => decisions.contains(&artifact.id),
                     ArtifactValue::Release(reference) => decisions.contains(&reference.decision_artifact_id),
                     ArtifactValue::Review { run_id } | ArtifactValue::CommandResult(super::WorkflowCommandResult { run_id, .. }) => {

@@ -22,8 +22,10 @@ use crate::{
     },
     runner::Runner,
     store::Store,
-    workflows::comparison::stage::PendingWorkflowComparison,
-    workflows::conversation_turns::prepare_next_conversation_stage,
+    workflows::{
+        automation::PendingWorkflowAgent, comparison::stage::PendingWorkflowComparison,
+        conversation_turns::prepare_next_conversation_stage,
+    },
 };
 
 use super::{
@@ -163,7 +165,7 @@ impl Worker {
 
 impl JobScheduler {
     pub fn start(store: Store, runner: Arc<dyn Runner>, bridge: Option<PathBuf>) -> Self {
-        Self::start_inner(store, runner, bridge, None)
+        Self::start_inner(store, runner, bridge, None, None)
     }
 
     pub fn start_with_comparison_storage(
@@ -172,7 +174,23 @@ impl JobScheduler {
         bridge: Option<PathBuf>,
         comparison_storage: PathBuf,
     ) -> Self {
-        Self::start_inner(store, runner, bridge, Some(comparison_storage))
+        Self::start_inner(store, runner, bridge, Some(comparison_storage), None)
+    }
+
+    pub fn start_with_workflow_storage(
+        store: Store,
+        runner: Arc<dyn Runner>,
+        bridge: Option<PathBuf>,
+        comparison_storage: PathBuf,
+        worktree_storage: PathBuf,
+    ) -> Self {
+        Self::start_inner(
+            store,
+            runner,
+            bridge,
+            Some(comparison_storage),
+            Some(worktree_storage),
+        )
     }
 
     fn start_inner(
@@ -180,6 +198,7 @@ impl JobScheduler {
         runner: Arc<dyn Runner>,
         bridge: Option<PathBuf>,
         comparison_storage: Option<PathBuf>,
+        worktree_storage: Option<PathBuf>,
     ) -> Self {
         let (stop, stopping) = watch::channel(false);
         let admission = LaunchGate {
@@ -195,6 +214,7 @@ impl JobScheduler {
             active.clone(),
             admission.clone(),
             comparison_storage,
+            worktree_storage,
         ));
         Self {
             runner,
@@ -406,6 +426,7 @@ async fn drive(
     active: ActiveTurns,
     admission: LaunchGate,
     comparison_storage: Option<PathBuf>,
+    worktree_storage: Option<PathBuf>,
 ) {
     let mut signal = store.job_signal.subscribe();
     let mut stopping = admission.stopping.clone();
@@ -413,11 +434,27 @@ async fn drive(
     let mut comparison_worker = JoinSet::new();
     let mut conversation_worker = JoinSet::new();
     let mut next_conversation_scan = tokio::time::Instant::now();
+    let mut workflow_worker = JoinSet::new();
+    let mut preparation_worker = JoinSet::new();
+    let mut test_phase_worker = JoinSet::new();
+    let mut integrated_checks_worker = JoinSet::new();
+    let mut github_worker = JoinSet::new();
+    let mut delivery_result_worker = JoinSet::new();
+    let mut unit_action_worker = JoinSet::new();
     loop {
         stopping.borrow_and_update();
         let stop = admission.is_closed();
         if stop {
-            if workers.is_empty() && comparison_worker.is_empty() && conversation_worker.is_empty()
+            if workers.is_empty()
+                && comparison_worker.is_empty()
+                && conversation_worker.is_empty()
+                && workflow_worker.is_empty()
+                && preparation_worker.is_empty()
+                && test_phase_worker.is_empty()
+                && github_worker.is_empty()
+                && delivery_result_worker.is_empty()
+                && integrated_checks_worker.is_empty()
+                && unit_action_worker.is_empty()
             {
                 break;
             }
@@ -472,6 +509,161 @@ async fn drive(
                 match store.settle_ready_agile_stages().await {
                     Ok(count) => agile_progress |= count > 0,
                     Err(error) => report(&error),
+                }
+                if let Err(error) = store.settle_workflow_backlogs().await {
+                    report(&error);
+                }
+                if preparation_worker.is_empty()
+                    && let Some(root) = &worktree_storage
+                {
+                    match store.next_workflow_preparation().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            let root = root.clone();
+                            preparation_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.execute(&store, root).await {
+                                    report(&error);
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if test_phase_worker.is_empty() {
+                    match store.next_workflow_test_phase().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            test_phase_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.execute(&store).await {
+                                    report(&error);
+                                    if let Err(error) = stage.defer(&store, &error).await {
+                                        report(&error);
+                                    }
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if unit_action_worker.is_empty() {
+                    match store.next_workflow_unit_action().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            unit_action_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.execute(&store).await {
+                                    report(&error);
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if integrated_checks_worker.is_empty() {
+                    match store.next_workflow_integrated_checks().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            integrated_checks_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.execute(&store).await {
+                                    report(&error);
+                                    if let Err(error) = stage.defer(&store, &error).await {
+                                        report(&error);
+                                    }
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if github_worker.is_empty() {
+                    match store.next_workflow_github_action().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            github_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.execute(&store).await {
+                                    report(&error);
+                                    if let Err(error) = stage.defer(&store, &error).await {
+                                        report(&error);
+                                    }
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if delivery_result_worker.is_empty() {
+                    match store.next_workflow_delivery_result().await {
+                        Ok(Some(stage)) => {
+                            admission
+                                .maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(admission.maintenance.clone());
+                            let store = store.clone();
+                            delivery_result_worker.spawn(async move {
+                                let _external = external;
+                                if let Err(error) = stage.publish(&store).await {
+                                    report(&error);
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
+                if workflow_worker.is_empty() {
+                    match store.next_workflow_agent().await {
+                        Ok(Some(stage)) => {
+                            let gate = admission.clone();
+                            gate.maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(gate.maintenance.clone());
+                            workflow_worker.spawn(prepare_workflow_agent(
+                                store.clone(),
+                                stage,
+                                runner.identity().into(),
+                                gate,
+                                external,
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
                 }
                 if comparison_worker.is_empty()
                     && let Some(storage) = &comparison_storage
@@ -587,9 +779,74 @@ async fn drive(
             result = conversation_worker.join_next(), if !conversation_worker.is_empty() => {
                 if let Some(Err(error)) = result { report(&error.into()); }
             }
+            result = workflow_worker.join_next(), if !workflow_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = preparation_worker.join_next(), if !preparation_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = test_phase_worker.join_next(), if !test_phase_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = github_worker.join_next(), if !github_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = integrated_checks_worker.join_next(), if !integrated_checks_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = delivery_result_worker.join_next(), if !delivery_result_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
+            result = unit_action_worker.join_next(), if !unit_action_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
             // Recheck local executable and runner readiness after external changes.
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
         }
+    }
+}
+
+async fn prepare_workflow_agent(
+    store: Store,
+    stage: PendingWorkflowAgent,
+    runner: String,
+    admission: LaunchGate,
+    _external: ExternalWork,
+) {
+    match stage.reconcile(&store).await {
+        Ok(false) => {}
+        Ok(true) => return,
+        Err(error) => {
+            report(&error);
+            return;
+        }
+    }
+    let prepared = stage.prepare(&store, runner).await;
+    let Some(_boundary) = admission.enter_admission().await else {
+        return;
+    };
+    let result = match prepared {
+        Ok(submission) => stage.enqueue(&store, submission).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result
+        && let Err(error) = stage.defer(&store, &error).await
+    {
+        report(&error);
     }
 }
 

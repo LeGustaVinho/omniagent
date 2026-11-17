@@ -36,7 +36,7 @@ const endpointKey = ({ node, port }: WorkflowEndpoint) => JSON.stringify([node, 
 const endpointLabel = ({ node, port }: WorkflowEndpoint) => `${node}.${port}`;
 const slug = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const presetEligible = (kind: string) => !["start", "subflow", "repeat_until", "for_each",
-  "for_each_begin", "for_each_gate", "for_each_collect"].includes(kind);
+  "for_each_begin", "for_each_gate", "for_each_collect", "repeat_output"].includes(kind);
 
 export function reusableEditableFields(configuration: WorkflowNodeConfiguration) {
   switch (configuration.kind) {

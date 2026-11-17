@@ -11,6 +11,7 @@ export type VerifiedMerge = {
   commitEvidenceIds: string[];
   sourceBranch: string;
   sourceSha: string;
+  sourceSyncs?: { headSha: string; previousHead: string; secondParentSha: string; treeSha: string }[];
   destinationBranch: string;
   previousDestinationSha: string;
   originalDestinationSha?: string | null;

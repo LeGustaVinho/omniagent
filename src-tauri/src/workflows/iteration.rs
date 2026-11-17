@@ -542,12 +542,25 @@ pub(super) fn validate_loop_body(
     while let Some(node) = queue.pop_front() {
         visited += 1;
         if node != root {
-            let mut required = dependencies(node).iter().filter(|wire| {
-                kinds[node].kind != BuiltinNode::ForEachCollect
-                    || matches!(wire.to.port.as_str(), "ready" | "items")
-            });
-            let dominated = if kinds[node].kind == BuiltinNode::Join {
-                !dependencies(node).is_empty()
+            let mut required = dependencies(node)
+                .iter()
+                .filter(|wire| match kinds[node].kind {
+                    BuiltinNode::ForEachCollect => {
+                        matches!(wire.to.port.as_str(), "ready" | "items")
+                    }
+                    BuiltinNode::RepeatOutput => kinds[node]
+                        .inputs
+                        .iter()
+                        .any(|port| port.name == wire.to.port && port.value == PortType::Control),
+                    _ => true,
+                });
+            let dominated = if matches!(
+                kinds[node].kind,
+                BuiltinNode::Join | BuiltinNode::RepeatOutput
+            ) {
+                required
+                    .next()
+                    .is_some_and(|wire| source_gated(&wire.from, &gated))
                     && required.all(|wire| source_gated(&wire.from, &gated))
             } else {
                 required.any(|wire| source_gated(&wire.from, &gated))
@@ -590,12 +603,18 @@ pub(super) fn validate_loop_body(
         }
         let waits_for_settlement = matches!(
             kinds[node].kind,
-            BuiltinNode::Join | BuiltinNode::ForEachCollect
+            BuiltinNode::Join | BuiltinNode::ForEachCollect | BuiltinNode::RepeatOutput
         );
         if selected || waits_for_settlement || dependencies(node).len() == 1 {
             waiting.extend(
                 dependencies(node)
                     .iter()
+                    .filter(|wire| {
+                        kinds[node].kind != BuiltinNode::RepeatOutput
+                            || kinds[node].inputs.iter().any(|port| {
+                                port.name == wire.to.port && port.value == PortType::Control
+                            })
+                    })
                     .map(|wire| (wire.from.node.as_str(), selected && !waits_for_settlement)),
             );
         }

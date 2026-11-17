@@ -18,7 +18,7 @@ use crate::{
     repository::verified_git::{DeliveryGitPolicy, load_policy as load_delivery_git_policy},
     runs::{RunRecord, RunStatus, load_run},
     store::Store,
-    tasks::{DeliveryCompletionMilestone, load_delivery_milestone_policy, load_project_task},
+    tasks::{DeliveryCompletionMilestone, load_project_task, load_workflow_milestone_policy},
     workflows::{BuiltinNode, Effect, Executor, load_node_attempt, load_workflow_definition},
 };
 
@@ -272,7 +272,12 @@ fn load_workflow_summary(db: &Connection, run: &RunRecord) -> Result<Option<Work
         release_revoked,
         unit_id: safe_id(pin.unit_id),
         git_policy: load_delivery_git_policy(db, &run.project_id)?,
-        completion_milestone: load_delivery_milestone_policy(db, &run.project_id)?.milestone,
+        completion_milestone: load_workflow_milestone_policy(
+            db,
+            &run.project_id,
+            &pin.workflow_run_id,
+        )?
+        .milestone,
     }))
 }
 

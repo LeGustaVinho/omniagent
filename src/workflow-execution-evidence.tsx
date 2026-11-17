@@ -14,7 +14,8 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
 import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
 import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
-import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
+import { executionOutputForWire, type ExecutionArtifact, type ExecutionControl, type ExecutionJob, type ExecutionPinnedNode,
+  type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "checkout" | "openWorkspace" | "openActivity" | "openQueueJob">;
 type Task = { projectId: string; taskId: string };
@@ -22,6 +23,7 @@ type Git = { id: string; task: Task };
 type Merge = Git & { commitEvidenceId: string };
 type Approval = { task: Task; source: string; planRevision: string; ruleEvidence?: { revision: string } };
 type ArtifactScope = { projectId: string; runId: string };
+type Pull = { number: number; headSha: string; baseSha: string; headBranch: string; baseBranch: string };
 
 const text = (kind: string) => kind.replaceAll("_", " ");
 
@@ -38,9 +40,11 @@ function GitEvidence({ evidence, merge, scope, navigation }: { evidence: Git; me
   const saved = commit.data?.id === commitId && commit.data.projectId === scope.projectId && commit.data.taskId === task.taskId ? commit.data : undefined;
   const receipt = integrated.data?.id === merge?.id && integrated.data?.workflowRunId === scope.runId ? integrated.data : undefined;
   const error = commit.error ?? integrated.error;
+  const synchronizedHead = receipt?.sourceSyncs?.at(-1)?.headSha;
   return <div className="workflow-execution-links">
     {error && <p role="alert">{String(error)}</p>}
     {saved && <p>Verified commit · {saved.branch} · <code>{saved.sha}</code></p>}
+    {synchronizedHead && <p>Synchronized PR head · <code>{synchronizedHead}</code></p>}
     {receipt && <p>Verified integration · {receipt.destinationBranch} · <code>{receipt.integrationSha}</code></p>}
     {saved && <Button type="button" variant="outline" onClick={() => navigation.openWorkspace("git", `attempt:${saved.captureRunId}`)}>Open saved diff</Button>}
     <LinkedWork task={task} projectId={scope.projectId} navigation={navigation} />
@@ -117,7 +121,32 @@ function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArt
       </div>;
     }
     case "merge": return <GitEvidence evidence={evidence as Merge} merge={evidence as Merge} scope={scope} navigation={navigation} />;
+    case "github_pull_request": {
+      const { pull, requiresHuman } = evidence as { pull: Pull; requiresHuman: boolean };
+      return <div className="workflow-execution-links">
+        <p>Pull request #{pull.number}{requiresHuman && " · Requires approval"}</p>
+        <p>{pull.headBranch} · <code>{pull.headSha}</code></p>
+        <p>{pull.baseBranch} · <code>{pull.baseSha}</code></p>
+      </div>;
+    }
+    case "github_ci": {
+      const { snapshot } = evidence as { snapshot: { pullNumber: number; state: string; testedSha: string;
+        checks: { id: number; source: string; context: string; state: string }[] } };
+      return <div className="workflow-execution-links">
+        <p>PR #{snapshot.pullNumber} CI · {text(snapshot.state)} · <code>{snapshot.testedSha}</code></p>
+        {!!snapshot.checks.length && <ul aria-label="GitHub checks">
+          {snapshot.checks.map(({ id, source, context, state }) => <li key={`${source}:${id}`}>{context} · {text(state)}</li>)}
+        </ul>}
+      </div>;
+    }
     case "plan": case "review": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { run_id: string }).run_id)}>Open source attempt</Button>;
+    case "backlog_plan": {
+      const plan = evidence as { parentRunId: string; task: { task: Task } };
+      return <div className="workflow-execution-links">
+        <LinkedWork task={plan.task.task} projectId={scope.projectId} navigation={navigation} />
+        <Button type="button" variant="outline" onClick={() => navigation.openWorkspace("pipelines", `run:${plan.parentRunId}`)}>Open source backlog</Button>
+      </div>;
+    }
     case "agent_response": return <AgentResponseEvidence artifact={artifact} scope={scope} openActivity={navigation.openActivity} />;
     case "command_result": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { runId: string }).runId)}>Open command output and logs</Button>;
     default: return null;
@@ -126,17 +155,20 @@ function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArt
 
 type InputEvidence = [port: string, artifactId: string];
 
-export function RecordedInputs({ inputs, snapshot, scope, navigation }: { inputs: Record<string, string> | InputEvidence[] | null; snapshot: WorkflowExecutionSnapshot; scope: ArtifactScope; navigation: Navigation }) {
+export function RecordedInputs({ inputs, snapshot, scope, navigation, forwarded = false }: {
+  inputs: Record<string, string> | InputEvidence[] | null; snapshot: WorkflowExecutionSnapshot; scope: ArtifactScope;
+  navigation: Navigation; forwarded?: boolean;
+}) {
   if (inputs === null) return <p>Exact data inputs were not recorded for this execution.</p>;
   const entries = Array.isArray(inputs) ? inputs : Object.entries(inputs);
   if (entries.length === 0) return <p>No data inputs were supplied.</p>;
-  return <ul className="pipeline-stack" aria-label="Recorded data inputs">
+  return <ul className="pipeline-stack" aria-label={forwarded ? "Approved iteration outputs" : "Recorded data inputs"}>
     {entries.map(([port, id]) => {
       const output = snapshot.outputs.find(({ artifact }) => artifact.id === id)?.artifact;
       return <li key={`${port}:${id}`} className="break-words"><strong>{port}</strong>
         {output && <> · {output.nodeInstanceId}.{output.port} · {text(output.value.kind)}</>}
         <p><code className="break-all">{id}</code></p>
-        {output && <details><summary>Open input evidence</summary>
+        {output && <details><summary>{forwarded ? "Open exported evidence" : "Open input evidence"}</summary>
           <ArtifactLinks artifact={output} scope={scope} navigation={navigation} />
           <pre className="workflow-evidence-json">{JSON.stringify(output.value.evidence, null, 2)}</pre>
         </details>}
@@ -193,9 +225,12 @@ function ControlEvidence({ control, snapshot, jobs, navigation }: {
   const inputPorts = snapshot.definition.nodes.find(({ instance }) => instance.id === control.nodeId)?.definition.inputs;
   const inputs = (control.dependencies ?? []).flatMap<InputEvidence>(({ toPort, artifactId }) =>
     artifactId && inputPorts?.find(({ name }) => name === toPort)?.value.kind !== "control" ? [[toPort, artifactId]] : []);
+  const exports = Object.entries(control.forwardedOutputs ?? {}).map<InputEvidence>(([port, output]) => [port, output.artifactId]);
   return <section className="workflow-record-card" aria-label="Recorded control decision">
     {control.reason && <p>{control.reason}</p>}
     {control.selectedPorts.length > 0 && <p>Selected ports · {control.selectedPorts.map(text).join(" · ")}</p>}
+    {exports.length > 0 && <RecordedInputs inputs={exports} snapshot={snapshot} forwarded
+      scope={{ projectId: snapshot.run.projectId, runId: snapshot.run.id }} navigation={navigation} />}
     {!!control.dependencies?.length && <ul aria-label="Control dependencies">{control.dependencies.map(({ from, toPort, selected }) => <li key={`${from.node}:${from.port}:${toPort}`}>
       {toPort} · {from.node}.{from.port} · {selected ? "Selected" : "Skipped input"}
     </li>)}</ul>}
@@ -228,8 +263,7 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, focusedArtifactId
   }, [focusedOutput]);
   const pastControl = snapshot.control.filter((receipt) => receipt !== control && belongs(receipt.nodeId, receipt.unitId ?? null));
   const argumentsWire = node.definition.kind === "mcp_tool" ? snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === "arguments") : undefined;
-  const argumentsArtifact = argumentsWire && snapshot.outputs.find(({ artifact, current }) => current && artifact.unitId === null &&
-    artifact.nodeInstanceId === argumentsWire.from.node && artifact.port === argumentsWire.from.port)?.artifact.id;
+  const argumentsArtifact = argumentsWire && executionOutputForWire(snapshot, argumentsWire.from)?.artifact.id;
   const latestMcpJob = jobs.at(-1);
   const currentMcpJob = latestMcpJob && (latestMcpJob.job.latestAttempt || latestMcpJob.inputs?.arguments === argumentsArtifact) ? latestMcpJob.job : undefined;
   const maintenanceWire = node.definition.kind === "activate_maintenance" && snapshot.definition.wires.find(({ to }) =>
@@ -238,9 +272,8 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, focusedArtifactId
     .reduce<(typeof snapshot.units)[number] | undefined>((latest, unit) =>
       !latest || unit.unit.ordinal > latest.unit.ordinal ? unit : latest, undefined);
   const maintenanceGit = maintenanceWire && maintenanceUnit && maintenanceUnit.unit.id === unitId &&
-    snapshot.outputs.find(({ artifact, current }) => current && artifact.unitId === unitId &&
-      artifact.nodeInstanceId === maintenanceWire.from.node && artifact.port === maintenanceWire.from.port && artifact.value.kind === "git")?.artifact;
-  const maintenanceCommit = maintenanceGit ? maintenanceGit.value.evidence as Git : undefined;
+    executionOutputForWire(snapshot, maintenanceWire.from, maintenanceUnit)?.artifact;
+  const maintenanceCommit = maintenanceGit && maintenanceGit.value.kind === "git" ? maintenanceGit.value.evidence as Git : undefined;
   return <div className="pipeline-stack">
     <details><summary>Pinned node configuration</summary>
       <p>Definition version {node.definition.revision} · <code className="break-all">{node.revision}</code></p>

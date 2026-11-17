@@ -685,7 +685,9 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     await textIsVisible(browser, agentPanel, "The revised instruction ran.");
     const agentRun = await invoke(browser, "inspect_workflow_execution", { projectId, runId: agentTurn.runId });
     assert.deepEqual(agentRun.run.version, { id: pin.id, revision: pin.revision });
-    const attempt = agentRun.jobs.find(({ nodeId }) => nodeId === "reader").attempts[0];
+    const readerJobs = agentRun.jobs.filter(({ nodeId }) => nodeId === "reader");
+    assert.equal(readerJobs.length, 1);
+    const attempt = readerJobs[0].attempts[0];
     const input = await invoke(browser, "conversation_input", { conversationId: attempt.conversationId, runId: attempt.runId });
     assert.ok(input.frames.some((frame) => frame.includes(agentMessage)));
     const response = agentTurn.artifacts.find(({ kind }) => kind === "agent_response");

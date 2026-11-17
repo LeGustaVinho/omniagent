@@ -21,7 +21,7 @@ type Verification = {
   candidateId: string;
   startedAt: string;
   finishedAt: string | null;
-  gates: { gate: { name: string; required: boolean }; outcome: { status: string; reason?: string } | null }[];
+  gates: { gate: { name: string; required: boolean }; outcome: { status: string; reason?: string } | null; deferred?: boolean }[];
 };
 type Acceptance = { candidate: { id: string }; verification: { id: string } };
 type CommitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } }
@@ -105,7 +105,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   });
   const captureArtifact = capture.data?.kind === "saved" ? capture.data.artifact : undefined;
   const readyToAccept = Boolean(newestCheck?.data.finishedAt &&
-    newestCheck.data.gates.every(({ gate, outcome }) => !gate.required || outcome?.status === "passed"));
+    newestCheck.data.gates.every(({ gate, outcome, deferred }) => !deferred && (!gate.required || outcome?.status === "passed")));
   const gateError = checkResults.find((result) => result.error)?.error;
   const error = capture.error ?? selected.error ?? policy.error ?? gateError;
   const requestUnit = (nodeId: string, inputs: DeliveryInputs, request: object) => invoke<UnitOutcome>("execute_repository_delivery_unit", {
@@ -183,8 +183,8 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
           {newestCheck ? "Rerun configured checks" : "Run configured checks"}
         </Button>
         {newestCheck && <ul aria-label="Candidate checks" className="pipeline-stack">
-          {newestCheck.data.gates.map(({ gate, outcome }) => <li key={gate.name}>
-            {gate.name} · {gate.required ? "Required" : "Optional"} · {outcome?.status.replaceAll("_", " ") ?? "Pending"}
+          {newestCheck.data.gates.map(({ gate, outcome, deferred }) => <li key={gate.name}>
+            {gate.name} · {gate.required ? "Required" : "Optional"} · {deferred ? "Deferred" : outcome?.status.replaceAll("_", " ") ?? "Pending"}
             {outcome?.reason && <p className="text-muted-foreground">{outcome.reason}</p>}
           </li>)}
           {!newestCheck.data.gates.length && <li>No checks are configured.</li>}

@@ -35,6 +35,8 @@ struct SampleOutcome {
     #[serde(default)]
     outputs: BTreeMap<String, Value>,
     reason: Option<String>,
+    #[serde(rename = "failurePort", skip_serializing_if = "Option::is_none")]
+    failure_port: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -92,6 +94,8 @@ struct TraceInput {
     port: String,
     from: Endpoint,
     state: Signal,
+    #[serde(skip)]
+    failed: bool,
 }
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
@@ -250,7 +254,7 @@ fn signal(step: Option<&TraceStep>, port: &str) -> Signal {
         Some(step) if step.outputs.contains_key(port) => Signal::Selected,
         Some(step)
             if matches!(step.state, TraceState::Completed | TraceState::Skipped)
-                || step.outputs.contains_key("failed") =>
+                || (step.state == TraceState::Failed && !step.outputs.is_empty()) =>
         {
             Signal::Skipped
         }
@@ -308,6 +312,7 @@ fn simulate_graph(
         let node = &definition.nodes[index];
         let mut data = BTreeMap::new();
         let mut result_ordinal = 0;
+        let mut evidence_ordinal = 0;
         let inputs = incoming[index]
             .iter()
             .map(|wire| {
@@ -316,6 +321,11 @@ fn simulate_graph(
                 {
                     result_ordinal += 1;
                     format!("result.{result_ordinal}")
+                } else if wire.to.port == "evidence"
+                    && node.instance.kind == BuiltinNode::CollectEvidence
+                {
+                    evidence_ordinal += 1;
+                    format!("evidence.{evidence_ordinal}")
                 } else {
                     wire.to.port.clone()
                 };
@@ -328,10 +338,20 @@ fn simulate_graph(
                 {
                     data.insert(key, value);
                 }
+                let failed = source.is_some_and(|step| step.state == TraceState::Failed);
+                let signal = if failed
+                    && node.instance.kind == BuiltinNode::CollectEvidence
+                    && wire.to.port == "evidence"
+                {
+                    Signal::Skipped
+                } else {
+                    signal(source, &wire.from.port)
+                };
                 TraceInput {
                     port: wire.to.port.clone(),
                     from: wire.from.clone(),
-                    state: signal(source, &wire.from.port),
+                    state: signal,
+                    failed,
                 }
             })
             .collect::<Vec<_>>();
@@ -376,6 +396,9 @@ pub(super) fn intrinsic(kind: BuiltinNode) -> bool {
             | BuiltinNode::IterationLimit
             | BuiltinNode::BuildList
             | BuiltinNode::SetFields
+            | BuiltinNode::ValidateOutput
+            | BuiltinNode::CollectEvidence
+            | BuiltinNode::QualityGate
             | BuiltinNode::FilterMapList
             | BuiltinNode::BuildText
             | BuiltinNode::TypedStart
@@ -401,6 +424,52 @@ fn trace_node(
         outputs: BTreeMap::new(),
         reason: None,
     };
+    if let NodeConfiguration::RepeatOutput(configuration) = &node.instance.configuration {
+        use crate::workflows::repetition::{
+            RepeatOutputConfiguration, RepeatSelection, RepeatSignal,
+        };
+        match configuration.select(|port| {
+            match step
+                .inputs
+                .iter()
+                .find(|input| input.port == port)
+                .map(|input| input.state)
+            {
+                Some(Signal::Selected) => RepeatSignal::Selected,
+                Some(Signal::Skipped) => RepeatSignal::Skipped,
+                _ => RepeatSignal::Waiting,
+            }
+        })? {
+            RepeatSelection::Waiting => {
+                step.reason = Some("Waiting for the approved iteration and its exports.".into());
+            }
+            RepeatSelection::Skipped => step.state = TraceState::Skipped,
+            RepeatSelection::MissingOutput => {
+                return Ok(failed_iteration(
+                    step,
+                    "The approved iteration did not produce every configured export",
+                ));
+            }
+            RepeatSelection::Approved(round) => {
+                step.state = TraceState::Completed;
+                step.outputs.insert("completed".into(), control_output());
+                for (name, kind) in &configuration.exports {
+                    let input = RepeatOutputConfiguration::value_port(round, name);
+                    let value = data
+                        .get(&input)
+                        .context("The approved iteration lost its simulated export")?;
+                    step.outputs.insert(
+                        name.clone(),
+                        TraceOutput {
+                            port_type: PortType::Data(*kind),
+                            value: Some((*value).clone()),
+                        },
+                    );
+                }
+            }
+        }
+        return Ok(step);
+    }
     let selected_list = (kind == ForEachCollect)
         .then(|| simulated_list(&step.inputs, data))
         .transpose()?
@@ -432,7 +501,9 @@ fn trace_node(
             }
         })
         .collect();
-    let skipped = relevant.iter().any(|input| input.state == Signal::Skipped);
+    let skipped = relevant.iter().any(|input| {
+        input.state == Signal::Skipped && (kind != CollectEvidence || input.port == "ready")
+    });
     let waiting = relevant.iter().any(|input| input.state == Signal::Waiting);
     let selected = relevant.iter().any(|input| input.state == Signal::Selected);
     if skipped && (kind != Join || !waiting && !selected) {
@@ -447,6 +518,22 @@ fn trace_node(
     let mut values = BTreeMap::new();
     let control = match kind {
         Start | TypedStart => return trace_start(step, node, body, scenario),
+        QualityGate => {
+            let NodeConfiguration::QualityGate(config) = &node.instance.configuration else {
+                anyhow::bail!("Invalid pinned quality gate");
+            };
+            let ArtifactValue::EvidenceSet(evidence) =
+                serde_json::from_value((*data["evidence"]).clone())?
+            else {
+                anyhow::bail!("The quality gate lost its sample evidence set");
+            };
+            let (port, report) = config.evaluate(&evidence)?;
+            values.insert(
+                "decision".into(),
+                serde_json::to_value(ArtifactValue::JsonObject(report))?,
+            );
+            Some(port)
+        }
         LoadContext => {
             values.insert("context".into(), (*data["document"]).clone());
             Some("loaded")
@@ -474,9 +561,81 @@ fn trace_node(
             );
             Some("completed")
         }
-        SetFields | FilterMapList | BuildText => {
+        CollectEvidence => {
+            use super::super::super::data_nodes::{
+                EvidenceOutcome, WorkflowEvidence, evidence_text,
+            };
+            let evidence = step
+                .inputs
+                .iter()
+                .filter(|input| input.port == "evidence")
+                .enumerate()
+                .map(|(index, input)| {
+                    let outcome = match input.state {
+                        Signal::Selected => EvidenceOutcome::Completed {
+                            artifact_id: simulation_artifact_id(&input.from),
+                            value: data
+                                .get(&format!("evidence.{}", index + 1))
+                                .map(|value| (*value).clone())
+                                .context("The selected sample evidence is missing")?,
+                        },
+                        Signal::Skipped if input.failed => EvidenceOutcome::Failed,
+                        Signal::Skipped => EvidenceOutcome::Skipped,
+                        Signal::Waiting => anyhow::bail!("The sample evidence is still pending"),
+                    };
+                    Ok(WorkflowEvidence {
+                        source: input.from.clone(),
+                        outcome,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let text = match evidence_text(&evidence) {
+                Ok(text) => text,
+                Err(error) => return Ok(failed_iteration(step, &error.to_string())),
+            };
+            values.insert(
+                "text".into(),
+                serde_json::to_value(ArtifactValue::RenderedText(text))?,
+            );
+            values.insert(
+                "evidence".into(),
+                serde_json::to_value(ArtifactValue::EvidenceSet(evidence))?,
+            );
+            Some("completed")
+        }
+        SetFields | FilterMapList | BuildText | ValidateOutput => {
             use super::super::super::data_nodes::data_view;
             let transformed = match &node.instance.configuration {
+                NodeConfiguration::ValidateOutput(config) => (|| {
+                    let source = data.get("source").context("The sample output is missing")?;
+                    let payload = source
+                        .get("evidence")
+                        .context("The sample output has no value")?;
+                    let values = match source.get("kind").and_then(Value::as_str) {
+                        Some("agent_response" | "rendered_text") => config.parse(
+                            payload
+                                .as_str()
+                                .context("Enter the sample response as JSON text")?,
+                        )?,
+                        Some("json_object") => config.evaluate(payload.clone())?,
+                        Some("command_result") => {
+                            let output: super::super::super::WorkflowCommandResult =
+                                serde_json::from_value(payload.clone())?;
+                            match output.output {
+                                super::super::super::command::CommandData::Json(value) => {
+                                    config.evaluate(value)?
+                                }
+                                super::super::super::command::CommandData::Text(text) => {
+                                    config.parse(&text)?
+                                }
+                            }
+                        }
+                        _ => anyhow::bail!(
+                            "Sample a saved Agent response, JSON object, text, or Command result"
+                        ),
+                    };
+                    Ok(("object", ArtifactValue::JsonObject(values)))
+                })(),
                 NodeConfiguration::SetFields(config) => config
                     .evaluate(data.get("source").copied().map(data_view))
                     .map(|value| ("object", ArtifactValue::JsonObject(value))),
@@ -649,12 +808,22 @@ fn trace_node(
                 outcome.state != TraceState::Skipped,
                 "Branch selection determines skipped stages"
             );
+            if let Some(port) = &outcome.failure_port {
+                ensure!(
+                    outcome.state == TraceState::Failed
+                        && matches!(port.as_str(), "failed" | "stale" | "blocked")
+                        && node.definition.outputs.iter().any(|output| output.value == PortType::Control && output.name == *port),
+                    "Choose a declared failure port for the failed sample"
+                );
+            }
             if outcome.state != TraceState::Completed {
                 ensure!(
                     outcome.outputs.is_empty(),
                     "A failed or waiting stage cannot supply data outputs"
                 );
-                if outcome.state == TraceState::Failed && routed_failure {
+                if let Some(port) = &outcome.failure_port {
+                    step.outputs.insert(port.clone(), control_output());
+                } else if outcome.state == TraceState::Failed && routed_failure {
                     step.outputs.insert("failed".into(), control_output());
                 }
                 return Ok(step);
@@ -662,6 +831,45 @@ fn trace_node(
             values.clone_from(&outcome.outputs);
             if matches!(kind, RequestInput | Approval) {
                 Some(super::super::super::decision_nodes::simulate_stage_decision(node, &values)?)
+            } else if kind == VerifyTestPhase {
+                let verdict = values
+                    .get("evidence")
+                    .and_then(|sample| sample.pointer("/result/verdict"))
+                    .and_then(Value::as_str);
+                Some(match verdict {
+                    Some("verified") => "verified",
+                    Some("failed") => "failed",
+                    Some("blocked") => "blocked",
+                    _ => anyhow::bail!("A test phase sample needs evidence.result.verdict"),
+                })
+            } else if kind == VerifyIntegratedChecks {
+                let verdict = values
+                    .get("evidence")
+                    .and_then(|sample| sample.get("verdict"))
+                    .and_then(Value::as_str);
+                Some(match verdict {
+                    Some("verified") => "verified",
+                    Some("failed") => "failed",
+                    Some("blocked") => "blocked",
+                    _ => anyhow::bail!("An integrated checks sample needs evidence.verdict"),
+                })
+            } else if kind == WaitForCi {
+                let ci = values.get("ci").context("A CI sample needs its snapshot")?;
+                Some(
+                    match ci.pointer("/snapshot/state").and_then(Value::as_str) {
+                        Some("passed")
+                            if ci.pointer("/pull/requiresHuman").and_then(Value::as_bool)
+                                == Some(true) =>
+                        {
+                            "approval_required"
+                        }
+                        Some("passed") => "passed",
+                        Some("failed") => "failed",
+                        _ => anyhow::bail!(
+                            "A completed CI sample needs a passing or failed snapshot"
+                        ),
+                    },
+                )
             } else {
                 node.definition
                     .outputs
@@ -764,15 +972,10 @@ fn trace_start(
             .iter()
             .find(|(_, endpoint)| endpoint.node == node.instance.id && endpoint.port == port)
             .map(|(name, _)| name.as_str()),
-        _ if node.instance.kind == BuiltinNode::TypedStart
-            && matches!(port, "inputs" | "task" | "event") =>
-        {
-            match port {
-                "inputs" => Some("inputs"),
-                "task" => Some("task"),
-                _ => Some("event"),
-            }
-        }
+        _ if node.instance.kind == BuiltinNode::TypedStart && port == "inputs" => Some("inputs"),
+        _ if node.instance.kind == BuiltinNode::TypedStart && port == "task" => Some("task"),
+        _ if node.instance.kind == BuiltinNode::TypedStart && port == "event" => Some("event"),
+        _ if node.instance.kind == BuiltinNode::TypedStart && port == "plan" => Some("plan"),
         _ if port == "document" => Some("document"),
         _ => None,
     };
@@ -789,8 +992,17 @@ fn trace_start(
             })
             .transpose()?
             .unwrap_or(&empty);
-        config.validate_values(values)?;
-        typed_values = Some(Value::Object(values.clone()));
+        let markdown = scenario
+            .inputs
+            .get("document")
+            .filter(|_| config.prompt_or_markdown())
+            .map(|sample| {
+                sample
+                    .as_str()
+                    .context("Enter sample Markdown text for the Start request")
+            })
+            .transpose()?;
+        typed_values = Some(Value::Object(config.launch_values(values, markdown)?));
     }
     for name in scenario.inputs.keys() {
         ensure!(
@@ -802,6 +1014,11 @@ fn trace_start(
         );
     }
     for port in &node.definition.outputs {
+        if port.name == "document"
+            && matches!(&node.instance.configuration, NodeConfiguration::TypedStart(config) if config.prompt_or_markdown())
+        {
+            continue;
+        }
         let sample = input_name(&port.name).map(|name| {
             let value = if name == "inputs" {
                 typed_values.as_ref().or_else(|| scenario.inputs.get(name))

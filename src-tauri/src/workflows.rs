@@ -6,20 +6,26 @@ use sha2::{Digest, Sha256};
 
 mod agile_nodes;
 mod approval;
-mod data_nodes;
-pub mod decision_nodes;
 mod artifacts;
 pub mod authoring;
+pub(crate) mod automation;
+mod backlog;
+pub(crate) use backlog::backlog_commit_message;
 mod builtin;
+mod candidate_acceptance;
 mod command;
 pub mod comparison;
 mod control;
 pub mod conversation_turns;
+mod data_nodes;
+pub mod decision_nodes;
 mod execution;
+mod generic_agent;
 #[cfg(test)]
 mod git_integration;
-mod generic_agent;
+pub mod github;
 pub mod inspection;
+pub(crate) mod integrated_checks;
 mod iteration;
 mod job_inputs;
 mod launch;
@@ -43,6 +49,7 @@ pub mod stage_plan;
 pub mod stage_requirements;
 mod subflow;
 pub mod templates;
+pub(crate) mod test_phase;
 #[cfg(test)]
 mod tests;
 pub mod triggers;
@@ -51,8 +58,8 @@ mod units;
 
 pub use approval::{
     ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence,
-    ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview,
-    WorkflowApprovalStage, WorkflowApprovalSubmission,
+    ApprovalRuleOutcome, ApprovalRuleSettings, BacklogApprovalScope, UnmetApproval,
+    WorkflowApprovalPreview, WorkflowApprovalStage, WorkflowApprovalSubmission,
 };
 pub(crate) use approval::{
     active_delivery_workflow, detach_active_delivery_workflow, workflow_release_authorized,
@@ -242,7 +249,10 @@ fn compile_resolved_graph<'definition>(
     ensure!(
         nodes
             .iter()
-            .filter(|node| matches!(node.instance.kind, BuiltinNode::Start | BuiltinNode::TypedStart))
+            .filter(|node| matches!(
+                node.instance.kind,
+                BuiltinNode::Start | BuiltinNode::TypedStart
+            ))
             .count()
             == 1,
         "a workflow needs one Start node"
@@ -295,7 +305,18 @@ fn compile_resolved_graph<'definition>(
         if wire.from.port == "event"
             && let NodeConfiguration::TypedStart(start) = &nodes[from].instance.configuration
         {
-            ensure!(start.accepts_automation(), "Make Start fields optional to connect the event port");
+            ensure!(
+                start.accepts_automation(),
+                "Make Start fields optional to connect the event port"
+            );
+        }
+        if wire.from.port == "document"
+            && let NodeConfiguration::TypedStart(start) = &nodes[from].instance.configuration
+        {
+            ensure!(
+                !start.prompt_or_markdown(),
+                "Connect the Start inputs port to read the normalized request"
+            );
         }
         ensure!(
             connections.insert((&wire.from, &wire.to)),
@@ -303,7 +324,7 @@ fn compile_resolved_graph<'definition>(
         );
         let accepts_multiple = match nodes[to].instance.kind {
             BuiltinNode::Join => input.name == "branches",
-            BuiltinNode::SummarizeResult => input.name == "evidence",
+            BuiltinNode::SummarizeResult | BuiltinNode::CollectEvidence => input.name == "evidence",
             BuiltinNode::ForEachCollect => matches!(input.name.as_str(), "finished" | "result"),
             _ => false,
         };
@@ -315,25 +336,79 @@ fn compile_resolved_graph<'definition>(
         inputs_remaining[to] += 1;
     }
     for node in &nodes {
+        if let NodeConfiguration::StagedChecks {
+            strategy_checks, ..
+        } = &node.instance.configuration
+        {
+            ensure!(
+                strategy_checks.is_empty()
+                    || node
+                        .definition
+                        .inputs
+                        .iter()
+                        .any(|port| port.name == "strategy"),
+                "Update the verification node to a version that accepts approved test strategy"
+            );
+        }
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
-            if matches!((node.instance.kind, port.name.as_str()),
-                (BuiltinNode::Approval | BuiltinNode::SummarizeResult, "evidence") | (BuiltinNode::Agent, "comparison")) {
+            if matches!(
+                (node.instance.kind, port.name.as_str()),
+                (
+                    BuiltinNode::Approval | BuiltinNode::SummarizeResult,
+                    "evidence"
+                ) | (BuiltinNode::Agent, "comparison")
+                    | (
+                        BuiltinNode::Implement | BuiltinNode::ReviewCandidate,
+                        "brief"
+                    )
+                    | (BuiltinNode::OpenOrUpdatePullRequest, "risk")
+                    | (BuiltinNode::MergePullRequest, "approval")
+                    | (BuiltinNode::MaterializeBacklog, "design" | "strategy")
+            ) {
                 continue;
             }
             use agile_nodes::ManageWorkConfiguration as Work;
             let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
-                (NodeConfiguration::ManageWork { action }, "task") => Some(matches!(action, Work::Link | Work::CreateSubtask)),
-                (NodeConfiguration::ManageWork { action }, "title") => Some(matches!(action, Work::CreateTask | Work::CreateSubtask)),
+                (NodeConfiguration::ManageWork { action }, "task") => {
+                    Some(matches!(action, Work::Link | Work::CreateSubtask))
+                }
+                (NodeConfiguration::ManageWork { action }, "title") => {
+                    Some(matches!(action, Work::CreateTask | Work::CreateSubtask))
+                }
                 (NodeConfiguration::LoadWorkContext { mode }, "task") => Some(mode.needs_task()),
-                (NodeConfiguration::LoadWorkContext { mode }, "document") => Some(mode.needs_document()),
-                (NodeConfiguration::SetFields(configuration), "source") => Some(configuration.requires_source()),
-                (NodeConfiguration::BuildText(configuration), "values") => Some(configuration.requires_values()),
+                (NodeConfiguration::LoadWorkContext { mode }, "document") => {
+                    Some(mode.needs_document())
+                }
+                (NodeConfiguration::SetFields(configuration), "source") => {
+                    Some(configuration.requires_source())
+                }
+                (NodeConfiguration::BuildText(configuration), "values") => {
+                    Some(configuration.requires_values())
+                }
                 (NodeConfiguration::McpTool(configuration), "arguments") => {
                     Some(!configuration.argument_mappings.is_empty())
                 }
                 (NodeConfiguration::BuildList(configuration), "value") => {
                     Some(configuration.requires_evidence())
+                }
+                (NodeConfiguration::VerifyTestPhase(configuration), name) => {
+                    configuration.required_input(name)
+                }
+                (
+                    NodeConfiguration::StagedChecks {
+                        strategy_checks, ..
+                    },
+                    "strategy",
+                ) => Some(!strategy_checks.is_empty()),
+                (_, "strategy") if node.instance.kind == BuiltinNode::VerifyCandidate => {
+                    Some(false)
+                }
+                (_, "quality" | "build") if node.instance.kind == BuiltinNode::AcceptCandidate => {
+                    Some(matches!(
+                        node.instance.configuration,
+                        NodeConfiguration::CandidateAcceptance(_)
+                    ))
                 }
                 _ => None,
             };
@@ -384,12 +459,13 @@ fn compile_resolved_graph<'definition>(
     };
     let unit_nodes = control::unit_nodes(&definition);
     ensure!(
-        definition
-            .nodes
-            .iter()
-            .all(|node| !(node.instance.kind.generated_iteration()
-                || node.instance.kind == BuiltinNode::BuildList)
-                || !unit_nodes.contains(node.instance.id.as_str())),
+        definition.nodes.iter().all(|node| !matches!(
+            node.instance.kind,
+            BuiltinNode::BuildList
+                | BuiltinNode::ForEachBegin
+                | BuiltinNode::ForEachGate
+                | BuiltinNode::ForEachCollect
+        ) || !unit_nodes.contains(node.instance.id.as_str())),
         "List execution currently requires a workflow outside a logical delivery unit"
     );
     Ok(definition)

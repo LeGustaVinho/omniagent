@@ -144,6 +144,34 @@ pub(crate) fn load_delivery_milestone_policy(
     })
 }
 
+pub(crate) fn load_workflow_milestone_policy(
+    db: &Connection,
+    project: &str,
+    workflow_run: &str,
+) -> Result<DeliveryMilestonePolicy> {
+    let destination_branch = db
+        .query_row(
+            "SELECT task.destination_branch FROM workflow_backlog_task_runs task
+         JOIN workflow_run_pins pin ON pin.pipeline_run_id = task.child_run_id
+         WHERE pin.project_id = ?1 AND task.child_run_id = ?2",
+            params![project, workflow_run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(destination_branch) = match destination_branch {
+        Some(branch) => Some(branch),
+        None => {
+            crate::workflows::github::workflow_github_merge_destination(db, project, workflow_run)?
+        }
+    } {
+        return Ok(DeliveryMilestonePolicy {
+            milestone: DeliveryCompletionMilestone::VerifiedMerge,
+            destination_branch: Some(destination_branch),
+        });
+    }
+    load_delivery_milestone_policy(db, project)
+}
+
 pub(crate) fn record_verified_task_delivery(
     db: &Connection,
     project: &str,
@@ -160,7 +188,7 @@ pub(crate) fn record_verified_task_delivery(
         active_plan(db, project, task, workflow_run)?.as_deref() == Some(plan_revision),
         "this workflow plan is no longer active for this task"
     );
-    let policy = load_delivery_milestone_policy(db, project)?;
+    let policy = load_workflow_milestone_policy(db, project, workflow_run)?;
     let candidate = complete_commit_chain(
         db,
         project,
