@@ -428,6 +428,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
   };
   const openLocation = ({ path, line, anchor }: KnowledgeLocation) => open(path, line ?? undefined, anchor ?? undefined);
+  const locationActions = ({ path, line, anchor }: KnowledgeLocation) => [
+    { label: "Open to the side", run: () => open(path, line ?? undefined, anchor ?? undefined, "side") },
+    { label: "Reveal in note tree", run: () => { setSidebar(true); setDisplay("tree"); setReveal({ path }); } },
+    ...(!/[#\[\]|]/.test(path) && (!anchor || !/[\[\]|]/.test(anchor)) ? [
+      { label: "Copy wikilink", run: () => menu.copy(`[[${path}${anchor ? `#${anchor}` : ""}]]`, "Copied wikilink") },
+    ] : []),
+    { label: "Copy location", run: () => menu.copy(`${path}${anchor ? `#${anchor}` : ""}${line ? `:${line}` : ""}`, "Copied note location") },
+  ];
   const offerLinkRepair = (from: string, link: NoteTarget, matches: NoteLocation[], anchor = "", sourceLine?: number, manual?: boolean) => {
     setSelection(matches.length === 1 ? matches[0]!.path : "");
     setSelectedAnchor(anchor);
@@ -671,9 +679,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               {!active || !note ? <p className="file-help">Open a note to see its details.</p> : <>
                 {inspector === "outline" && <KnowledgeOutline
                   entries={(isDirty(note) ? headings(source) : outlineIndex.data?.headings ?? headings(source))
-                    .map((entry) => ({ ...entry, path: active, anchor: entry.label }))} onOpen={openLocation} />}
+                    .map((entry) => ({ ...entry, path: active, anchor: entry.label }))} onOpen={openLocation} actions={locationActions} />}
                 {inspector === "links" && <KnowledgeLinks outgoing={outgoingLinks} backlinks={backlinks}
-                  onOpen={openLocation} pending={showIndexed && relationships.isPending}
+                  onOpen={openLocation} actions={locationActions} copyReference={(text) => menu.copy(text, "Copied link target")}
+                  pending={showIndexed && relationships.isPending}
                   error={relationships.error ? String(relationships.error) : undefined}
                   onRepair={(entry) => {
                     const resolution = entry.resolution;
