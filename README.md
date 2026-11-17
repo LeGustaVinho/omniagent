@@ -41,7 +41,7 @@ with the same script used by Windows CI. Set `OMNIAGENT_TAURI_DRIVER` and
 $drivers = ./tests/desktop/prepare-windows-drivers.ps1 -Destination (Join-Path $env:TEMP 'omniagent-webdriver')
 $env:OMNIAGENT_TAURI_DRIVER = $drivers.TauriDriver
 $env:OMNIAGENT_EDGE_DRIVER = $drivers.EdgeDriver
-pnpm tauri build --debug --no-bundle --config tests/desktop/tauri.conf.json --ci
+node node_modules/@tauri-apps/cli/tauri.js build --debug --no-bundle --config tests/desktop/tauri.conf.json --ci -- --locked
 pnpm test:desktop
 ```
 

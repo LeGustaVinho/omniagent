@@ -45,5 +45,5 @@ jobs:
           Write-Output "WebView2 $($drivers.WebView2Version), EdgeDriver $($drivers.EdgeDriverVersion)"
           "OMNIAGENT_TAURI_DRIVER=$($drivers.TauriDriver)" >> $env:GITHUB_ENV
           "OMNIAGENT_EDGE_DRIVER=$($drivers.EdgeDriver)" >> $env:GITHUB_ENV
-      - run: pnpm tauri build --debug --no-bundle --config tests/desktop/tauri.conf.json --ci -- --locked
+      - run: node node_modules/@tauri-apps/cli/tauri.js build --debug --no-bundle --config tests/desktop/tauri.conf.json --ci -- --locked
       - run: pnpm test:desktop
