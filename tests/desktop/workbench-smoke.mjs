@@ -1460,8 +1460,8 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Recovery checkout");
   const path = "recovery-source.ts";
-  const original = "const original_source = true;";
-  const edited = "const recovered_editor_buffer = true;";
+  const original = "// recover this buffer";
+  const edited = `${original}x`;
   git(scratch, "init", "-q", repo);
   await writeFile(join(repo, path), original);
   git(repo, "add", path);
@@ -1520,14 +1520,10 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     };
     const { text } = await openSource();
     await text.click();
-    await browser.action("key").down(Key.Control).down("a").up("a").up(Key.Control).perform();
-    // Send the focused WebView editor one text input so EditContext receives the replacement in a single event.
-    const endpoint = `http://127.0.0.1:${port + 1}/session/${encodeURIComponent(browser.sessionId)}/ms/cdp/execute`;
-    const inserted = await fetch(endpoint, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cmd: "Input.insertText", params: { text: edited } }), signal: AbortSignal.timeout(5_000),
-    });
-    assert.ok(inserted.ok, await inserted.text());
+    await browser.waitUntil(() => browser.execute(() => !!document.activeElement?.closest(".code-editor .monaco-editor")),
+      { timeout: 5_000, timeoutMsg: "The source editor did not receive keyboard focus" });
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("x");
     let rendered;
     await browser.waitUntil(async () => {
       rendered = await text.getText();
@@ -1548,7 +1544,7 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     browser = await startSession(application);
     assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, checkout.checkoutId);
     const recovered = await openSource();
-    assert.match(await recovered.text.getText(), /recovered_editor_buffer/);
+    assert.match(await recovered.text.getText(), /bufferx/);
     assert.match(await recovered.ide.$(".ide-statusbar").getText(), /Unsaved changes/);
     assert.deepEqual(await invoke(browser, "read_repository_source_draft", source), sourceDraft);
     assert.equal(await readFile(join(repo, path), "utf8"), original);
