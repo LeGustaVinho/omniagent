@@ -59,6 +59,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
       {review.data && !review.error && <>
         {tab === "Changes" && <GitCheckoutChanges key={JSON.stringify([checkoutId, requestedFile])} review={review.data} indexActions initialPath={requestedFile}
           openFile={activeCheckout ? (path) => props.openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path) : undefined}
+          openConversation={activeCheckout ? (id) => props.openWorkspace("conversations", id) : undefined}
           openPanel={activeCheckout ? () => props.openChanges("working") : undefined} />}
         {tab === "Worktrees" && <WorktreeTable review={review.data} select={setCheckout} />}
         {tab === "Worktrees" && creating && <CreateGitWorktree projectId={props.checkout.projectId} review={review.data}

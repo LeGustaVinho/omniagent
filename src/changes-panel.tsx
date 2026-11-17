@@ -34,6 +34,7 @@ export default function ChangesPanel(props: ChangesPanelProps) {
 function LiveChanges({ checkout, source, onClose, openWorkspace }: ChangesPanelProps & { source: "working" | "staged" }) {
   const review = useGitCheckoutReview(checkout.checkoutId);
   if (review.data && !review.error) return <GitCheckoutChanges review={review.data} onClose={onClose} initialSource={source}
+    openConversation={(id) => openWorkspace("conversations", id)}
     openFile={(path) => openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path)} />;
   return <GitDiffFrame source={source} title={sourceLabels[source]} onClose={onClose}>
     <div className="p-3">

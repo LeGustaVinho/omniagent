@@ -108,6 +108,21 @@ pub async fn set_git_path_staged(
 }
 
 #[tauri::command]
+pub async fn set_git_hunk_staged(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    source: GitDiffSource,
+    expected: GitReviewRevision,
+    hunk_id: String,
+) -> Result<(), String> {
+    store
+        .set_git_hunk_staged(checkout_id, path, source, expected, hunk_id)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn commit_git_index(
     store: State<'_, Store>,
     checkout_id: String,

@@ -12,7 +12,10 @@ export type GitTextComparison = {
   original: string;
   modified: string;
   patch?: string;
+  hunks?: GitHunk[];
 };
+
+export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number };
 
 type DiffLayout = "auto" | "split" | "unified";
 
@@ -48,7 +51,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, fileActions, footer, onClose }: {
+  allowSavedPatch, openFile, fileActions, hunkActions, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -62,16 +65,29 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   allowSavedPatch?: boolean;
   openFile?: () => void;
   fileActions?: (file: GitDiffRow) => MenuGroups;
+  hunkActions?: (hunk: GitHunk) => MenuGroups;
   footer?: ReactNode;
   onClose?: () => void;
 }) {
   const [layout, setLayout] = useState<DiffLayout>("auto");
   const [patchPath, setPatchPath] = useState<string>();
+  const [requestedLine, setRequestedLine] = useState<number>();
   const [copyError, setCopyError] = useState("");
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const selected = files.find((file) => file.path === selectedPath);
-  const hasPatch = Boolean(allowSavedPatch && comparison?.patch);
+  const hasHunks = Boolean(comparison?.hunks?.length);
+  const hasPatch = Boolean(hasHunks || allowSavedPatch && comparison?.patch);
   const showingPatch = hasPatch && Boolean(selected && patchPath === selected.path);
+  useEffect(() => {
+    if (instance && requestedLine !== undefined) {
+      const editor = instance.getModifiedEditor();
+      const lineNumber = Math.max(1, requestedLine);
+      editor.setPosition({ lineNumber, column: 1 });
+      editor.revealLineInCenter(lineNumber);
+      editor.focus();
+      setRequestedLine(undefined);
+    }
+  }, [instance, requestedLine]);
   function copy(value: string) {
     setCopyError("");
     void Promise.resolve().then(() => navigator.clipboard.writeText(value)).catch(() => setCopyError("Could not copy to the clipboard."));
@@ -129,13 +145,33 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         </ResizablePanel>
         {selected && <div className="flex min-h-0 flex-1 flex-col">
           {(hasPatch || openFile) && <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
-            {hasPatch && <button className="delivery-tab" type="button" aria-pressed={showingPatch} onClick={() => setPatchPath(showingPatch ? undefined : selected.path)}>{showingPatch ? "Compare side by side" : "View saved patch"}</button>}
+            {hasPatch && <button className="delivery-tab" type="button" aria-pressed={showingPatch} onClick={() => setPatchPath(showingPatch ? undefined : selected.path)}>
+              {showingPatch ? "Compare side by side" : hasHunks ? "Review hunks" : "View saved patch"}
+            </button>}
             {openFile && <button className="delivery-tab" type="button" onClick={openFile}>Open file <ExternalLink size={12} aria-hidden className="ml-1 inline-block" /></button>}
           </div>}
           {selected.kind === "Binary"
             ? <div className="delivery-empty"><FileImage size={22} aria-hidden /><p>Binary file. Text comparison is unavailable.</p></div>
             : <div className="min-h-0 flex-1 overflow-auto">
-              {preview ?? (comparison && (showingPatch ? <UnifiedPatch file={comparison} />
+              {preview ?? (comparison && (showingPatch ? (hasHunks ? <div className="grid gap-3 p-3" aria-label="Git hunks">
+                {comparison.hunks!.map((hunk) => {
+                  const goToHunk = () => { setRequestedLine(hunk.modifiedLine); setPatchPath(undefined); };
+                  return <section key={hunk.id} className="min-w-0 rounded border border-border" aria-label={hunk.header}>
+                    <ContextActions label={hunk.header} className="diff-hunk-menu" groups={[[
+                      { label: "Go to hunk in comparison", run: goToHunk },
+                      { label: "Copy hunk patch", run: () => copy(hunk.patch) },
+                      ...(hunk.modifiedLine > 0 ? [{ label: "Copy revised line reference", run: () => copy(`${comparison.path}:${hunk.modifiedLine}`) }] : []),
+                    ], ...(hunkActions?.(hunk) ?? [])]}>
+                      <div className="min-w-0 flex-1">
+                        <button type="button" className="block w-full truncate border-b border-border bg-muted/30 p-2 text-left font-mono text-xs" onClick={goToHunk}>
+                          {hunk.header}
+                        </button>
+                        <PatchLines value={hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1)} />
+                      </div>
+                    </ContextActions>
+                  </section>;
+                })}
+              </div> : <UnifiedPatch file={comparison} />)
                 : <MonacoComparison key={comparison.path} file={comparison} layout={layout} ready={setInstance} />))}
             </div>}
         </div>}
@@ -144,10 +180,14 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   </GitDiffFrame>;
 }
 
-function UnifiedPatch({ file }: { file: GitTextComparison }) {
-  if (file.patch) return <pre className="min-h-40 overflow-auto p-3 font-mono text-xs leading-5">
-    {file.patch.split("\n").map((line, index) => <span key={index} className={line.startsWith("+") ? "block bg-green-500/15" : line.startsWith("-") ? "block bg-red-500/15" : "block"}>{line || " "}</span>)}
+function PatchLines({ value }: { value: string }) {
+  return <pre className="overflow-auto p-3 font-mono text-xs leading-5">
+    {value.split("\n").map((line, index) => <span key={index} className={line.startsWith("+") ? "block bg-green-500/15" : line.startsWith("-") ? "block bg-red-500/15" : "block"}>{line || " "}</span>)}
   </pre>;
+}
+
+function UnifiedPatch({ file }: { file: GitTextComparison }) {
+  if (file.patch) return <PatchLines value={file.patch} />;
   return <div className="grid min-h-40 gap-3 overflow-auto p-3 sm:grid-cols-2">
     <section aria-label="Base file"><h3 className="mb-1 text-xs text-muted-foreground">Base</h3><pre className="overflow-auto rounded border border-border p-2 font-mono text-xs leading-5">{file.original || "Empty file"}</pre></section>
     <section aria-label="Revised file"><h3 className="mb-1 text-xs text-muted-foreground">Revised</h3><pre className="overflow-auto rounded border border-border p-2 font-mono text-xs leading-5">{file.modified || "Empty file"}</pre></section>

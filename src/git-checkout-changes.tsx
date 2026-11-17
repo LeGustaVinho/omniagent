@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { GitDiffReview, type GitTextComparison } from "@/git-diff-view";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
+import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
 import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
 
@@ -13,7 +14,7 @@ export type Worktree = { checkoutId: string | null; root: string; branch: string
 export type CheckoutReview = { checkoutId: string; root: string; revision: ReviewRevision; managed: boolean; changes: FileStatus[]; branches: Branch[]; worktrees: Worktree[] };
 type FileSide = { status: "missing" } | { status: "text"; content: string } | { status: "unavailable"; reason: string };
 type Source = "working" | "staged";
-type TextDiff = { path: string; original: FileSide; modified: FileSide };
+type TextDiff = { path: string; original: FileSide; modified: FileSide; hunks?: GitHunk[]; revision?: ReviewRevision };
 type BranchRevisions = { base: string; head: string; mergeBase: string };
 const reviewSources = ["working", "staged", "branch"] as const;
 type ReviewSource = typeof reviewSources[number];
@@ -32,18 +33,20 @@ export function useGitCheckoutReview(checkoutId: string, enabled = true) {
   });
 }
 
-export function GitCheckoutChanges({ review, indexActions, initialSource = "working", initialPath, openFile, openPanel, onClose }: {
+export function GitCheckoutChanges({ review, indexActions, initialSource = "working", initialPath, openFile, openPanel, openConversation, onClose }: {
   review: CheckoutReview;
   indexActions?: boolean;
   initialSource?: Source;
   initialPath?: string;
   openFile?: (path: string) => void;
   openPanel?: () => void;
+  openConversation?: (id: string) => void;
   onClose?: () => void;
 }) {
   const [source, setSource] = useState<ReviewSource>(initialSource);
   const [selection, setSelection] = useState(initialPath);
   const changeStage = useChangeStage(review);
+  const conversationActions = useCheckoutConversationActions(review.checkoutId, !openConversation, (id) => openConversation?.(id));
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
     return status ? [{ path: file.path, kind: statusLabels[status] ?? status }] : [];
@@ -55,6 +58,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     enabled: !!path, refetchInterval: 2500, retry: false,
   });
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const diffRevision = diff.data?.revision;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -73,6 +77,18 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
             : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
+          hunkActions={(hunk) => [[
+            ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
+              disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
+            ...(openConversation && comparison && diffRevision ? [{ label: "Review hunk in conversation…", run: () => {
+              const head = diffRevision.head ?? "Unborn";
+              const index = diffRevision.index ?? "None";
+              const line = Math.max(1, hunk.modifiedLine);
+              const description = source === "working" ? "index to worktree" : "HEAD to staged index";
+              conversationActions.startExcerpt({ path: comparison.path, startLine: line, endLine: line, text: hunk.patch, language: "diff" },
+                `Review this Git hunk (${description}).\nHEAD: ${head}\nIndex fingerprint: ${index}`);
+            } }] : []),
+          ]]}
           fileActions={(file) => {
             const entry = review.changes.find((change) => change.path === file.path);
             return [[
@@ -87,6 +103,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
       </div>
       {indexActions && <IndexOperations review={review} changeStage={changeStage} />}
     </div>}
+    {conversationActions.dialog}
   </div>;
 }
 
@@ -156,9 +173,9 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
 function useChangeStage(review: CheckoutReview) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ path, staged }: { path: string; staged: boolean }) => invoke("set_git_path_staged", {
-      checkoutId: review.checkoutId, path, staged, expected: review.revision,
-    }),
+    mutationFn: (request: { path: string; staged: boolean } | { path: string; source: Source; hunkId: string; expected: ReviewRevision }) =>
+      "hunkId" in request ? invoke("set_git_hunk_staged", { checkoutId: review.checkoutId, ...request })
+        : invoke("set_git_path_staged", { checkoutId: review.checkoutId, ...request, expected: review.revision }),
     onSettled: () => Promise.all([
       client.invalidateQueries({ queryKey: ["git-review", review.checkoutId] }),
       client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),
@@ -232,5 +249,5 @@ function comparisonFile(diff?: TextDiff): GitTextComparison | null {
   if (!diff || diff.original.status === "unavailable" || diff.modified.status === "unavailable") return null;
   const content = (side: FileSide) => side.status === "text" ? side.content : "";
   const extension = diff.path.split(".").at(-1)?.toLowerCase() ?? "";
-  return { path: diff.path, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified) };
+  return { path: diff.path, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified), hunks: diff.hunks };
 }

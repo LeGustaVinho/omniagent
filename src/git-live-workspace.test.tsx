@@ -201,6 +201,29 @@ it("loads the active checkout's diff in the Changes side panel and opens its rea
   expect(openWorkspace).toHaveBeenCalledWith("knowledge", "notes/real.md");
 });
 
+it("stages the exact hunk selected in the live comparison", async () => {
+  const path = "example.txt";
+  const hunk = { id: "reviewed-hunk", header: "@@ -12,3 +12,3 @@", originalLine: 12, modifiedLine: 12,
+    patch: "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -12,3 +12,3 @@\n-old\n+changed\n" };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_checkout_review") return { checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: originalRevision, changes: [{ path, working: "M", staged: null }] };
+    if (command === "git_checkout_diff") return { path, source: "working", revision: originalRevision, hunks: [hunk],
+      original: { status: "text", content: "old" }, modified: { status: "text", content: "changed" } };
+    if (command === "set_git_hunk_staged") return;
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit();
+  await user.click(await screen.findByRole("button", { name: "Review hunks" }));
+  fireEvent.contextMenu(within(screen.getByRole("region", { name: hunk.header })).getByText("+changed"));
+  await user.click(within(await screen.findByRole("menu", { name: hunk.header })).getByRole("menuitem", { name: "Stage hunk" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_hunk_staged", {
+    checkoutId: checkout.checkoutId, path, source: "working", expected: originalRevision, hunkId: hunk.id,
+  });
+  expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
+});
+
 it("reports unavailable saved evidence in the side panel for the exact requested attempt", async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "git_saved_attempts") return [{ runId: "newer-run", checkoutId: checkout.checkoutId, label: "Later attempt" }];

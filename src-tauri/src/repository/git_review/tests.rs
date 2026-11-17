@@ -28,6 +28,102 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("hunks");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "example text.txt";
+    let base = (1..=36)
+        .map(|line| format!("Line {line}\n"))
+        .collect::<String>();
+    fs::write(root.join(path), &base)?;
+    commit_fixture(&root, "Base content")?;
+    let first = base.replace("Line 3\n", "First change\n");
+    let both = first.replace("Line 31\n", "Second change\n");
+    fs::write(root.join(path), &both)?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let working = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert_eq!(working.hunks.len(), 2);
+    assert!(working.hunks[0].patch.contains("+First change"));
+    assert!(!working.hunks[0].patch.contains("+Second change"));
+
+    fs::write(
+        root.join(path),
+        both.replace("First change", "Updated after review"),
+    )?;
+    assert!(
+        store
+            .set_git_hunk_staged(
+                checkout.clone(),
+                path.into(),
+                GitDiffSource::Working,
+                working.revision.clone(),
+                working.hunks[0].id.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(git(&root, &["show", ":example text.txt"])?, base.trim_end());
+
+    fs::write(root.join(path), &both)?;
+    let working = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    store
+        .set_git_hunk_staged(
+            checkout.clone(),
+            path.into(),
+            GitDiffSource::Working,
+            working.revision.clone(),
+            working.hunks[0].id.clone(),
+        )
+        .await?;
+    assert_eq!(
+        git(&root, &["show", ":example text.txt"])?,
+        first.trim_end()
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, both);
+    assert!(
+        store
+            .set_git_hunk_staged(
+                checkout.clone(),
+                path.into(),
+                GitDiffSource::Working,
+                working.revision,
+                working.hunks[1].id.clone()
+            )
+            .await
+            .is_err()
+    );
+
+    git(&root, &["add", "--", path])?;
+    let staged = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Staged)
+        .await?;
+    assert_eq!(staged.hunks.len(), 2);
+    store
+        .set_git_hunk_staged(
+            checkout,
+            path.into(),
+            GitDiffSource::Staged,
+            staged.revision,
+            staged.hunks[1].id.clone(),
+        )
+        .await?;
+    assert_eq!(
+        git(&root, &["show", ":example text.txt"])?,
+        first.trim_end()
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, both);
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("comparison");

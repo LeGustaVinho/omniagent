@@ -256,6 +256,7 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 .diff-file-row:last-child { border-bottom: 0; }
 .diff-file-row:is(:hover, [aria-expanded="true"]) { background: var(--muted); }
 .diff-file-row[aria-expanded="true"] { box-shadow: inset 2px 0 var(--primary); }
+.context-actions-target.diff-hunk-menu { align-items: flex-start; }
 
 .delivery-field {
   display: grid;
