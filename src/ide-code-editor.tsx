@@ -1,5 +1,6 @@
 import type { editor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
+import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 
 export interface CodeProblem {
@@ -15,21 +16,23 @@ export interface CodeModel {
   synchronizing: boolean;
 }
 
-export function CodeEditor({ scope, path, content, models, update, problems, jump }: {
+export function CodeEditor({ scope, path, content, models, update, problems, jump, onCopy, onExcerpt }: {
   scope: string;
   path: string;
   content: string;
   models: Map<string, CodeModel>;
   update: (path: string, content: string) => void;
   problems: (path: string, markers: CodeProblem[]) => void;
-  jump?: { line: number; token: number };
+  jump?: { line: number; column?: number; token: number };
+  onCopy?: (text: string, status: string) => void;
+  onExcerpt?: (selection: EditorExcerpt, instruction?: string) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
-  const fresh = useRef({ content, update, problems, jump });
+  const fresh = useRef({ content, update, problems, jump, onCopy, onExcerpt });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
-  useEffect(() => { fresh.current = { content, update, problems, jump }; }, [content, update, problems, jump]);
+  useEffect(() => { fresh.current = { content, update, problems, jump, onCopy, onExcerpt }; }, [content, update, problems, jump, onCopy, onExcerpt]);
 
   useEffect(() => {
     if (!mount.current) return;
@@ -70,6 +73,41 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
         tabSize: 2,
       });
       instance.current = codeEditor;
+      function excerpt(allowEmpty: boolean): EditorExcerpt | undefined {
+        const selection = codeEditor.getSelection();
+        const model = codeEditor.getModel();
+        if (!selection || !model || (!allowEmpty && selection.isEmpty())) return;
+        const { startLineNumber, endLineNumber, endColumn } = selection;
+        const language = model.getLanguageId();
+        return { path, text: model.getValueInRange(selection), startLine: startLineNumber,
+          endLine: endLineNumber > startLineNumber && endColumn === 1 ? endLineNumber - 1 : endLineNumber,
+          language: language === "plaintext" ? undefined : language };
+      }
+      if (fresh.current.onCopy) {
+        codeEditor.addAction({
+          id: "omniagent.copy-source-reference", label: "Copy file and line reference", contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 1,
+          run: () => { const range = excerpt(true); if (range) fresh.current.onCopy?.(excerptReference(range), "Copied source reference"); },
+        });
+        codeEditor.addAction({
+          id: "omniagent.copy-selection-markdown", label: "Copy selection as Markdown", precondition: "editorHasSelection",
+          contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 2,
+          run: () => { const range = excerpt(false); if (range) fresh.current.onCopy?.(markdownExcerpt(range), "Copied Markdown code block"); },
+        });
+      }
+      if (fresh.current.onExcerpt) {
+        const agentActions = [
+          { id: "quote", label: "Add selection to conversation…" },
+          { id: "explain", label: "Explain selection…", instruction: "Explain how this code works and what it depends on." },
+          { id: "review", label: "Review selection…", instruction: "Review this code for correctness and regressions." },
+          { id: "fix", label: "Fix selection…", instruction: "Find and fix the issue in this code. Ask for the expected behavior if it is unclear." },
+          { id: "test", label: "Write tests for selection…", instruction: "Write tests that cover the behavior and edge cases of this code." },
+        ];
+        agentActions.forEach(({ id, label, instruction }, order) => codeEditor.addAction({
+          id: `omniagent.${id}-source-selection`, label, precondition: "editorHasSelection",
+          contextMenuGroupId: "9_omniagent-context", contextMenuOrder: order,
+          run: () => { const range = excerpt(false); if (range) fresh.current.onExcerpt?.(range, instruction); },
+        }));
+      }
       function publishDiagnostics() {
         const entries = monaco.editor.getModelMarkers({ resource: uri }).map<CodeProblem>((marker) => ({
           message: marker.message,
@@ -88,7 +126,7 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       observer.observe(document.documentElement, { attributes: true });
       const location = fresh.current.jump;
       if (location) {
-        codeEditor.setPosition({ lineNumber: location.line, column: 1 });
+        codeEditor.setPosition({ lineNumber: location.line, column: location.column ?? 1 });
         codeEditor.revealLineInCenter(location.line);
       }
       setReady(true);
@@ -107,7 +145,7 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   useEffect(() => {
     const codeEditor = instance.current;
     if (jump && codeEditor) {
-      codeEditor.setPosition({ lineNumber: jump.line, column: 1 });
+      codeEditor.setPosition({ lineNumber: jump.line, column: jump.column ?? 1 });
       codeEditor.revealLineInCenter(jump.line);
     }
   }, [jump]);

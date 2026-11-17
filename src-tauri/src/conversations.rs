@@ -211,6 +211,37 @@ impl Store {
         }
     }
 
+    pub async fn append_checkout_context_to_conversation(
+        &self,
+        conversation_id: String,
+        checkout_id: String,
+        context: String,
+    ) -> Result<()> {
+        ensure!(!context.trim().is_empty(), "Select text to add to the draft");
+        ensure!(
+            context.len() <= 512 * 1024,
+            "The selected context exceeds 512 KiB"
+        );
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let conversation = load_conversation(&tx, &conversation_id)?;
+            ensure!(
+                conversation.checkout_id == checkout_id,
+                "Choose a conversation in the current checkout"
+            );
+            let key = DraftKey::Conversation(conversation_id);
+            let mut text = key.read(&tx)?.unwrap_or_default();
+            if !text.is_empty() {
+                text.extend_from_slice(b"\n\n");
+            }
+            text.extend_from_slice(context.as_bytes());
+            key.write(&tx, &text)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn latest_conversation_run(
         &self,
         conversation_id: String,
@@ -2351,6 +2382,26 @@ mod tests {
         store
             .prepare_agent_attempt(current.id, current.context_id, scope, text.into())
             .await
+    }
+
+    #[tokio::test]
+    async fn editor_context_preserves_the_saved_draft_and_checks_checkout() -> Result<()> {
+        let (_dir, store, chat, _) = setup().await?;
+        store
+            .save_conversation_draft(chat.id.clone(), "Existing instructions".into())
+            .await?;
+        let context = "Source: src/lib.rs:2-4\n\n```rust\n  unsaved();\n```";
+        assert!(store
+            .append_checkout_context_to_conversation(chat.id.clone(), "wrong-checkout".into(), context.into())
+            .await
+            .is_err());
+        assert_eq!(store.conversation_draft(chat.id.clone()).await?, "Existing instructions");
+        store
+            .append_checkout_context_to_conversation(chat.id.clone(), chat.checkout_id, context.into())
+            .await?;
+        assert_eq!(store.conversation_draft(chat.id.clone()).await?, format!("Existing instructions\n\n{context}"));
+        assert!(store.latest_conversation_run(chat.id).await?.is_none());
+        Ok(())
     }
 
     #[tokio::test]

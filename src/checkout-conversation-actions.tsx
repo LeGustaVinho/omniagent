@@ -3,7 +3,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MenuGroups } from "@/components/ui/context-actions";
+import { queueConversationDraftWrite } from "@/conversation-draft-writes";
 import { conversationLibraryKey } from "@/conversation-library";
+import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
@@ -12,6 +14,7 @@ const newConversation = "new";
 export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
   const [targets, setTargets] = useState<readonly FileTreeTarget[]>();
+  const [excerpt, setExcerpt] = useState<{ selection: EditorExcerpt; instruction?: string }>();
   const [destination, setDestination] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
@@ -21,7 +24,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   const conversations = useQuery({
     queryKey: conversationKey,
     queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-    enabled: !simulated && !!targets,
+    enabled: !simulated && Boolean(targets || excerpt),
     retry: false,
   });
   const folders = (targets ?? []).filter(({ kind }) => kind === "folder").map(({ path }) => path);
@@ -40,7 +43,21 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     setDestination(create ? newConversation : "");
     setFilter("");
     setError("");
+    setExcerpt(undefined);
     setTargets(items);
+  }
+
+  function startExcerpt(selection: EditorExcerpt, instruction?: string) {
+    if (simulated) return;
+    setTargets(undefined);
+    setExcerpt({ selection, instruction });
+    setDestination(instruction ? newConversation : "");
+    setError("");
+  }
+
+  function close() {
+    setTargets(undefined);
+    setExcerpt(undefined);
   }
 
   function actions(item: FileTreeTarget, selection?: readonly FileTreeTarget[]): MenuGroups {
@@ -53,22 +70,32 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   }
 
   async function attach() {
-    if (busy || !targets || !selected.length || !destination) return;
+    if (busy || (!excerpt && (!targets || !selected.length)) || !destination) return;
     setBusy(true);
     setError("");
     try {
       let conversationId = destination;
       if (destination === newConversation) {
-        const title = targets.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files";
+        const path = excerpt?.selection.path ?? (targets?.length === 1 ? targets[0]?.path : undefined);
+        const title = path ? fileName(path) : "Selected checkout files";
         const created = await invoke<Conversation>("create_conversation", { checkoutId, title });
         conversationId = created.id;
         setDestination(created.id);
         client.setQueryData<Conversation[]>(conversationKey, (current) => [created, ...(current ?? [])]);
         void client.invalidateQueries({ queryKey: conversationLibraryKey });
       }
-      await invoke("add_checkout_files_to_conversation", { checkoutId, conversationId, paths: selected });
-      void client.invalidateQueries({ queryKey: ["conversation", conversationId, "attachments"] });
-      setTargets(undefined);
+      if (excerpt) {
+        const { selection, instruction } = excerpt;
+        const context = [instruction, `Source: ${excerptReference(selection)}`, markdownExcerpt(selection)].filter(Boolean).join("\n\n");
+        await queueConversationDraftWrite(conversationId, () => invoke<void>("append_checkout_context_to_conversation", {
+          checkoutId, conversationId, context,
+        }));
+        await client.invalidateQueries({ queryKey: ["conversation", conversationId, "draft"] });
+      } else {
+        await invoke("add_checkout_files_to_conversation", { checkoutId, conversationId, paths: selected });
+        void client.invalidateQueries({ queryKey: ["conversation", conversationId, "attachments"] });
+      }
+      close();
       openConversation(conversationId);
     } catch (failure) {
       setError(String(failure));
@@ -77,8 +104,10 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     }
   }
 
-  const dialog = targets && <FileDialog title="Add checkout context" description={targets.length === 1 ? targets[0]!.path : `${targets.length} selected items`}
-    onClose={() => { if (!busy) setTargets(undefined); }}>
+  const description = excerpt ? excerptReference(excerpt.selection)
+    : targets?.length === 1 ? targets[0]!.path : `${targets?.length ?? 0} selected items`;
+  const dialog = (targets || excerpt) && <FileDialog title="Add checkout context" description={description}
+    onClose={() => { if (!busy) close(); }}>
     <form className="grid gap-2" onSubmit={(event) => { event.preventDefault(); void attach(); }}>
       <label>Conversation <select className="delivery-filter" value={destination} disabled={busy}
         onChange={(event) => setDestination(event.currentTarget.value)}>
@@ -106,18 +135,22 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
         {matches.length > 100 && <p>Showing 100 of {matches.length} files. Filter to narrow the list.</p>}
         <p role="status">{selected.length} selected</p>
       </>}
-      {targets.length > 1 && selected.length > 0 && <details>
+      {excerpt && <>
+        {excerpt.instruction && <p>{excerpt.instruction}</p>}
+        <pre className="max-h-48 overflow-auto" aria-label="Selected text">{excerpt.selection.text}</pre>
+      </>}
+      {targets && targets.length > 1 && selected.length > 0 && <details>
         <summary>Selected files</summary>
         <ul className="max-h-36 overflow-auto">{selected.map((path) => <li key={path}>{path}</li>)}</ul>
       </details>}
       {error && <p className="file-help" role="alert">{error}</p>}
       <div className="file-dialog-footer">
-        <button type="button" className="fw-btn" disabled={busy} onClick={() => setTargets(undefined)}>Cancel</button>
-        <button type="submit" className="fw-btn fw-primary" disabled={busy || !destination || !selected.length}>
+        <button type="button" className="fw-btn" disabled={busy} onClick={close}>Cancel</button>
+        <button type="submit" className="fw-btn fw-primary" disabled={busy || !destination || (!excerpt && !selected.length)}>
           {busy ? "Adding…" : "Add to draft"}
         </button>
       </div>
     </form>
   </FileDialog>;
-  return { actions, dialog };
+  return { actions, dialog, startExcerpt };
 }

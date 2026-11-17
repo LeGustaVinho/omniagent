@@ -223,10 +223,10 @@
 .ide-bottom-body { overflow: auto; }
 .ide-terminal-container { padding: 8px 10px; }
 .ide-problems { list-style: none; margin: 0; padding: 8px 13px; }
-.ide-problems button { display: flex; align-items: center; width: 100%; gap: 8px; text-align: left; padding: 5px 8px; border-radius: 5px; font-size: 12px; }
-.ide-problems button:hover { background: var(--muted); }
-.ide-problems button svg { flex-shrink: 0; color: var(--negative, #e98989); }
-.ide-problems button small { margin-left: auto; white-space: nowrap; color: var(--muted-foreground); }
+.ide-problem-open { display: flex; align-items: center; width: 100%; min-width: 0; gap: 8px; text-align: left; padding: 5px 8px; border-radius: 5px; font-size: 12px; }
+.ide-problem-open:hover { background: var(--muted); }
+.ide-problem-open svg { flex-shrink: 0; color: var(--negative, #e98989); }
+.ide-problem-open small { margin-left: auto; white-space: nowrap; color: var(--muted-foreground); }
 .ide-statusbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; min-height: 25px; padding: 1px 13px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted-foreground); }
 .ide-statusbar .fw-btn { min-height: 23px; padding: 2px 6px; font-size: 11px; }
 

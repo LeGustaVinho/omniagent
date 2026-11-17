@@ -32,6 +32,7 @@ import { SideQuestionPanel, type SideSubmission } from "@/conversation-side-requ
 import { ConversationSuggestionButton, useConversationSuggestion } from "@/conversation-suggestions";
 import { ConversationCompactionControl, useConversationCompaction } from "@/conversation-compaction";
 import { ConversationMarkdown } from "@/conversation-markdown";
+import { readDraft, saveDraft } from "@/conversation-draft-writes";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
 import { ConversationAttachments, useConversationAttachmentReview, useConversationAttachments } from "@/conversation-attachments";
@@ -48,7 +49,6 @@ import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { ConversationAuthoring, workflowAuthoringTarget } from "@/workflow-authoring";
 
-const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
 
 function pendingJob(inspection: JobInspection | null | undefined) {
@@ -82,19 +82,6 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
     case "job_cancelled": return "Job cancelled.";
     default: return "Waiting to start.";
   }
-}
-
-function saveDraft(conversationId: string, text: string) {
-  const pending = draftWrites.get(conversationId);
-  const write = (pending?.catch(() => undefined) ?? Promise.resolve()).then(() =>
-    invoke<void>("save_conversation_draft", { conversationId, text }),
-  );
-  draftWrites.set(conversationId, write);
-  const release = () => {
-    if (draftWrites.get(conversationId) === write) draftWrites.delete(conversationId);
-  };
-  void write.then(release, release);
-  return write;
 }
 
 export function ConversationListPanel({ containerApi }: IDockviewPanelProps) {
@@ -266,10 +253,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const draftKey = ["conversation", conversationId, "draft"];
   const draft = useQuery({
     queryKey: draftKey,
-    queryFn: async () => {
-      await draftWrites.get(conversationId);
-      return invoke<string>("conversation_draft", { conversationId });
-    },
+    queryFn: () => readDraft(conversationId),
     staleTime: Infinity,
   });
   const referenceDraftKey = ["conversation", conversationId, "reference-draft"];

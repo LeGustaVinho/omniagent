@@ -9,6 +9,7 @@ import {
 } from "@/ide-file-workspace";
 import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget } from "@/ide-file-search";
 import { containingFolder, fileContextActions, noteRenameTarget, openNotesTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { ContextActions } from "@/components/ui/context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
@@ -57,7 +58,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [query, setQuery] = useState("");
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
   const files: Record<string, NoteBuffer> = simulated ? examples : source.files;
-  const [jumps, setJumps] = useState<Record<string, { line: number; token: number }>>({});
+  const [jumps, setJumps] = useState<Record<string, { line: number; column?: number; token: number }>>({});
   const [markers, setMarkers] = useState<Record<string, CodeProblem[]>>({});
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
   const [terminalFolders, setTerminalFolders] = useState<string[]>([""]);
@@ -109,14 +110,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
   }, [files, models]);
 
-  const openFile = useCallback((path: string, line?: number, split = false) => {
+  const openFile = useCallback((path: string, line?: number, split = false, column?: number) => {
     const request = ++openRequest.current;
     if (markdownPath(path)) {
       openWorkspace("knowledge", !simulated && line ? noteSearchTarget(path, line, request) : path);
       return;
     }
     const focus = (file: string) => {
-      if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, token: (before[file]?.token ?? 0) + 1 } }));
+      if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, column, token: (before[file]?.token ?? 0) + 1 } }));
       if (split) dock.split(file);
       else dock.open(file);
     };
@@ -297,6 +298,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   ], [
     { label: "Copy line reference", run: () => menu.copy(`${path}:${line}`, "Copied line reference") },
     { label: "Copy matched text", run: () => menu.copy(excerpt, "Copied matched text") },
+  ], simulated || !excerpt ? [] : [
+    { label: "Add match to conversation…", run: () => conversationActions.startExcerpt({ path, text: excerpt, startLine: line, endLine: line }) },
   ]];
   const simulateConflict = () => {
     if (!active || !buffer) return;
@@ -383,7 +386,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   <FileCaption path={path} revision={entry.revision} />
                   {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
                   <Suspense fallback={<p role="status" className="file-help">Loading source editor…</p>}>
-                    <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]} />
+                    <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]}
+                      onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt} />
                   </Suspense>
                 </div>
               );
@@ -436,9 +440,20 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             {bottom === "problems" && <ul className="ide-problems">
               {markerEntries.length ? markerEntries.map(({ path, label, message, line, column }, index) => (
                 <li key={`${path}:${line}:${column}:${index}`}>
-                  <button type="button" onClick={() => openFile(path, line)}>
-                    <CircleAlert size={15} /><span>{label} · {message}</span><small>{fileName(path)}:{line}:{column}</small>
-                  </button>
+                  <ContextActions label={`${path}:${line}:${column}`} groups={[[
+                    { label: "Go to problem", run: () => openFile(path, line, false, column) },
+                    { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+                  ], [
+                    { label: "Copy diagnostic", run: () => menu.copy(`${path}:${line}:${column} ${label}: ${message}`, "Copied diagnostic") },
+                    { label: "Copy location", run: () => menu.copy(`${path}:${line}:${column}`, "Copied problem location") },
+                  ], simulated ? [] : [
+                    { label: "Explain diagnostic…", run: () => conversationActions.startExcerpt({ path, startLine: line, endLine: line,
+                      text: `${label} at column ${column}: ${message}` }, "Explain this diagnostic and suggest how to resolve it.") },
+                  ]]}>
+                    <button className="ide-problem-open" type="button" onClick={() => openFile(path, line, false, column)}>
+                      <CircleAlert size={15} /><span>{label} · {message}</span><small>{fileName(path)}:{line}:{column}</small>
+                    </button>
+                  </ContextActions>
                 </li>
               )) : <li className="file-help">No editor diagnostics in this workspace.</li>}
               {simulated && <li className="file-help">ripgrep missing · Configure its executable in Settings to enable live repository search.</li>}

@@ -6,6 +6,7 @@ import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
 import type { ItemEdit } from "@/checkout-item-operations";
+import type { EditorExcerpt } from "@/editor-context";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -13,8 +14,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   Channel: class { onmessage = () => {}; },
 }));
 vi.mock("@/ide-code-editor", () => ({
-  CodeEditor: ({ path, content, update }: { path: string; content: string; update: (path: string, text: string) => void }) =>
-    <textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)} />,
+  CodeEditor: ({ path, content, update, onExcerpt }: { path: string; content: string; update: (path: string, text: string) => void;
+    onExcerpt?: (excerpt: EditorExcerpt, instruction: string) => void }) =>
+    <><textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)} />
+      {onExcerpt && <button type="button" onClick={() => onExcerpt({ path, text: content, startLine: 2, endLine: 3, language: "rust" }, "Explain this code.")}>
+        Explain selection…
+      </button>}
+    </>,
 }));
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
@@ -105,6 +111,7 @@ function fixture() {
       }
       case "list_conversations": return [{ id: "review-chat", checkoutId: id, title: "Code review", contextId: "ctx" }];
       case "add_checkout_files_to_conversation": return { revision: "attached", files: [] };
+      case "append_checkout_context_to_conversation": return;
       case "list_repository_source_drafts": return drafts.has(id) ? [file] : [];
       case "open_repository_source_file": return disk.get(id) ?? { status: "missing", relativePath: file };
       case "read_repository_source_draft": return drafts.get(id) ?? null;
@@ -267,6 +274,27 @@ it("adds the clicked file to the chosen conversation draft and opens the draft",
   expect(invoke).toHaveBeenCalledWith("add_checkout_files_to_conversation", {
     checkoutId: alternate, conversationId: "review-chat", paths: ["docs/Guide.md"],
   });
+});
+
+it("previews live editor text and appends its range and prompt only to the chosen draft", async () => {
+  fixture();
+  const props = propsFor(alternate);
+  render(<IdeWorkspace {...props} target={file} />);
+  const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "let value = \"```\";\n  check(value);\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "Explain selection…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(dialog.getByLabelText("Selected text").textContent).toBe("let value = \"```\";\n  check(value);\n");
+  await dialog.findByRole("option", { name: "Code review" });
+  fireEvent.change(dialog.getByRole("combobox", { name: "Conversation" }), { target: { value: "review-chat" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(props.openWorkspace).toHaveBeenCalledWith("conversations", "review-chat"));
+  expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+    checkoutId: alternate, conversationId: "review-chat",
+    context: `Explain this code.\n\nSource: ${file}:2-3\n\n` + "````rust\nlet value = \"```\";\n  check(value);\n````",
+  });
+  expect(invoke).not.toHaveBeenCalledWith("add_checkout_files_to_conversation", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("create_conversation", expect.anything());
 });
 
 it("exposes the shared Clear terminal control in the active worktree", async () => {

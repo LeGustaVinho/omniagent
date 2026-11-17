@@ -162,6 +162,31 @@ impl DraftKey {
             } => ("checkout_file", checkout_id, relative_path),
         }
     }
+
+    pub(crate) fn read(&self, db: &Connection) -> Result<Option<Vec<u8>>> {
+        let (kind, owner, document) = self.parts();
+        let payload: Option<Vec<u8>> = db.query_row(
+            "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
+            params![kind, owner, document],
+            |row| row.get(0),
+        ).optional()?;
+        payload
+            .map(|bytes| protection::unprotect(&bytes))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn write(&self, db: &Connection, contents: &[u8]) -> Result<()> {
+        let (kind, owner, document) = self.parts();
+        let payload = protection::protect(contents)?;
+        db.execute(
+            "INSERT INTO drafts(kind, owner_id, document, payload) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, owner_id, document) DO UPDATE
+             SET payload = excluded.payload, updated_at = unixepoch()",
+            params![kind, owner, document, payload],
+        )?;
+        Ok(())
+    }
 }
 
 impl Store {
@@ -210,34 +235,11 @@ impl Store {
     }
 
     pub async fn save_draft(&self, key: DraftKey, contents: Vec<u8>) -> Result<()> {
-        self.execute(move |db| {
-            let (kind, owner, document) = key.parts();
-            let payload = protection::protect(&contents)?;
-            db.execute(
-                "INSERT INTO drafts(kind, owner_id, document, payload) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(kind, owner_id, document) DO UPDATE
-                 SET payload = excluded.payload, updated_at = unixepoch()",
-                params![kind, owner, document, payload],
-            )?;
-            Ok(())
-        })
-        .await
+        self.execute(move |db| key.write(db, &contents)).await
     }
 
     pub async fn load_draft(&self, key: DraftKey) -> Result<Option<Vec<u8>>> {
-        self.execute(move |db| {
-            let (kind, owner, document) = key.parts();
-            let payload: Option<Vec<u8>> = db.query_row(
-                "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
-                params![kind, owner, document],
-                |row| row.get(0),
-            ).optional()?;
-            payload
-                .map(|bytes| protection::unprotect(&bytes))
-                .transpose()
-                .map_err(Into::into)
-        })
-        .await
+        self.execute(move |db| key.read(db)).await
     }
 
     pub async fn delete_draft(&self, key: DraftKey) -> Result<()> {
