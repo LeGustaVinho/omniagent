@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, ChevronUp, CircleCheck, Columns2, ExternalLi
 import type { editor, IRange } from "monaco-editor";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { FileDialog } from "@/ide-file-workspace";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
@@ -19,6 +20,15 @@ export type GitTextComparison = {
 };
 
 export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number; reviewed?: boolean };
+
+export type GitComparedSide = { status: "missing" } | GitComparedText;
+type GitComparedText = { status: "text"; content: string } | { status: "unavailable"; reason: string };
+export type GitComparedFile = {
+  path: string;
+  original: GitComparedSide;
+  modified: GitComparedSide;
+  patch?: GitComparedText | null;
+};
 
 type DiffLayout = "auto" | "split" | "unified";
 type DiffSide = GitReviewSide;
@@ -56,7 +66,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, fileBatchActions, hunkActions, hunkReview, reviewAnnotations, reviewPanel, footer, onClose }: {
+  allowSavedPatch, comparedFiles, openFile, openLine, addExcerpt, fileActions, fileBatchActions, hunkActions, hunkReview, reviewAnnotations, reviewPanel, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -68,6 +78,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   empty: ReactNode;
   notice?: ReactNode;
   allowSavedPatch?: boolean;
+  comparedFiles?: { selected?: GitComparedFile; load: (path: string) => Promise<GitComparedFile> };
   openFile?: () => void;
   openLine?: (line: number) => void;
   addExcerpt?: ExcerptHandler;
@@ -84,6 +95,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const [patchPath, setPatchPath] = useState<string>();
   const [requestedLine, setRequestedLine] = useState<number>();
   const [copyError, setCopyError] = useState("");
+  const [sidePreview, setSidePreview] = useState<{ title: string; revision: string; path: string; content: GitComparedSide }>();
+  const comparedFileAction = useContextActionFeedback();
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const [batchPaths, setBatchPaths] = useState<ReadonlySet<string>>(() => new Set());
   const selectedFiles = files.filter(({ path }) => batchPaths.has(path));
@@ -133,6 +146,25 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
     setCopyError("");
     void Promise.resolve().then(() => navigator.clipboard.writeText(value)).catch(() => setCopyError("Could not copy to the clipboard."));
   }
+  function comparedFileActions(file: GitDiffRow): MenuAction[] {
+    if (!comparedFiles || file.kind === "Unmerged") return [];
+    const load = () => comparedFiles.selected?.path === file.path ? Promise.resolve(comparedFiles.selected) : comparedFiles.load(file.path);
+    const openSide = (side: DiffSide) => {
+      const title = side === "original" ? "Base version" : "Revised version";
+      const revision = side === "original" ? ranges.base : ranges.revised;
+      return { label: `Open ${title.toLowerCase()}`, run: () => void comparedFileAction.run(async () => {
+        const snapshot = await load();
+        setSidePreview({ title, revision, path: snapshot.path, content: snapshot[side] });
+      }) };
+    };
+    return [openSide("original"), openSide("modified"), {
+      label: "Copy patch", run: () => void comparedFileAction.run(async () => {
+        const patch = (await load()).patch;
+        if (!patch || patch.status === "unavailable") throw new Error(patch?.reason ?? "No Git patch is available for this path.");
+        await navigator.clipboard.writeText(patch.content);
+      }, "Copied Git patch to the clipboard."),
+    }];
+  }
   const counts = files.reduce<{ additions: number; deletions: number } | undefined>((sum, file) => {
     if (file.additions === undefined || file.deletions === undefined) return sum;
     return { additions: (sum?.additions ?? 0) + file.additions, deletions: (sum?.deletions ?? 0) + file.deletions };
@@ -159,6 +191,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
     {notice}
     {reviewPanel}
     {copyError && <div className="p-3"><InlineIssue>{copyError}</InlineIssue></div>}
+    {comparedFileAction.feedback && <p className="p-3 text-sm" role={comparedFileAction.feedback.failed ? "alert" : "status"}>{comparedFileAction.feedback.text}</p>}
     {files.length === 0 ? <div className="delivery-empty"><GitCompare size={22} aria-hidden />{empty}</div>
       : <div className="flex min-h-0 flex-1 flex-col">
         <ResizablePanel as="section" className="diff-files" aria-label="Changed files"
@@ -177,7 +210,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
               setPatchPath(undefined);
             } },
             { label: "Copy relative path", run: () => copy(file.path) },
-            ...(comparison?.path === file.path && comparison.patch !== undefined ? [
+            ...comparedFileActions(file),
+            ...(!comparedFiles && comparison?.path === file.path && comparison.patch !== undefined ? [
               { label: "Copy patch", run: () => copy(comparison.patch!) },
             ] : []),
           ], ...(fileActions?.(file) ?? [])]}>
@@ -241,6 +275,11 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         </div>}
         {footer && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">{footer}</footer>}
       </div>}
+    {sidePreview && <FileDialog title={sidePreview.title} description={sidePreview.path} className="file-comparison-dialog" onClose={() => setSidePreview(undefined)}>
+      <p className="font-mono text-xs text-muted-foreground">{sidePreview.revision}</p>
+      {sidePreview.content.status === "text" ? <pre tabIndex={0} aria-label="Version contents" className="min-h-0 overflow-auto rounded border border-border p-3 font-mono text-xs leading-5">{sidePreview.content.content}</pre>
+        : <p className="file-help">{sidePreview.content.status === "missing" ? "This file does not exist in this version." : sidePreview.content.reason}</p>}
+    </FileDialog>}
   </GitDiffFrame>;
 }
 

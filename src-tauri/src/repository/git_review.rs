@@ -33,6 +33,7 @@ mod discard;
 mod history;
 mod hunk_review;
 mod hunks;
+mod patch;
 mod permalink;
 mod reviewed_files;
 mod saved_patch;
@@ -263,7 +264,20 @@ impl Store {
                 .into_iter()
                 .find(|entry| entry.path == path && source.contains(entry))
                 .context("the selected path is no longer in this comparison")?;
+            // Keep the working file stable while its text, hunks and Git patch are read.
+            let working_file = if source == GitDiffSource::Working && !entry.unmerged() {
+                content::lock_staging_file(&review.root, &path)
+            } else {
+                Ok(None)
+            };
             let mut diff = content::read_diff(&review, &entry, source)?;
+            diff.patch = Some(patch::GitReviewPatch::result(working_file.and_then(|locked| {
+                ensure!(
+                    source == GitDiffSource::Staged || locked.is_some() || diff.modified == GitFileSide::Missing,
+                    "The working file changed during review. Refresh the comparison and try again."
+                );
+                patch::live(&review, &entry, source, &diff.modified)
+            })));
             review.verify()?;
             diff.comment_scope = comments::GitReviewCommentScope::from_comparison(
                 &scope.id,

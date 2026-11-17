@@ -12,7 +12,7 @@ use crate::providers::configuration::{open_locked_local_file, plain_metadata};
 use super::super::{documents::lock_directories, isolated_git::IsolatedGit};
 use super::{
     GitPathStatus, GitReviewHunk, GitReviewRevision, LiveReview, comments::GitReviewCommentScope,
-    hunks, validate_oid,
+    hunks, patch::GitReviewPatch, validate_oid,
 };
 
 pub(super) const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
@@ -59,6 +59,7 @@ pub struct GitReviewDiff {
     pub modified: GitFileSide,
     pub hunks: Vec<GitReviewHunk>,
     pub comment_scope: Option<GitReviewCommentScope>,
+    pub patch: Option<GitReviewPatch>,
 }
 
 pub(super) fn read_diff(
@@ -89,6 +90,7 @@ pub(super) fn read_diff(
         modified,
         hunks,
         comment_scope: None,
+        patch: None,
     })
 }
 

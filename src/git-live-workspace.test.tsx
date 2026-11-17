@@ -99,12 +99,13 @@ it("compares two tracked refs in the shared text diff without reading the worktr
     };
     if (command === "git_branch_comparison") {
       return args?.range?.headReference
-        ? { revisions, changes: [{ path: "notes.md", status: "M" }] }
+        ? { revisions, changes: [{ path: "notes.md", status: "M" }, { path: "added.md", status: "A" }] }
         : { revisions, changes: [] };
     }
-    if (command === "git_branch_comparison_diff") return {
-      path: "notes.md", original: { status: "text", content: "merge base text" }, modified: { status: "text", content: "feature text" },
-    };
+    if (command === "git_branch_comparison_diff") return (payload as { path: string }).path === "added.md"
+      ? { path: "added.md", original: { status: "missing" }, modified: { status: "text", content: "committed addition\n" },
+          patch: { status: "text", content: "diff --git a/added.md b/added.md\n+committed addition\n" } }
+      : { path: "notes.md", original: { status: "text", content: "merge base text" }, modified: { status: "text", content: "feature text" } };
     throw new Error(`Unexpected ${command}`);
   });
   const user = userEvent.setup();
@@ -119,7 +120,67 @@ it("compares two tracked refs in the shared text diff without reading the worktr
   expect(invoke).toHaveBeenCalledWith("git_branch_comparison_diff", {
     checkoutId: checkout.checkoutId, range, expected: revisions, path: "notes.md",
   });
+
+  const added = screen.getByRole("button", { name: /^added\.md/ });
+  fireEvent.contextMenu(added);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await navigator.clipboard.readText()).toBe("diff --git a/added.md b/added.md\n+committed addition\n");
+  expect(invoke).toHaveBeenCalledWith("git_branch_comparison_diff", {
+    checkoutId: checkout.checkoutId, range, expected: revisions, path: "added.md",
+  });
+  expect(added.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.contextMenu(added);
+  await user.click(await screen.findByRole("menuitem", { name: "Open base version" }));
+  const basePreview = within(await screen.findByRole("dialog", { name: "Base version" }));
+  expect(basePreview.getByText("This file does not exist in this version.")).toBeTruthy();
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("copies the displayed working patch and opens the exact sides without changing the selected diff", async () => {
+  const path = "notes[1].md";
+  const deleted = "docs/removed.md";
+  const patch = "diff --git a/notes[1].md b/notes[1].md\n-old\n+edit\n\\ No newline at end of file\n";
+  let changedRevision = false;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot, managed: false, revision: originalRevision,
+      changes: [{ path, working: "M", staged: "M" }, { path: deleted, working: "D", staged: null }],
+    };
+    if (command === "git_checkout_diff") return {
+      path: (payload as { path: string }).path,
+      revision: changedRevision ? { ...originalRevision, index: "different-index" } : originalRevision,
+      original: { status: "text", content: "old\n" }, modified: { status: "text", content: "edit" },
+      patch: { status: "text", content: patch },
+    };
+    if (command === "open_checkout_item_in_shell") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit();
+  const active = await screen.findByRole("button", { name: /^notes\[1\]\.md/ });
+  await screen.findByText("edit");
+  fireEvent.contextMenu(active);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await navigator.clipboard.readText()).toBe(patch);
+  fireEvent.contextMenu(active);
+  await user.click(await screen.findByRole("menuitem", { name: "Open revised version" }));
+  const revised = within(await screen.findByRole("dialog", { name: "Revised version" }));
+  expect(revised.getByText("Worktree")).toBeTruthy();
+  expect(revised.getByLabelText("Version contents").textContent).toBe("edit");
+  await user.click(revised.getByRole("button", { name: "Close dialog" }));
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "git_checkout_diff")).toHaveLength(1);
+
+  const removed = screen.getByRole("button", { name: /^docs\/removed\.md/ });
+  fireEvent.contextMenu(removed);
+  await user.click(await screen.findByRole("menuitem", { name: "Show containing folder in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: checkout.checkoutId, relativePath: "docs", action: "reveal" });
+
+  changedRevision = true;
+  fireEvent.contextMenu(removed);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await screen.findByText(/The checkout changed/)).toBeTruthy();
+  expect(active.getAttribute("aria-expanded")).toBe("true");
+  expect(removed.getAttribute("aria-expanded")).toBe("false");
 });
 
 it("opens file history at the selected worktree and compares a renamed file to its former path", async () => {

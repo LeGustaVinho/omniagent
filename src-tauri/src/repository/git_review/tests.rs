@@ -897,6 +897,61 @@ async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> 
 }
 
 #[tokio::test]
+async fn copies_exact_git_patches_for_working_and_staged_files_without_writes() -> Result<()> {
+    use super::patch::GitReviewPatch;
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("patches");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let text = "notes[1].md";
+    let binary = "data.bin";
+    let deleted = "deleted.md";
+    let untracked = "new file.md";
+    fs::write(root.join(text), b"base\nold ending")?;
+    fs::write(root.join(binary), b"\0original")?;
+    fs::write(root.join(deleted), b"deleted line\n")?;
+    let head = commit_fixture(&root, "Base files")?;
+    fs::write(root.join(text), b"staged\ncontent")?;
+    git(&root, &["--literal-pathspecs", "add", "--", text])?;
+    fs::write(root.join(text), b"working\ncontent")?;
+    fs::write(root.join(binary), b"\0modified")?;
+    fs::remove_file(root.join(deleted))?;
+    fs::write(root.join(untracked), b"new file\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+
+    for (path, source, tail, marker) in [
+        (text, GitDiffSource::Working, vec!["--", text], "+working"),
+        (text, GitDiffSource::Staged, vec!["--cached", "--", text], "+staged"),
+        (binary, GitDiffSource::Working, vec!["--", binary], "GIT binary patch"),
+        (deleted, GitDiffSource::Working, vec!["--", deleted], "deleted file mode"),
+        (untracked, GitDiffSource::Working, vec!["--no-index", "--", "/dev/null", untracked], "new file mode"),
+    ] {
+        let expected = passive_command(&root)?
+            .args(["--literal-pathspecs", "diff", "--binary", "--full-index", "--no-color",
+                "--no-ext-diff", "--no-textconv", "--no-renames", "--no-indent-heuristic",
+                "--inter-hunk-context=0", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/"])
+            .args(tail)
+            .output()?;
+        assert_eq!(expected.status.code(), Some(i32::from(path == untracked)));
+        let diff = store.git_checkout_diff(checkout.clone(), path.into(), source).await?;
+        let Some(GitReviewPatch::Text { content }) = diff.patch else {
+            panic!("expected a patch for {path}, got {:?}", diff.patch);
+        };
+        assert!(content.contains(marker), "{path}: {content}");
+        assert_eq!(content.as_bytes(), expected.stdout);
+    }
+
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join(text))?, b"working\ncontent");
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("comparison");
@@ -956,6 +1011,17 @@ async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content(
     let diff = store
         .git_branch_comparison_diff(checkout.clone(), range(), expected(), "README.md".into())
         .await?;
+    let expected_patch = passive_command(&root)?
+        .args(["--literal-pathspecs", "diff", "--binary", "--full-index", "--no-color",
+            "--no-ext-diff", "--no-textconv", "--no-renames", "--no-indent-heuristic",
+            "--inter-hunk-context=0", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/",
+            &ancestor, &feature, "--", "README.md"])
+        .output()?;
+    assert!(expected_patch.status.success());
+    let super::patch::GitReviewPatch::Text { content } = diff.patch else {
+        panic!("expected a patch between the compared commits, got {:?}", diff.patch);
+    };
+    assert_eq!(content.as_bytes(), expected_patch.stdout);
     assert_eq!(
         diff.original,
         GitFileSide::Text {
