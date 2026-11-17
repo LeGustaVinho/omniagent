@@ -79,6 +79,7 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   fireEvent.contextMenu(screen.getByTestId("node-context"));
   await user.click(within(await screen.findByRole("menu", { name: "context" })).getByRole("menuitem", { name: "Inspect node" }));
   expect((screen.getByRole("combobox", { name: "Inspect node" }) as HTMLSelectElement).value).toBe("context");
+  expect(screen.getByTestId("node-context").querySelector(".workflow-node-card[data-selected]")).toBeTruthy();
 
   const edge = `edge-${wireKey(connection)}`;
   fireEvent.contextMenu(screen.getByTestId(edge));

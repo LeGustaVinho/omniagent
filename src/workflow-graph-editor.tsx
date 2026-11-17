@@ -77,13 +77,13 @@ type PortActions = {
   activeOutput?: WorkflowEndpoint;
   activate: (side: PortSide, name: string) => void;
 };
-type CanvasNode = Node<{ definition?: WorkflowDefinition; problem: boolean; readOnly: boolean; portActions?: PortActions }, "workflow">;
+type CanvasNode = Node<{ definition?: WorkflowDefinition; problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions }, "workflow">;
 
 function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   const update = useUpdateNodeInternals();
   const definition = data.definition;
   useEffect(() => { update(id); }, [definition, id, update]);
-  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={id} selected={selected}
+  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={id} selected={selected || data.inspected}
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
 
@@ -497,7 +497,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
-      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled,
+      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled, inspected: item.id === selected,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined)),
         portActions: { nodeId: item.id, activeOutput: pending?.from, activate: (side, name) => activatePort(item.id, side, name) },
       } };
