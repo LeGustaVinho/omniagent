@@ -163,15 +163,16 @@ it("copies and attaches only the last authenticated command and its bounded rend
   vi.mocked(invoke).mockResolvedValue(session);
   const add = vi.fn();
   const user = userEvent.setup();
-  render(<ManualTerminal checkoutId={session.checkoutId} active autoStart onContextText={add} />);
+  render(<ManualTerminal checkoutId={session.checkoutId} active autoStart onContextText={add} onOpenFile={vi.fn()} />);
   await screen.findByRole("button", { name: "Close PowerShell" });
   const terminal = fixture.terminals[0]!;
   const openMenu = () => fireEvent.contextMenu(screen.getByLabelText("Manual PowerShell terminal"));
   const start = (id: string, sequence: number, row = fixture.cursorRow, column = fixture.cursorColumn) => terminal.onOsc?.(
     `P;OmniAgentCommandStart=${id};${sequence};${row};${column}`);
-  const end = (id: string, sequence: number, command: string, row = fixture.cursorRow, column = fixture.cursorColumn) => {
+  const end = (id: string, sequence: number, command: string, row = fixture.cursorRow, column = fixture.cursorColumn,
+    status = "succeeded") => {
     const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(command)));
-    return terminal.onOsc?.(`P;OmniAgentCommandEnd=${id};${sequence};${row};${column};${encoded}`);
+    return terminal.onOsc?.(`P;OmniAgentCommandEnd=${id};${sequence};${row};${column};${status};${encoded}`);
   };
   fixture.lines = [
     { text: "PS> previously printed input", isWrapped: false },
@@ -181,10 +182,11 @@ it("copies and attaches only the last authenticated command and its bounded rend
   ];
   act(() => {
     start("other-terminal", 1);
-    end("other-terminal", 1, "untrusted command");
+    end("other-terminal", 1, "untrusted command", fixture.cursorRow, fixture.cursorColumn, "failed");
   });
   openMenu();
   expect(screen.queryByRole("menuitem", { name: "Copy last PowerShell command" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
   await user.keyboard("{Escape}");
 
   fixture.cursorRow = 1;
@@ -203,6 +205,7 @@ it("copies and attaches only the last authenticated command and its bounded rend
   await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
   expect(await navigator.clipboard.readText()).toBe("wrapping text\nok");
   openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
   await user.click(await screen.findByRole("menuitem", { name: "Add last command output to conversation…" }));
   expect(add).toHaveBeenCalledExactlyOnceWith("wrapping text\nok");
 
@@ -247,6 +250,42 @@ it("copies and attaches only the last authenticated command and its bounded rend
   openMenu();
   await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
   expect(await navigator.clipboard.readText()).toBe("fast output\n");
+
+  // Only receipts paired with an accepted line identify a command failure.
+  act(() => end(session.terminalId, 0, "unmatched", fixture.cursorRow, fixture.cursorColumn, "failed"));
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  const failed = "cmd.exe /d /c 'echo mixed output & exit 23'";
+  fixture.lines = [{ text: "mixed output", isWrapped: false }, { text: "", isWrapped: false }];
+  fixture.cursorRow = 0;
+  act(() => { start(session.terminalId, 5); });
+  fixture.cursorRow = 1;
+  act(() => { end(session.terminalId, 5, failed, 1, 0, "failed"); });
+  fixture.lines[1]!.text = "unrelated prompt";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" }));
+  expect(add.mock.lastCall).toEqual([`PowerShell reported failure.\n\nCommand\n${failed}\n\nCaptured terminal output\nmixed output\n`]);
+  terminal.selected = ".\\reported.ts:7";
+  fireEvent.keyDown(screen.getByLabelText("Manual PowerShell terminal"), { key: "F10", shiftKey: true });
+  expect(await screen.findByRole("menuitem", { name: "Open file at location" })).toBeTruthy();
+  expect(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+
+  const silent = "cmd.exe /d /c 'exit 23'";
+  act(() => {
+    start(session.terminalId, 6);
+    terminal.onScreenClear?.();
+    end(session.terminalId, 6, silent, 1, 0, "failed");
+  });
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" }));
+  expect(add.mock.lastCall).toEqual([`PowerShell reported failure.\n\nCommand\n${silent}`]);
+
+  act(() => { start(session.terminalId, 7); });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
 });
 
 it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {

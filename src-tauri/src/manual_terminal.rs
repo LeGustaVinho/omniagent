@@ -40,6 +40,8 @@ $global:__OmniAgentAcceptedCommand = $null
 $global:__OmniAgentCommandSequence = 0
 $global:__OmniAgentSeenHistory = $null
 function global:prompt {
+    # Read the execution result before the prompt runs any of its own commands.
+    $commandSucceeded = $global:?
     if ($null -eq $global:__OmniAgentOriginalReadLine -and (Microsoft.PowerShell.Core\Get-Module PSReadLine)) {
         $reader = Get-Item Function:PSConsoleHostReadLine -ErrorAction SilentlyContinue
         if ($reader) {
@@ -65,17 +67,23 @@ function global:prompt {
     if ($newEntry -or $started) {
         $sequence = 0
         $command = ''
+        $status = 'unknown'
         if ($newEntry) {
             $command = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($latest.CommandLine))
             # Keep the complete OSC record within xterm's parser limit.
             if ($command.Length -gt 9999800) { $command = '' }
             if ($started -and [string]::Equals($latest.CommandLine, $started.Line, [StringComparison]::Ordinal)) {
                 $sequence = $started.Sequence
+                if ($latest.ExecutionStatus -eq 'Completed') {
+                    $status = if ($commandSucceeded) { 'succeeded' } else { 'failed' }
+                } elseif ($latest.ExecutionStatus -eq 'Failed') {
+                    $status = 'failed'
+                }
             }
         }
         $row = [Console]::CursorTop - [Console]::WindowTop
         [Console]::Write([string][char]27 + ']633;P;OmniAgentCommandEnd=' +
-            $global:__OmniAgentPromptToken + ';' + $sequence + ';' + $row + ';' + [Console]::CursorLeft + ';' + $command + [char]7)
+            $global:__OmniAgentPromptToken + ';' + $sequence + ';' + $row + ';' + [Console]::CursorLeft + ';' + $status + ';' + $command + [char]7)
     }
     $global:__OmniAgentSeenHistory = $historyId
     $location = $ExecutionContext.SessionState.Path.CurrentLocation

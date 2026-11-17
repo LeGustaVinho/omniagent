@@ -1,12 +1,12 @@
 import type { IMarker, Terminal } from "@xterm/xterm";
 
-export type TerminalCommand = { command: string; output?: string };
+export type TerminalCommand = { command: string; failed: boolean; output?: string };
 type OutputStart = { marker: IMarker; column: number };
 type LinePosition = { row: number; baseY: number };
 type PendingOutput = {
   sequence: number;
   start: OutputStart | LinePosition;
-  completion?: LinePosition & { command: string };
+  completion?: LinePosition & { result: TerminalCommand };
 };
 
 const startPrefix = "P;OmniAgentCommandStart=";
@@ -50,7 +50,7 @@ export function trackTerminalCommands(terminal: Terminal, terminalId: () => stri
     const start = data.startsWith(startPrefix);
     if (!start && !data.startsWith(endPrefix)) return false;
     const value = data.slice((start ? startPrefix : endPrefix).length);
-    const [id, sequenceText, rowText, columnText, encoded, ...extra] = value.split(";");
+    const [id, sequenceText, rowText, columnText, status, encoded, ...extra] = value.split(";");
     const expectedId = terminalId();
     if (!expectedId || id !== expectedId || !sequenceText || !rowText || !columnText || !/^\d+$/.test(sequenceText)
       || !/^-?\d+$/.test(rowText) || !/^\d+$/.test(columnText) || extra.length) return true;
@@ -65,7 +65,7 @@ export function trackTerminalCommands(terminal: Terminal, terminalId: () => stri
     const atReportedPosition = provableRow && buffer.cursorY === row && buffer.cursorX === column;
     const followingLine = provableRow && column === 0 && row > buffer.cursorY;
     if (start) {
-      if (encoded !== undefined || sequence <= Math.max(lastSequence, completedSequence)) return true;
+      if (status !== undefined || sequence <= Math.max(lastSequence, completedSequence)) return true;
       lastSequence = sequence;
       discardOutputStart();
       changed(undefined);
@@ -74,21 +74,23 @@ export function trackTerminalCommands(terminal: Terminal, terminalId: () => stri
       else if (followingLine && row === buffer.cursorY + 1) pending = { sequence, start: { row, baseY: buffer.baseY } };
       return true;
     }
-    if (encoded === undefined || (sequence !== 0 && (sequence < lastSequence || sequence <= completedSequence))) return true;
+    if (encoded === undefined || (status !== "failed" && status !== "succeeded" && status !== "unknown")
+      || (sequence !== 0 && (sequence < lastSequence || sequence <= completedSequence))) return true;
     if (sequence > 0) completedSequence = sequence;
     try {
       const command = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0)));
+      const result = { command, failed: status === "failed" && sequence > 0 && sequence === lastSequence };
       const matchingStart = command && pending?.sequence === sequence ? pending : undefined;
       // ConPTY can send the end marker before rendering command output. A
       // forward line feed to its exact position can still seal the last line.
       if (matchingStart && followingLine && ("marker" in matchingStart.start || row > matchingStart.start.row)) {
-        matchingStart.completion = { command, row, baseY: buffer.baseY };
-        changed({ command });
+        matchingStart.completion = { result, row, baseY: buffer.baseY };
+        changed(result);
         return true;
       }
       const output = atReportedPosition && matchingStart && "marker" in matchingStart.start ? readOutput(terminal, matchingStart.start) : undefined;
       discardOutputStart();
-      changed(command ? { command, output } : undefined);
+      changed(command ? { ...result, output } : undefined);
     } catch {
       discardOutputStart();
       changed(undefined);
@@ -105,12 +107,12 @@ export function trackTerminalCommands(terminal: Terminal, terminalId: () => stri
       pending.start = { marker, column: 0 };
     }
     if (!pending.completion) return;
-    const { command, row, baseY } = pending.completion;
+    const { result, row, baseY } = pending.completion;
     if (buffer.baseY !== baseY || buffer.cursorY > row) discardOutputStart();
     else if (buffer.cursorY === row) {
       const output = buffer.cursorX === 0 ? readOutput(terminal, pending.start) : undefined;
       discardOutputStart();
-      changed({ command, output });
+      changed({ ...result, output });
     }
   });
   const resizing = terminal.onResize(discardOutputStart);

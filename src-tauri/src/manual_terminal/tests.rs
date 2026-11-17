@@ -212,7 +212,7 @@ async fn interactive_history_pairs_exact_input_with_execution_boundaries() -> Re
     let command = "Start-Sleep -Milliseconds 180; Write-Output ('OMNI'+'_COMMAND_BOUNDARY'); Start-Sleep -Milliseconds 180";
     let start = format!("]633;P;OmniAgentCommandStart={};1;", info.terminal_id);
     let end = format!("]633;P;OmniAgentCommandEnd={};1;", info.terminal_id);
-    let expected = format!(";0;{}", STANDARD.encode(command));
+    let expected = format!(";0;succeeded;{}", STANDARD.encode(command));
     let locate = |bytes: &[u8], prefix: &str| -> Option<(usize, usize, String)> {
         let beginning = bytes
             .windows(prefix.len())
@@ -279,7 +279,27 @@ async fn interactive_history_pairs_exact_input_with_execution_boundaries() -> Re
     let (_, _, following_receipt) = output
         .wait_for(&session, |bytes| locate(bytes, &following_end))
         .await?;
-    assert!(following_receipt.ends_with(&format!(";0;{}", STANDARD.encode(following_command))));
+    assert!(following_receipt.ends_with(&format!(
+        ";0;succeeded;{}",
+        STANDARD.encode(following_command)
+    )));
+
+    for (index, (command, status)) in [
+        ("& ([IO.Path]::Combine([Environment]::SystemDirectory, 'cmd.exe')) /d /c 'exit 23'", "failed"),
+        ("if ($LASTEXITCODE -ne 23) { throw 'native status changed' }; Write-Output 'error: success fixture'", "succeeded"),
+        ("Write-Error 'PowerShell error fixture'", "failed"),
+        ("throw 'PowerShell terminating error fixture'", "failed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sequence = index + 3;
+        let prefix = format!("]633;P;OmniAgentCommandEnd={};{sequence};", info.terminal_id);
+        session.write(format!("{command}\r"))?;
+        let (_, _, receipt) = output.wait_for(&session, |bytes| locate(bytes, &prefix)).await?;
+        let expected = format!(";{status};{}", STANDARD.encode(command));
+        assert!(receipt.ends_with(&expected), "{command}: {receipt}");
+    }
     session.write("exit 0\r".into())?;
     assert_eq!(output.exited().await?, 0);
     Ok(())

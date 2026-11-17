@@ -121,6 +121,11 @@ function terminalOutput(terminal: Terminal) {
   return lines.join("\n");
 }
 
+function failedCommandContext({ command, output }: TerminalCommand) {
+  return ["PowerShell reported failure.", `Command\n${command}`,
+    output?.trim() ? `Captured terminal output\n${output}` : undefined].filter(Boolean).join("\n\n");
+}
+
 export function ManualTerminal({ checkoutId, relativeDirectory, active, visible = active, autoStart, clearRevision = 0,
   onContextText, onOpenFile, onFocus, sessionActions, reviewedInput }: {
   checkoutId: string;
@@ -344,6 +349,12 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     const directory = attachment.current?.directoryAt?.(reference.bufferLine);
     setReferenceMenu({ terminal, reference, point: { x, y }, directory });
   }
+  const failedCommandActions = onContextText && lastExecuted?.failed ? [{
+    label: "Add last command failure to conversation…", run: () => {
+      restoringTerminalFocus.current = false;
+      onContextText(failedCommandContext(lastExecuted));
+    },
+  }] : [];
   return <div className="flex h-full min-h-0 flex-col gap-2" onFocusCapture={onFocus} onPointerDownCapture={onFocus}>
     <div className="flex shrink-0 items-center gap-2">
       {canStart && reviewedInput === undefined && (
@@ -400,6 +411,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       { label: "Copy last PowerShell command", run: () => clipboard(() => navigator.clipboard.writeText(lastExecuted.command)) },
       ...(lastOutput ? [{ label: "Copy last command output", run: () => clipboard(() => navigator.clipboard.writeText(lastOutput)) }] : []),
       ...(onContextText && lastOutput?.trim() ? [{ label: "Add last command output to conversation…", run: () => onContextText(lastOutput) }] : []),
+      ...failedCommandActions,
     ] : [], onContextText ? [
       { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
         const text = attachment.current?.terminal.getSelection();
@@ -443,6 +455,6 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
         } },
         { label: "Copy printed file reference", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.text)) },
         { label: "Copy printed path", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.path)) },
-      ]]} />}
+      ], failedCommandActions]} />}
   </div>;
 }
