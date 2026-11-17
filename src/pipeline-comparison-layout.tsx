@@ -1,6 +1,7 @@
 import type { FormEventHandler, ReactNode } from "react";
 import type { ModelRating } from "@/bindings/ModelRating";
 import { ModelRatingMeters } from "@/components/model-picker";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 
 export function PipelineComparisonSetup({ request, candidates, onSubmit }: {
   request: ReactNode;
@@ -19,14 +20,16 @@ export function PipelineComparisonSetup({ request, candidates, onSubmit }: {
   </form>;
 }
 
-export function PipelineComparisonCard({ name, state, rating, children }: {
-  name: string; state: string; rating: ModelRating | null; children: ReactNode;
+export function PipelineComparisonCard({ name, state, rating, actions = [], children }: {
+  name: string; state: string; rating: ModelRating | null; actions?: MenuGroups; children: ReactNode;
 }) {
   return <li className="pipeline-box pipeline-stack">
-    <header className="pipeline-card-heading">
-      <h3 className="break-words">{name}</h3>
-      <span role="status" className="pipeline-status" data-status={state}>{state.replaceAll("_", " ")}</span>
-    </header>
+    <ContextActions label={name} groups={actions}>
+      <header className={`pipeline-card-heading${actions.length ? " pr-6" : ""}`}>
+        <h3 className="break-words">{name}</h3>
+        <span role="status" className="pipeline-status" data-status={state}>{state.replaceAll("_", " ")}</span>
+      </header>
+    </ContextActions>
     <ModelRatingMeters rating={rating} />
     {children}
   </li>;
