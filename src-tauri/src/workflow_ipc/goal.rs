@@ -6,7 +6,7 @@ use omniagent::{
     store::Store,
     workflows::{
         Executor, NodeConfiguration, NodeInstance, authoring::package::PackageArtifactBody,
-        builtin_registry, stage_goal::StageGoalAssessment,
+        builtin_registry, stage_goal::StageGoalAssessment, stage_plan::StagePlanConfiguration,
     },
 };
 use tauri::State;
@@ -47,7 +47,8 @@ pub async fn preview_workflow_stage_goal(
             .find(|definition| definition.kind == node.kind)
             .context("The stage is outside the workflow catalog")?;
         let mode = match definition.executor {
-            Executor::PlanAgent => SessionMode::Plan,
+            Executor::PlanAgent => StagePlanConfiguration::from_node(&node.configuration)
+                .map_or(SessionMode::Plan, |plan| plan.mode()),
             Executor::ReadOnlyAgent => SessionMode::ReadOnly,
             Executor::WriteAgent => SessionMode::ApprovedWrite,
             _ => anyhow::bail!("Select an agent stage to preview Goal Mode"),

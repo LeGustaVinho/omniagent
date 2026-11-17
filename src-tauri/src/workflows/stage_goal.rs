@@ -463,6 +463,7 @@ fn assess_stage_profile(
     let NodeConfiguration::AgentRole { model, .. } = &stage.instance.configuration else {
         anyhow::bail!("The goal stage lost its pinned role");
     };
+    let configured_plan = super::stage_plan::StagePlanConfiguration::for_stage(stage)?;
     let mode_matches = matches!(
         (stage.definition.executor, scope.mode),
         (
@@ -470,7 +471,7 @@ fn assess_stage_profile(
             SessionMode::Plan | SessionMode::ReadOnly
         ) | (Executor::ReadOnlyAgent, SessionMode::ReadOnly)
             | (Executor::WriteAgent, SessionMode::ApprovedWrite)
-    );
+    ) && configured_plan.is_none_or(|plan| scope.mode == plan.mode());
     let model_matches = model.as_ref().is_none_or(|selection| {
         selection.provider == scope.provider
             && selection.profile_id == scope.profile_id
@@ -490,7 +491,11 @@ fn assess_stage_profile(
             });
         }
     }
-    let candidate = native_goal_candidate(db, checkout, scope, &pin.configuration.definition())?;
+    let candidate = if configured_plan.is_some() {
+        None
+    } else {
+        native_goal_candidate(db, checkout, scope, &pin.configuration.definition())?
+    };
     Ok(assess_route(
         &pin.configuration,
         scope,

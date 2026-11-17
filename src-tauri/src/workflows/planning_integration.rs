@@ -30,6 +30,8 @@ use super::{
     tests::{approved_delivery_repository, submission},
 };
 
+mod stage_plan;
+
 const FIRST_PLAN: &str = r#"ORIGINAL_DELIVERY. Generate Markdown with examples.
 
 ```omniagent-plan

@@ -12,7 +12,9 @@ use crate::{
     repository::{bind_job_markdown, validate_task_worktree_checkout, writers::writer_owner},
     store::Store,
     tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
-    workflows::{WorkflowJobInput, bind_job_input, stage_goal::load_stage_goal, stage_job_input},
+    workflows::{
+        WorkflowJobInput, bind_job_input, stage_goal::load_stage_goal, stage_job_input, stage_plan,
+    },
 };
 
 use super::{
@@ -594,6 +596,11 @@ impl Store {
                 if let Some(workflow) = &workflow {
                     stage_job_input(&tx, &project, &binding, &request, workflow)?;
                 }
+                let plan = if workflow.is_some() {
+                    stage_plan::load_stage_plan(&tx, &project, &binding)?
+                } else {
+                    None
+                };
                 let goal = if workflow.is_some() {
                     load_stage_goal(&tx, &project, &binding.pipeline_run_id, &binding.node_instance_id)?
                         .map(|pin| pin.configuration.definition())
@@ -608,6 +615,24 @@ impl Store {
                     request.instructions.push_str(&comparison.context);
                 }
                 let mut pinned = input.pinned;
+                if let Some(plan) = plan {
+                    ensure!(
+                        scope.mode == plan.mode(),
+                        "The profile differs from the pinned planning question route"
+                    );
+                    ensure!(
+                        pinned.is_none(),
+                        "A configured Plan stage starts with its own bounded conversation"
+                    );
+                    let conversation = insert_conversation(&tx, checkout.clone(), "Workflow plan".into(), true)?;
+                    pinned = Some((
+                        JobContext {
+                            conversation_id: conversation.id,
+                            context_id: conversation.context_id,
+                        },
+                        plan.question_route,
+                    ));
+                }
                 if let Some(definition) = &goal {
                     if pinned.is_none() {
                         let conversation = insert_conversation(&tx, checkout.clone(), "Workflow goal".into(), true)?;
@@ -665,6 +690,11 @@ impl Store {
                 }
                 if let Some((context, route)) = &pinned {
                     history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;
+                    if let Some(plan) = plan {
+                        stage_plan::bind_conversation(
+                            &tx, &job.id, &context.conversation_id, &binding, plan,
+                        )?;
+                    }
                     if let Some(definition) = &goal {
                         super::goals::bind_initial_goal(&tx, &job, &context.conversation_id, definition, Some(&binding))?;
                         ensure!(history::effective_release_blocker(&tx, &job)?.is_none(), "The workflow Goal does not have a current stage release");

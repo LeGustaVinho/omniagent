@@ -235,14 +235,18 @@ impl Store {
         let planning_route = input.pinned.as_ref().map(|(_, route)| *route);
         ensure!(comparison.is_none() || (node.definition.kind == super::BuiltinNode::ReviewPlan && scope.mode == SessionMode::ReadOnly),
             "Comparison responses require a read-only plan review stage");
-        let qualified = match (node.definition.executor, scope.mode) {
-            (Executor::PlanAgent, SessionMode::Plan) => true,
-            (Executor::PlanAgent, SessionMode::ReadOnly) => {
-                planning_route == Some(QuestionRoute::StructuredTurn)
+        let qualified = if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
+            scope.mode == plan.mode()
+        } else {
+            match (node.definition.executor, scope.mode) {
+                (Executor::PlanAgent, SessionMode::Plan) => true,
+                (Executor::PlanAgent, SessionMode::ReadOnly) => {
+                    planning_route == Some(QuestionRoute::StructuredTurn)
+                }
+                (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
+                (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
+                _ => false,
             }
-            (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
-            (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
-            _ => false,
         };
         ensure!(
             qualified,

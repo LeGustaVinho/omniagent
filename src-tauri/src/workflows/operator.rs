@@ -261,7 +261,8 @@ impl Store {
             .workflow_execution_inputs(project, run, node, unit_id, inputs)
             .await?;
         let mode = match definition.definition.executor {
-            Executor::PlanAgent => SessionMode::Plan,
+            Executor::PlanAgent => super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
+                .map_or(SessionMode::Plan, |plan| plan.mode()),
             Executor::ReadOnlyAgent => SessionMode::ReadOnly,
             Executor::WriteAgent => SessionMode::ApprovedWrite,
             _ => anyhow::bail!("this node does not execute a CLI role"),

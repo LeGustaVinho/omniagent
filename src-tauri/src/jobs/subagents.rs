@@ -21,7 +21,7 @@ use super::{
 };
 
 const DEFAULT_LIMIT: u32 = 3;
-const MAX_LIMIT: u32 = 32;
+const MAX_LIMIT: u32 = crate::workflows::stage_plan::MAX_SUBAGENTS;
 const STRICT_CONTROL_REQUIRED: &str =
     "Strict total needs verified native delegation controls on this CLI profile and runner";
 
@@ -153,6 +153,7 @@ struct EffectiveQuota {
     mode_override: Option<SubagentLimitMode>,
     requested: u32,
     native_requested: u32,
+    stage_maximum: Option<u32>,
 }
 
 impl EffectiveQuota {
@@ -161,7 +162,9 @@ impl EffectiveQuota {
     }
 
     fn authorized(&self) -> u32 {
-        self.requested.min(self.project.maximum)
+        self.requested
+            .min(self.project.maximum)
+            .min(self.stage_maximum.unwrap_or(MAX_LIMIT))
     }
 }
 
@@ -183,17 +186,19 @@ fn project_policy(db: &Connection, project: &str) -> Result<ProjectSubagentPolic
 }
 
 fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota> {
-    let (project, mode, requested, native_requested): (
+    let (project, mode, requested, native_requested, stage_maximum): (
         String,
         Option<String>,
         Option<u32>,
         Option<u32>,
+        Option<u32>,
     ) = db.query_row(
-        "SELECT w.project_id, q.mode, q.requested, q.native_requested
+        "SELECT w.project_id, q.mode, q.requested, q.native_requested, p.max_subagents
          FROM conversations c JOIN checkouts w ON w.id = c.checkout_id
-         LEFT JOIN conversation_subagent_quotas q ON q.conversation_id = c.id WHERE c.id = ?1",
+         LEFT JOIN conversation_subagent_quotas q ON q.conversation_id = c.id
+         LEFT JOIN workflow_planning_conversations p ON p.conversation_id = c.id WHERE c.id = ?1",
         [conversation],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     )?;
     Ok(EffectiveQuota {
         project: project_policy(db, &project)?,
@@ -203,6 +208,7 @@ fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota
             .transpose()?,
         requested: requested.unwrap_or(DEFAULT_LIMIT),
         native_requested: native_requested.unwrap_or_default(),
+        stage_maximum,
     })
 }
 
@@ -498,6 +504,7 @@ pub(super) fn job_subagent_allocation(
             mode_override: None,
             requested: DEFAULT_LIMIT,
             native_requested: 0,
+            stage_maximum: None,
         },
     };
     authorize(

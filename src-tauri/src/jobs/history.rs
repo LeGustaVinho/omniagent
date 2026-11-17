@@ -201,6 +201,12 @@ fn pinned_release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBl
         .pipeline
         .as_ref()
         .context("Pinned job has no pipeline origin")?;
+    if let Some(current) = crate::workflows::stage_plan::plan_head_is_current(db, &job.id)? {
+        if !current {
+            return Ok(Some(ReleaseBlocker::StalePlan));
+        }
+        return release_blocker(db, job);
+    }
     // A structured planner pins a conversation input to produce the plan.
     // The plan it publishes will be pinned when downstream jobs consume it.
     if origin.plan_revision.is_none()

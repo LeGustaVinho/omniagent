@@ -123,6 +123,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/106-workflow-iteration-artifacts.sql"),
     include_str!("../migrations/107-workflow-settings-proposals.sql"),
     include_str!("../migrations/108-workflow-maintenance.sql"),
+    include_str!("../migrations/109-workflow-plan-mode.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

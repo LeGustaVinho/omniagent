@@ -49,6 +49,8 @@ pub struct StageRequirementConfiguration {
     pub bound_role: Option<PackageArtifactVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<super::stage_goal::StageGoalConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<super::stage_plan::StagePlanConfiguration>,
     #[serde(default, skip_serializing_if = "StageRequirements::is_empty")]
     pub stage: StageRequirements,
 }
@@ -219,12 +221,14 @@ impl StageRequirementConfiguration {
         self.role_template.is_none()
             && self.bound_role.is_none()
             && self.goal.is_none()
+            && self.plan.is_none()
             && self.stage.is_empty()
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         self.stage.is_valid()
             && self.goal.as_ref().is_none_or(|goal| goal.validate().is_ok())
+            && self.plan.as_ref().is_none_or(|plan| plan.is_valid())
             && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
             && self.role_template.as_ref().is_none_or(|role| {
                 !role.template_id.trim().is_empty() && !role.revision.trim().is_empty()
@@ -254,6 +258,9 @@ fn effective_requirements(
         merge_requirements(&mut effective, &template.requirements);
     }
     merge_requirements(&mut effective, &configured.stage);
+    if let Some(plan) = configured.plan {
+        plan.require_capabilities(&mut effective);
+    }
     ensure!(
         effective.is_valid(),
         "The combined role and stage requirements are invalid or exceed the limits"

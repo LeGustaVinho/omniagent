@@ -5,6 +5,7 @@ import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import { WorkflowRequirementsEditor, type RequirementConfiguration } from "@/workflow-stage-requirements";
 import { readStageGoal, WorkflowStageGoal, type StageGoalConfiguration, type StageGoalRoleRevision } from "@/workflow-stage-goal";
+import { stagePlanMode, WorkflowStagePlan, type StagePlanConfiguration } from "@/workflow-stage-plan";
 
 export function AgentRoleFields({ projectId, checkoutId, mode, configuration, nodeId, nodeKind, goalRole, disabled, fixedModel = false, onChange }: {
   projectId: string;
@@ -21,8 +22,9 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
   const { options, loading, errors } = useLiveModelOptions();
   const model = configuration.model as ModelSelection | undefined;
   const requirements = (configuration.requirements as (RequirementConfiguration & {
-    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision;
+    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision; plan?: StagePlanConfiguration;
   }) | undefined) ?? {};
+  const effectiveMode = nodeKind === "plan" ? stagePlanMode(requirements.plan) : mode;
   const goal = readStageGoal(requirements.goal);
   const goalRoleVersion = goalRole?.version ?? requirements.boundRole;
   const previewConfiguration = goalRoleVersion
@@ -39,10 +41,17 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       reset: { label: "Use runtime model defaults", onSelect: () => onChange(inherited) } }} />
     {unavailable && <p className="text-sm text-muted-foreground">Configured stage model · {model.modelId} · Unavailable in current profiles</p>}
     {errors[0] && <p role="alert">{String(errors[0])}</p>}
-    <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={mode} model={model ?? null}
+    {nodeKind === "plan" && <WorkflowStagePlan plan={requirements.plan} disabled={disabled || fixedModel}
+      onChange={(plan) => {
+        const { requirements: _previous, ...node } = configuration;
+        const { plan: _before, ...rest } = requirements;
+        if (plan) onChange({ ...node, requirements: { ...rest, plan } });
+        else onChange(Object.keys(rest).length ? { ...node, requirements: rest } : node);
+      }} />}
+    <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       options={options} disabled={disabled || fixedModel} rolePin configuration={requirements}
       onChange={(requirements) => onChange({ ...configuration, requirements })} />
-    <WorkflowStageGoal projectId={projectId} checkoutId={checkoutId} mode={mode} model={model ?? null}
+    <WorkflowStageGoal projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       node={{ id: nodeId, kind: nodeKind, configuration: previewConfiguration }} roleRevision={goalRoleVersion}
       roleReferencePending={goalRole?.pending} disabled={disabled || fixedModel} goal={goal}
       malformed={requirements.goal !== undefined && !goal}

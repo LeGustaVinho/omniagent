@@ -34,6 +34,7 @@ pub mod triggers;
 mod runtime;
 pub mod settings_proposals;
 pub mod stage_goal;
+pub mod stage_plan;
 pub mod stage_requirements;
 #[cfg(test)]
 mod stage_models;
@@ -199,6 +200,7 @@ fn compile_resolved_graph<'definition>(
             definition: definition.clone(),
         };
         stage_goal::StageGoalPin::for_stage(&pinned)?;
+        stage_plan::StagePlanConfiguration::for_stage(&pinned)?;
         nodes.push(pinned);
     }
 

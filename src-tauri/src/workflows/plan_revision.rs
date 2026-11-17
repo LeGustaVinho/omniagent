@@ -46,8 +46,7 @@ impl Store {
         mut revision: WorkflowPlanRevisionRequest,
     ) -> Result<Job> {
         ensure!(
-            submission.dispatch.node_instance_id == "plan"
-                && submission.scope.mode == SessionMode::Plan,
+            matches!(submission.scope.mode, SessionMode::Plan | SessionMode::ReadOnly),
             "A revision requires the workflow's read-only planning stage"
         );
         revision.feedback = revision.feedback.trim().to_owned();
@@ -77,7 +76,8 @@ impl Store {
             .await?
             .context("The selected planning attempt is unavailable")?;
         ensure!(
-            source.status == RunStatus::Succeeded && source.pin.workflow_run_id == *workflow,
+            source.status == RunStatus::Succeeded && source.pin.workflow_run_id == *workflow
+                && source.pin.node_instance_id == submission.dispatch.node_instance_id,
             "A revision requires a completed planning attempt in this workflow"
         );
         let plan = self

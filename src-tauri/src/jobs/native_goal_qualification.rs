@@ -165,6 +165,11 @@ pub(super) fn native_goal_seed(
     let Some(scope) = scope else {
         return Ok(None);
     };
+    if super::history::load_binding(db, &job.id)?
+        .is_some_and(|binding| !binding.question_route.is_native())
+    {
+        return Ok(None);
+    }
     let encoded: Option<(Vec<u8>, Option<String>, Option<i64>)> = db.query_row(
         "SELECT r.definition, x.run_id, resume.remaining_tokens
          FROM goal_revisions r JOIN active_goals active ON active.revision_id = r.id
