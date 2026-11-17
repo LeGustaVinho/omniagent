@@ -34,6 +34,9 @@ pub enum WorkflowHostRequest {
         document: RepositoryMarkdownRevision,
     },
     LoadContext,
+    ReadGit(super::templates::diff::GitSelection),
+    VerifyReviewDiff,
+    PublishDiffReport,
     LinkExistingTask {
         task_id: String,
     },
@@ -126,6 +129,24 @@ impl Store {
             (Executor::ReadContext, WorkflowHostRequest::LoadContext) => {
                 HostAction::Publish("context", inputs["document"].value.clone())
             }
+            (Executor::ReadSelectedGit, WorkflowHostRequest::ReadGit(selection)) => {
+                let ArtifactValue::Markdown(document) = &inputs["document"].value else {
+                    anyhow::bail!("Read Git needs the selected document's registered checkout");
+                };
+                let inspection = super::templates::diff::capture(self, &project_id, &document.checkout_id, selection).await?;
+                HostAction::Publish("git", ArtifactValue::GitInspection(inspection))
+            }
+            (Executor::CheckSelectedGit, WorkflowHostRequest::VerifyReviewDiff) => {
+                let NodeConfiguration::RequiredChecks { names } = node.instance.configuration else {
+                    anyhow::bail!("The diff checks configuration is unavailable");
+                };
+                let checks = super::templates::diff::verify(self, &project_id, &inputs["git"], names).await?;
+                HostAction::Publish("checks", ArtifactValue::Checks(checks))
+            }
+            (Executor::ReportSelectedGit, WorkflowHostRequest::PublishDiffReport) => {
+                let report = super::templates::diff::report(self, &project_id, &inputs["git"], &inputs["review"], &inputs["checks"]).await?;
+                HostAction::Publish("report", ArtifactValue::DiffReport(report))
+            }
             (
                 Executor::FindOrCreateWork,
                 work @ (WorkflowHostRequest::LinkExistingTask { .. }
@@ -169,6 +190,13 @@ impl Store {
                     decision.task == *task && decision.task_artifact_id == inputs["task"].id,
                     "preparation must use the work from the approval decision"
                 );
+                let units = self
+                    .workflow_plan_units(
+                        project_id.clone(),
+                        run_id.clone(),
+                        decision.plan_revision.clone(),
+                    )
+                    .await?;
                 let worktree = repository::provision_task_worktree(
                     self,
                     default_root,
@@ -177,13 +205,6 @@ impl Store {
                     decision.source_checkout_id.clone(),
                 )
                 .await?;
-                let units = self
-                    .workflow_plan_units(
-                        project_id.clone(),
-                        run_id.clone(),
-                        decision.plan_revision.clone(),
-                    )
-                    .await?;
                 HostAction::Prepare {
                     decision: decision.clone(),
                     artifact_id: approval.id.clone(),
@@ -202,6 +223,9 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 if !execution_key.is_empty() {
                     require_current_plan(&tx, &project_id, &run_id, &execution_key)?;
+                }
+                if node.definition.executor == Executor::FindOrCreateWork {
+                    super::units::validate_selected_plan_revision(&tx, &project_id, &run_id, &execution_key)?;
                 }
                 if let Some(saved) =
                     load_host_completion(&tx, &run_id, &node_id, &execution_key, &request_revision, preparation_decision.as_deref())?

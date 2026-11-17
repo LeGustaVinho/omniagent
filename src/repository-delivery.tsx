@@ -92,6 +92,12 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const completionSha = completion?.kind === "verified_commit" && completion.workflowRunId === scope.runId
     ? completion.completionSha : undefined;
   const gitNodes = pinnedDeliveryGitNodes(delivery.definition);
+  const unitControls = !delivery.definition || Boolean(gitNodes.commit) && [
+    ["implement", "implement"],
+    ["review-candidate", "review_candidate"],
+    ["verify-candidate", "verify_candidate"],
+    ["accept", "accept_candidate"],
+  ].every(([id, kind]) => delivery.definition?.nodes.some(({ instance }) => instance.id === id && instance.kind === kind));
   const finalGit = delivery.artifacts.find(({ unitId, nodeInstanceId, port, value }) =>
     unitId === last?.unit.id && nodeInstanceId === (gitNodes.commit ?? "commit") && port === "git" &&
       value.kind === "git" && value.evidence.id === last?.commitEvidenceId,
@@ -202,13 +208,14 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
         Reopen work
       </Button>}
     </section>}
-    {units.data?.map((unit) => (unit.commitEvidenceId || implementationInputs) && <RepositoryDeliveryUnit
+    {!unitControls && currentTask && implementationInputs && <p>Continue the prepared logical unit in the execution graph.</p>}
+    {units.data?.map((unit) => (unit.commitEvidenceId || unitControls && implementationInputs) && <RepositoryDeliveryUnit
       key={unit.unit.id} scope={scope} delivery={delivery} unit={unit}
       implementationInputs={implementationInputs ?? {}}
       actions={actions} openActivity={openActivity} commitNodeId={gitNodes.commit}
       onCommitBlocked={(reason) => setCommitState({ unitId: unit.unit.id, reason })}
       onAutomaticMerge={(outcome) => setMergeState({ unitId: unit.unit.id, outcome })}
-      active={Boolean(implementationInputs && currentTask) && unit.unit.id === awaitingUnit} />)}
+      active={Boolean(unitControls && implementationInputs && currentTask) && unit.unit.id === awaitingUnit} />)}
     {currentTask && last?.commitEvidenceId && finalGit && !awaitingUnit && <RepositoryDeliveryMerge key={last.commitEvidenceId}
       scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={mergeOutcome}
       mergeNodeId={gitNodes.merge} onOutcome={(outcome) => setMergeState({ unitId: last.unit.id, outcome })} />}

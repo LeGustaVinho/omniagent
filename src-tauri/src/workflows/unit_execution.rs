@@ -256,14 +256,13 @@ impl Store {
                 else {
                     anyhow::bail!("check executor has no pinned checks");
                 };
-                let checks = self
-                    .verify_selected_candidate_with_requirements(
-                        project_id.clone(),
-                        task_id.clone(),
-                        candidate.id.clone(),
-                        names,
-                    )
-                    .await?;
+                let checks = if self.workflow_candidate_check_is_repair(
+                    project_id.clone(), run_id.clone(), node_id.clone(),
+                ).await? {
+                    self.verify_repair_candidate(project_id.clone(), task_id.clone(), candidate.id.clone(), names).await?
+                } else {
+                    self.verify_selected_candidate_with_requirements(project_id.clone(), task_id.clone(), candidate.id.clone(), names).await?
+                };
                 (
                     "checks",
                     ArtifactValue::Checks(ScopedEvidence {

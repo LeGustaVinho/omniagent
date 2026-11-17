@@ -19,6 +19,7 @@ use super::{
 
 #[cfg(test)]
 mod tests;
+pub(super) mod repair;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -74,7 +75,7 @@ impl ConditionPredicate {
             let verified = crate::repository::verification::load_scoped_candidate_verification(
                 db, &checks.task.project_id, &checks.task.task_id, &checks.id,
             )?.context("The exact candidate verification receipt is unavailable")?;
-            Ok(verified.allows_acceptance())
+            Ok(verified.passes_repair_checks())
         } else {
             Ok(self.test(&serde_json::to_value(artifact)?))
         }

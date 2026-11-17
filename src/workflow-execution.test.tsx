@@ -9,6 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
+import { WorkflowDiffStage } from "@/workflow-execution-diff";
 import type { ExecutionJob, ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -88,6 +89,44 @@ it("queues an authored planner with the pinned role model and exact wired contex
   await userEvent.setup().click(queue);
   expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", {
     input: { projectId, runId, nodeId: plan.instance.id, unitId: null, inputs: { context: "selected-document" }, selection: model, effort: "high" },
+  });
+});
+
+it("sends a selected Git candidate with its exact base, tree and pinned document input", async () => {
+  const source = node("start", "Pinned source", [], [control("start"), port("document", "markdown")]);
+  const read = node("capture-diff", "Read Git", [control("ready"), port("document", "markdown")]);
+  read.instance.kind = read.definition.kind = "read_git";
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision: null },
+    definition: { version, name: "Review diff", nodes: [source, read], wires: [
+      { from: { node: source.instance.id, port: "start" }, to: { node: read.instance.id, port: "ready" } },
+      { from: { node: source.instance.id, port: "document" }, to: { node: read.instance.id, port: "document" } },
+    ] },
+    outputs: [output("start", "pinned-doc", "document", "markdown", {})],
+    unitNodeIds: [], units: [], jobs: [], control: [],
+  };
+  const scope = { projectId, runId, nodeId: read.instance.id };
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === "workflow_diff_candidates") return [
+      { id: "frozen-selection", baseCommit: "frozen-base", tree: "frozen-tree", branch: "managed/feature", target: { taskId: "target-task" } },
+    ];
+    if (name === "execute_workflow_diff_stage") return {};
+    throw new Error(name);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <WorkflowDiffStage snapshot={snapshot} node={read} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  const apply = screen.getByRole<HTMLButtonElement>("button", { name: "Read selected Git diff" });
+  expect(apply.disabled).toBe(true);
+  await user.selectOptions(screen.getByLabelText("Saved Git candidate"), await screen.findByRole("option", { name: /managed\/feature/ }));
+  expect(screen.getByText("frozen-base")).toBeTruthy();
+  expect(screen.getByText("frozen-tree")).toBeTruthy();
+  await user.click(apply);
+  expect(invoke).toHaveBeenCalledWith("workflow_diff_candidates", scope);
+  expect(invoke).toHaveBeenCalledWith("execute_workflow_diff_stage", {
+    ...scope, inputs: { document: "pinned-doc" },
+    action: { action: "read_git", taskId: "target-task", candidateId: "frozen-selection", expectedBase: "frozen-base", expectedTree: "frozen-tree" },
   });
 });
 

@@ -77,6 +77,8 @@ pub enum ArtifactValue {
     Checks(ScopedEvidence),
     Acceptance(WorkflowAcceptanceReference),
     Git(ScopedEvidence),
+    GitInspection(super::templates::diff::GitInspection),
+    DiffReport(super::templates::diff::DiffReport),
     Merge(WorkflowMergeReference),
     CommandResult(super::WorkflowCommandResult),
     McpToolResult(super::mcp_tools::WorkflowMcpToolResult),
@@ -99,6 +101,8 @@ impl ArtifactValue {
             Self::Checks(_) => ArtifactKind::Checks,
             Self::Acceptance(_) => ArtifactKind::Acceptance,
             Self::Git(_) => ArtifactKind::Git,
+            Self::GitInspection(_) => ArtifactKind::GitInspection,
+            Self::DiffReport(_) => ArtifactKind::DiffReport,
             Self::Merge(_) => ArtifactKind::Merge,
             Self::CommandResult(_) => ArtifactKind::CommandResult,
             Self::McpToolResult(_) => ArtifactKind::McpToolResult,
@@ -297,7 +301,7 @@ impl Store {
                     run,
                     node,
                     run_id,
-                    &[BuiltinNode::ReviewPlan, BuiltinNode::ReviewCandidate],
+                    &[BuiltinNode::ReviewPlan, BuiltinNode::ReviewCandidate, BuiltinNode::ReviewDiffCandidate],
                 )
                 .await?;
             }
@@ -428,6 +432,20 @@ impl Store {
                             .await?
                             .is_some(),
                     "Git evidence is unavailable in the owning task"
+                );
+            }
+            ArtifactValue::GitInspection(inspection) => {
+                let candidate = &inspection.candidate;
+                let saved = self.selected_candidate(
+                    project.into(), candidate.target.task_id.clone(), candidate.id.clone(),
+                ).await?;
+                ensure!(saved.as_ref() == Some(candidate), "The frozen Git inspection is unavailable in this project");
+            }
+            ArtifactValue::DiffReport(_) => {
+                ensure!(
+                    self.pinned_workflow_node(project.into(), run.into(), node.into()).await?
+                        .is_some_and(|pinned| pinned.definition.kind == BuiltinNode::PublishDiffReport),
+                    "Only the pinned diff report stage can publish this result"
                 );
             }
             ArtifactValue::Merge(reference) => {

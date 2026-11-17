@@ -66,6 +66,22 @@ function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArt
       </div>;
     }
     case "git": return <GitEvidence evidence={evidence as Git} scope={scope} navigation={navigation} />;
+    case "git_inspection": {
+      const { candidate } = evidence as { candidate: { branch: string; tree: string; baseCommit: string; target: Task & { runId: string } } };
+      return <div className="workflow-execution-links">
+        <p>{candidate.branch} · <code>{candidate.tree}</code></p>
+        <p>Base <code>{candidate.baseCommit}</code></p>
+        <Button type="button" variant="outline" onClick={() => navigation.openWorkspace("git", `attempt:${candidate.target.runId}`)}>Open captured diff</Button>
+        <LinkedWork task={candidate.target} projectId={scope.projectId} navigation={navigation} />
+      </div>;
+    }
+    case "diff_report": {
+      const report = evidence as { reviewRunId: string; requiredChecksPassed: boolean; checksId: string };
+      return <div className="workflow-execution-links">
+        <p>{report.requiredChecksPassed ? "Required checks passed" : "Required checks failed"} · <code>{report.checksId}</code></p>
+        <Button type="button" variant="outline" onClick={() => navigation.openActivity(report.reviewRunId)}>Open the pinned review</Button>
+      </div>;
+    }
     case "merge": return <GitEvidence evidence={evidence as Merge} merge={evidence as Merge} scope={scope} navigation={navigation} />;
     case "plan": case "review": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { run_id: string }).run_id)}>Open source attempt</Button>;
     case "command_result": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { runId: string }).runId)}>Open command output and logs</Button>;

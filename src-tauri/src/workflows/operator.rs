@@ -283,6 +283,10 @@ impl Store {
         };
         let checkout_id = if let Some(unit) = &unit {
             unit.checkout_id.clone()
+        } else if let Some(ArtifactValue::GitInspection(git)) =
+            artifacts.get("git").map(|artifact| &artifact.value)
+        {
+            git.candidate.checkout_id.clone()
         } else if let Some(ArtifactValue::Markdown(source)) =
             artifacts.get("context").map(|artifact| &artifact.value)
         {
@@ -306,7 +310,10 @@ impl Store {
             plan_revision: plan
                 .map(|artifact| artifact.id.clone())
                 .or_else(|| unit.as_ref().map(|unit| unit.plan_revision.clone())),
-            task_id: unit.map(|unit| unit.task_id),
+            task_id: unit.map(|unit| unit.task_id).or_else(|| match artifacts.get("git").map(|artifact| &artifact.value) {
+                Some(ArtifactValue::GitInspection(git)) => Some(git.candidate.target.task_id.clone()),
+                _ => None,
+            }),
         })
     }
 }

@@ -4,7 +4,7 @@ import type { Provider } from "@/bindings/Provider";
 import type { WorkflowLaunchReceipt } from "@/workflow-launch";
 import type { StageGoalConfiguration } from "@/workflow-stage-goal";
 
-export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candidate";
+export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candidate" | "review-diff";
 export type DeliveryInputs = Record<string, string>;
 type TaskReference = { projectId: string; taskId: string };
 type ScopedEvidence = { task: TaskReference; id: string };

@@ -35,7 +35,7 @@ export function WorkflowLaunchPicker({ projectId, checkoutId, workId, preferred,
   const [selected, setSelected] = useState("");
   const inFlight = useRef<{ key: string; requestId: string } | null>(null);
   const versions = useQuery({
-    queryKey: ["published-workflows-for-launch", projectId],
+    queryKey: ["workflow-authoring-bases", projectId],
     queryFn: () => invoke<Published[]>("workflow_authoring_bases", { projectId }),
     enabled: expanded,
   });

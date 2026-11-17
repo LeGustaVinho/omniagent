@@ -16,7 +16,6 @@ use super::{
     ArtifactKind, ArtifactValue, Executor, NodeConfiguration, NodeInputs, PinnedNode, PortType,
     WorkflowDefinition, WorkflowGraph, WorkflowJobInput, WorkflowRevision, compile,
     authoring::package::roles,
-    units::PLAN_UNITS_INSTRUCTIONS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,7 +327,11 @@ impl Store {
             );
             input.markdown_revision = Some(markdown.id.clone());
             request.instructions.push_str("\n\n");
-            request.instructions.push_str(PLAN_UNITS_INSTRUCTIONS);
+            request.instructions.push_str(
+                &self
+                    .workflow_plan_unit_instructions(project_id.clone(), dispatch.pipeline_run_id.clone())
+                    .await?,
+            );
         } else {
             ensure!(
                 input.markdown_revision.is_none(),
@@ -414,6 +417,19 @@ impl Store {
                 request.checkout_id.as_ref() == Some(&candidate.checkout_id)
                     && request.task_id.as_ref() == Some(&candidate.target.task_id),
                 "candidate review cannot switch its task or registered source checkout"
+            );
+        }
+        if node.definition.kind == super::BuiltinNode::ReviewDiffCandidate {
+            ensure!(
+                !request.requires_bridge && input.pinned.is_none() && unit_id.is_none(),
+                "Diff review needs a new read-only session without a release or bridge"
+            );
+            let git = super::templates::diff::inspection(&resolved["git"])?;
+            ensure!(
+                git.candidate.target.project_id == project_id
+                    && request.checkout_id.as_ref() == Some(&git.candidate.checkout_id)
+                    && request.task_id.as_ref() == Some(&git.candidate.target.task_id),
+                "Diff review cannot switch the selected checkout or work scope"
             );
         }
         self.submit_workflow_pipeline_agent_job(

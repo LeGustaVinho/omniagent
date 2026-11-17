@@ -141,6 +141,12 @@ impl CandidateVerification {
                     || matches!(gate.outcome, Some(CandidateGateOutcome::Passed { .. }))
             })
     }
+
+    pub(crate) fn passes_repair_checks(&self) -> bool {
+        self.allows_acceptance() && self.gates.iter().any(|gate|
+            required_command(&gate.gate, gate.executable_revision.as_deref())
+                && matches!(gate.outcome, Some(CandidateGateOutcome::Passed { .. })))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,12 +377,47 @@ impl Store {
         id: String,
         required: Vec<String>,
     ) -> Result<CandidateVerification> {
+        self.verify_candidate_snapshot(project, task, id, required, None, false).await
+    }
+
+    pub(crate) async fn verify_repair_candidate(
+        &self, project: String, task: String, id: String, required: Vec<String>,
+    ) -> Result<CandidateVerification> {
+        self.verify_candidate_snapshot(project, task, id, required, None, true).await
+    }
+
+    pub(crate) async fn verify_frozen_selected_candidate(
+        &self,
+        project: String,
+        candidate: SelectedCandidate,
+        required: Vec<String>,
+    ) -> Result<CandidateVerification> {
+        ensure!(candidate.target.project_id == project, "The frozen Git candidate is outside this project");
+        self.verify_candidate_snapshot(project, candidate.target.task_id.clone(), candidate.id.clone(), required, Some(candidate), false).await
+    }
+
+    async fn verify_candidate_snapshot(
+        &self,
+        project: String,
+        task: String,
+        id: String,
+        required: Vec<String>,
+        expected: Option<SelectedCandidate>,
+        repair_check_required: bool,
+    ) -> Result<CandidateVerification> {
         let (candidate, capture, verification, gates) = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let candidate = load_selected_candidate(&tx, &project, &task, &id)?;
-            require_current(&tx, &candidate)?;
+            if let Some(expected) = expected {
+                ensure!(candidate == expected, "The saved Git candidate differs from the workflow inspection");
+            } else {
+                require_current(&tx, &candidate)?;
+            }
             let (capture, _) = load_capture(&tx, &candidate.target)?;
             let (policy_revision, gates) = policy_with_requirements(&tx, &project, required)?;
+            if repair_check_required {
+                ensure_repair_checks(&gates)?;
+            }
             let verification = Uuid::new_v4().to_string();
             tx.execute("INSERT INTO candidate_verifications(id, candidate_id, policy_revision, gates) VALUES (?1, ?2, ?3, ?4)",
                 params![verification, id, policy_revision, encode(&gates)?])?;
@@ -493,6 +534,20 @@ impl Store {
         self.execute(move |db| load_current_candidate_acceptance(db, &project, &task, &id))
             .await
     }
+}
+
+fn required_command(gate: &CandidateGate, executable_revision: Option<&str>) -> bool {
+    gate.required && executable_revision.is_some() && matches!(gate.action, CandidateGateAction::Command { .. })
+}
+
+fn ensure_repair_checks(gates: &[PinnedGate]) -> Result<()> {
+    ensure!(gates.iter().any(|gate| required_command(&gate.gate, gate.executable_revision.as_deref())),
+        "Fix failed checks needs a configured executable check marked as required");
+    Ok(())
+}
+
+pub(crate) fn require_repair_check_policy(db: &Connection, project: &str, names: Vec<String>) -> Result<()> {
+    ensure_repair_checks(&policy_with_requirements(db, project, names)?.1)
 }
 
 fn load_capture(db: &Connection, target: &CandidateTarget) -> Result<(CandidateRevision, String)> {

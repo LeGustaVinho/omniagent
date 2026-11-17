@@ -161,11 +161,12 @@ pub async fn execute_repository_delivery_host(
     store: State<'_, Store>,
     project_id: String,
     run_id: String,
+    node_id: Option<String>,
     inputs: NodeInputs,
     action: DeliveryHostAction,
 ) -> Result<WorkflowArtifact, String> {
     async {
-        let (node_id, request) = match action {
+        let (default_node, request) = match action {
             DeliveryHostAction::LinkExistingTask { task_id } => {
                 ("work", WorkflowHostRequest::LinkExistingTask { task_id })
             }
@@ -186,7 +187,7 @@ pub async fn execute_repository_delivery_host(
             .execute_workflow_host(WorkflowHostSubmission {
                 project_id,
                 run_id,
-                node_id: node_id.into(),
+                node_id: node_id.unwrap_or_else(|| default_node.into()),
                 inputs,
                 request,
             })
@@ -244,6 +245,7 @@ async fn delivery_agent_submission(
             BuiltinNode::ReviewPlan => "Review the pinned plan and explain unresolved issues. Keep the checkout read-only.",
             BuiltinNode::Implement => "Implement the pinned logical unit on the approved branch. Keep unrelated changes out of the unit. Leave the changes in the worktree for review, checks and commit approval.",
             BuiltinNode::ReviewCandidate => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
+            BuiltinNode::ReviewDiffCandidate => "Review only the frozen candidate diff against its saved base. Report findings and show which changes need correction. Keep the materialized checkout read-only.",
             _ => anyhow::bail!("select a pinned CLI agent stage"),
         }
     };
@@ -394,7 +396,7 @@ pub async fn publish_repository_delivery_evidence(
                         .parse()?,
                 },
             ),
-            BuiltinNode::ReviewPlan | BuiltinNode::ReviewCandidate => {
+            BuiltinNode::ReviewPlan | BuiltinNode::ReviewCandidate | BuiltinNode::ReviewDiffCandidate => {
                 ("review", ArtifactValue::Review { run_id: attempt_id })
             }
             _ => anyhow::bail!("this node does not publish planning or review evidence"),

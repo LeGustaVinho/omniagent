@@ -15,6 +15,7 @@ use super::{
     builtin_delivery_graph,
 };
 
+pub mod diff;
 mod repair;
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ const FACTORY_REVISION: u16 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowFactoryTemplate {
     TaskDelivery,
+    ReviewDiff,
     FixFailedChecks,
     DeliveryLibrary,
 }
@@ -45,6 +47,12 @@ pub fn workflow_factory_templates() -> Vec<WorkflowFactoryEntry> {
             name: "Task delivery",
             revision: FACTORY_REVISION,
             members: vec!["Task delivery"],
+        },
+        WorkflowFactoryEntry {
+            id: WorkflowFactoryTemplate::ReviewDiff,
+            name: "Review diff",
+            revision: FACTORY_REVISION,
+            members: vec!["Review diff"],
         },
         WorkflowFactoryEntry {
             id: WorkflowFactoryTemplate::FixFailedChecks,
@@ -82,6 +90,7 @@ impl Store {
         );
         let package = match template {
             WorkflowFactoryTemplate::TaskDelivery => task_delivery(),
+            WorkflowFactoryTemplate::ReviewDiff => diff::review_diff(),
             WorkflowFactoryTemplate::FixFailedChecks => repair::fix_failed_checks(),
             WorkflowFactoryTemplate::DeliveryLibrary => delivery_library(),
         };

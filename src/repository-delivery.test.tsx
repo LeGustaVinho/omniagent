@@ -190,3 +190,49 @@ it.each([true, false])("keeps the saved workflow's completion after reopening th
     expect(live.queryByText(firstSha)).toBeNull();
   }
 });
+
+it("routes a prepared repair workflow to its declared iteration nodes", async () => {
+  const checkout = { projectId: "project", checkoutId: "checkout", checkoutRoot: "C:/fixture/repo", repositoryRoot: "C:/fixture/repo" };
+  const task = { projectId: checkout.projectId, taskId: "repair-task" };
+  const run = { id: "repair-run", planRevision: "saved-plan" };
+  const snapshot: DeliverySnapshot = {
+    run, jobs: [], hostOutputs: { work: "linked-task", approve: "approved-plan", prepare: "prepared-worktree" },
+    definition: {
+      nodes: [{ instance: { id: "repair::iteration-1::implement", kind: "implement" }, definition: { title: "Implement" } }],
+      wires: [],
+    },
+    artifacts: [
+      { id: "saved-plan", nodeInstanceId: "plan", port: "plan", unitId: null,
+        value: { kind: "plan", evidence: { run_id: "planner", event_sequence: 1 } } },
+      { id: "linked-task", nodeInstanceId: "work", port: "task", unitId: null, value: { kind: "task", evidence: task } },
+      { id: "approved-plan", nodeInstanceId: "approve", port: "decision", unitId: null,
+        value: { kind: "approval", evidence: { planRevision: "saved-plan" } } },
+      { id: "stage-release", nodeInstanceId: "prepare", port: "release", unitId: null,
+        value: { kind: "release", evidence: { decisionArtifactId: "approved-plan", release: { id: "release", revoked: false } } } },
+      { id: "prepared-worktree", nodeInstanceId: "prepare", port: "worktree", unitId: null,
+        value: { kind: "worktree", evidence: { checkout_id: "managed-checkout", task } } },
+    ],
+  };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    switch (command) {
+      case "list_repository_markdown_revisions":
+      case "conversation_models": return [];
+      case "list_repository_deliveries": return [run];
+      case "inspect_repository_delivery": return snapshot;
+      case "project_task_delivery_state": return { state: "in_progress", checklistResolved: true, activeWorkflowRunId: run.id };
+      case "repository_delivery_units": return [{ checkoutId: "managed-checkout", taskId: task.taskId,
+        unit: { id: "repair-unit", ordinal: 1, purpose: "Restore failing checks", completionCriteria: ["Checks pass"] },
+        commitEvidenceId: null }];
+      default: throw new Error(command);
+    }
+  });
+  const openWorkspace = vi.fn();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <RepositoryDeliveryWorkspace checkout={checkout} target={run.id} simulation={null} startSimulation={vi.fn()}
+      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  expect(await screen.findByText("Continue the prepared logical unit in the execution graph.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Queue implementation" })).toBeNull();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Open execution graph" }));
+  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:repair-run");
+});

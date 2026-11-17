@@ -4,9 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{protection, store::Store};
 
-use super::{ApprovalDecision, ArtifactKind, ArtifactValue, digest};
+use super::{
+    ApprovalDecision, ArtifactKind, ArtifactValue, Executor,
+    artifacts::{load_artifact, load_plan_text},
+    digest,
+    runtime::{load_definition, load_workflow_run},
+};
 
-pub(super) const PLAN_UNITS_INSTRUCTIONS: &str = "End the proposed plan with exactly one fenced `omniagent-plan` JSON block containing {\"units\":[{\"purpose\":\"Specific purpose\",\"completionCriteria\":[\"Observable completion condition\"]}]}. List logical commit-sized units in implementation order. Use one unit for changes that belong together. Each unit must state its purpose and testable completion criteria, group related changes, and fit an independently understandable commit. Include the relevant build and test criteria where possible.";
+const PLAN_UNIT_FORMAT: &str = "End the proposed plan with exactly one fenced `omniagent-plan` JSON block containing {\"units\":[{\"purpose\":\"Specific purpose\",\"completionCriteria\":[\"Observable completion condition\"]}]}. Each unit must state its purpose and testable completion criteria. Include the relevant build and test criteria where possible.";
+const SINGLE_UNIT_INSTRUCTIONS: &str = "The units array must contain exactly one logical unit covering the entire change. Include all required fixes and checks in that unit.";
+const ORDERED_UNITS_INSTRUCTIONS: &str = "List logical commit-sized units in implementation order. Group related changes in one unit and make each unit fit an independently understandable commit.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +104,74 @@ pub(super) fn parse_plan_units(
         .collect()
 }
 
+fn requires_single_unit(db: &Connection, project: &str, workflow: &str) -> Result<bool> {
+    let Some(run) = load_workflow_run(db, project, workflow)? else {
+        return Ok(false);
+    };
+    let definition = load_definition(db, project, &run.version)?
+        .context("the pinned workflow definition is unavailable")?;
+    // Implementation only advances past the first unit after a verified commit.
+    Ok(definition
+        .nodes
+        .iter()
+        .any(|node| node.definition.executor == Executor::WriteAgent)
+        && !definition
+            .nodes
+            .iter()
+            .any(|node| node.definition.executor == Executor::VerifyGitCommit))
+}
+
+fn parse_scoped_plan_units(
+    db: &Connection,
+    revision: &str,
+    value: ArtifactValue,
+    single_unit: bool,
+) -> Result<Vec<WorkflowPlanUnit>> {
+    let ArtifactValue::Plan {
+        run_id,
+        event_sequence,
+    } = value else {
+        anyhow::bail!("plan has the wrong artifact kind");
+    };
+    let units = parse_plan_units(revision, &load_plan_text(db, &run_id, event_sequence)?)?;
+    ensure!(
+        !single_unit || units.len() == 1,
+        "an implementation workflow without a verified commit requires exactly one logical unit"
+    );
+    Ok(units)
+}
+
+pub(crate) fn validate_selected_plan_revision(
+    db: &Connection,
+    project: &str,
+    workflow: &str,
+    revision: &str,
+) -> Result<()> {
+    if requires_single_unit(db, project, workflow)? {
+        let plan = load_artifact(db, project, workflow, revision, ArtifactKind::Plan)?
+            .context("selected plan is not part of this workflow")?;
+        parse_scoped_plan_units(db, revision, plan.value, true)?;
+    }
+    Ok(())
+}
+
 impl Store {
+    pub(super) async fn workflow_plan_unit_instructions(
+        &self,
+        project: String,
+        workflow: String,
+    ) -> Result<String> {
+        self.execute(move |db| {
+            let requirements = if requires_single_unit(db, &project, &workflow)? {
+                SINGLE_UNIT_INSTRUCTIONS
+            } else {
+                ORDERED_UNITS_INSTRUCTIONS
+            };
+            Ok(format!("{PLAN_UNIT_FORMAT} {requirements}"))
+        })
+        .await
+    }
+
     pub async fn workflow_plan_units(
         &self,
         project: String,
@@ -105,18 +179,19 @@ impl Store {
         revision: String,
     ) -> Result<Vec<WorkflowPlanUnit>> {
         let plan = self
-            .resolve_workflow_artifact(project, workflow, revision.clone(), ArtifactKind::Plan)
+            .resolve_workflow_artifact(
+                project.clone(),
+                workflow.clone(),
+                revision.clone(),
+                ArtifactKind::Plan,
+            )
             .await?
             .context("selected plan is not part of this workflow")?;
-        let ArtifactValue::Plan {
-            run_id,
-            event_sequence,
-        } = plan.value
-        else {
-            anyhow::bail!("plan has the wrong artifact kind");
-        };
-        let text = self.workflow_plan_text(run_id, event_sequence).await?;
-        parse_plan_units(&revision, &text)
+        self.execute(move |db| {
+            let single_unit = requires_single_unit(db, &project, &workflow)?;
+            parse_scoped_plan_units(db, &revision, plan.value, single_unit)
+        })
+        .await
     }
 
     pub async fn workflow_delivery_units(

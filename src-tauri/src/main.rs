@@ -371,6 +371,8 @@ fn main() {
             workflow_ipc::authoring::export_workflow_exchange,
             workflow_ipc::templates::workflow_factory_templates,
             workflow_ipc::templates::create_workflow_factory_draft,
+            workflow_ipc::templates::workflow_diff_candidates,
+            workflow_ipc::templates::execute_workflow_diff_stage,
             workflow_ipc::authoring::describe_workflow_reusable_boundary,
             workflow_ipc::authoring::derive_workflow_reusable,
             workflow_ipc::authoring::describe_workflow_reusable_node,

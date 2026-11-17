@@ -34,6 +34,16 @@ pub(crate) fn stage_job_input(
     request: &JobRequest,
     input: &WorkflowJobInput,
 ) -> Result<()> {
+    stage_job_input_with_repair(db, project, binding, request, input).map(|_| ())
+}
+
+pub(crate) fn stage_job_input_with_repair(
+    db: &Connection,
+    project: &str,
+    binding: &PipelineDispatch,
+    request: &JobRequest,
+    input: &WorkflowJobInput,
+) -> Result<Option<String>> {
     let pinned = load_pinned_node(
         db,
         project,
@@ -57,6 +67,7 @@ pub(crate) fn stage_job_input(
         );
         super::plan_revision::check_revision_admission(db, project, binding, revision)?;
     }
+    let mut repair_feedback = None;
     if let Some(unit_id) = &input.unit_id {
         let task = request
             .task_id
@@ -96,13 +107,14 @@ pub(crate) fn stage_job_input(
                 !open_writer,
                 "logical unit already has an active implementation job"
             );
+            repair_feedback = super::control::repair::repair_instruction(db, binding, &unit)?;
         }
     }
     db.execute(
         "INSERT INTO workflow_job_admissions VALUES (?1, ?2)",
         params![binding.pipeline_run_id, binding.node_instance_id],
     )?;
-    Ok(())
+    Ok(repair_feedback)
 }
 
 pub(crate) fn bind_job_input(
@@ -162,6 +174,18 @@ impl Store {
             )?;
             let (project, workflow, node, checkout) = origin;
             let pinned = load_pinned_node(db, &project, &workflow, &node)?.context("workflow review node is unavailable")?;
+            if pinned.definition.kind == BuiltinNode::ReviewDiffCandidate {
+                let id = input.artifacts.get("git").context("Diff review needs a pinned Git inspection")?;
+                let artifact = load_artifact(db, &project, &workflow, id, ArtifactKind::GitInspection)?
+                    .context("The pinned Git inspection is unavailable")?;
+                let candidate = &super::templates::diff::inspection(&artifact)?.candidate;
+                ensure!(input.unit_id.is_none() && candidate.checkout_id == checkout
+                    && crate::repository::verification::load_selected_candidate(
+                        db, &project, &candidate.target.task_id, &candidate.id,
+                    )? == *candidate,
+                    "The diff review's candidate or checkout changed");
+                return Ok(Some(candidate.clone()));
+            }
             if pinned.definition.kind != BuiltinNode::ReviewCandidate { return Ok(None); }
             let id = input.artifacts.get("candidate").context("the candidate review was scheduled without a candidate")?;
             let artifact = load_artifact(db, &project, &workflow, id, ArtifactKind::Candidate)?.context("the review's selected candidate is unavailable")?;

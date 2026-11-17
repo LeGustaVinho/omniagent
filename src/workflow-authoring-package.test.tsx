@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowPackageList } from "@/workflow-authoring-package";
-import { exampleCheckout } from "@/workbench-contract";
+import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -38,14 +38,24 @@ const published = {
   ],
 };
 
-function mount({ stale = false }: { stale?: boolean } = {}) {
-  let draft: { package: { name: string; members: object[] }; revision: string; publication: unknown } = initial;
+function mount({ stale = false, publication = null, openWorkspace = vi.fn() }: {
+  stale?: boolean; publication?: typeof published | null; openWorkspace?: WorkspaceProps["openWorkspace"];
+} = {}) {
+  let draft: { package: { name: string; members: object[] }; revision: string; publication: unknown } = { ...initial, publication };
+  const note = { id: "saved-brief", relativePath: "brief.md", sha256: "a".repeat(64) };
   vi.mocked(invoke).mockImplementation(async (name, input) => {
     switch (name) {
       case "inspect_workflow_package": return draft;
       case "conversation_models": return [];
       case "workflow_package_catalog": return [artifact];
       case "read_published_workflow_package_artifact": return artifact;
+      case "workflow_authoring_bases": return [
+        { name: "Earlier version", version: { id: "different-pipeline", revision: "earlier" } },
+        { name: "Pipeline", version: { id: "different-pipeline", revision: "result-v1" } },
+      ];
+      case "list_repository_markdown_revisions": return [note];
+      case "read_repository_markdown": return { revision: note, markdown: "Saved brief" };
+      case "launch_workflow_manual": return { id: "published-run" };
       case "save_workflow_package": {
         const { package: saved } = input as { package: typeof draft.package };
         draft = { ...draft, package: saved, revision: published.reviewedRevision };
@@ -60,7 +70,7 @@ function mount({ stale = false }: { stale?: boolean } = {}) {
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" simulation={null}
-      openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} startSimulation={vi.fn()} />
+      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} startSimulation={vi.fn()} />
   </QueryClientProvider>);
   return userEvent.setup();
 }
@@ -134,4 +144,25 @@ it("preserves the whole draft and displays the current published revision on con
   expect(conflict.getByText("updated-elsewhere")).toBeTruthy();
   expect(screen.getByText(published.reviewedRevision)).toBeTruthy();
   expect(screen.getByRole("list", { name: "Saved package members" }).textContent).toContain("Repository checker");
+});
+
+it("runs the exact pipeline from its package receipt and opens its execution graph", async () => {
+  const openWorkspace = vi.fn();
+  const user = mount({ publication: published, openWorkspace });
+  await user.click(await screen.findByRole("button", { name: "Run published workflow" }));
+  const version = await screen.findByRole<HTMLSelectElement>("combobox", { name: "Published workflow revision" });
+  expect(version.selectedOptions[0]?.textContent).toContain("Pipeline · result-v1");
+  await user.click(await screen.findByText("Read saved Markdown"));
+  expect(screen.getByText("Saved brief")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Start workflow" }));
+  expect(invoke).toHaveBeenCalledWith("launch_workflow_manual", {
+    request: {
+      projectId: exampleCheckout.projectId,
+      workflow: { id: "different-pipeline", revision: "result-v1" },
+      source: { checkoutId: exampleCheckout.checkoutId, revisionId: "saved-brief" },
+      workId: null,
+      requestId: expect.any(String),
+    },
+  });
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:published-run"));
 });

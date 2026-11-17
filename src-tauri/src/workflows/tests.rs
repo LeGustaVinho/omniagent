@@ -701,6 +701,18 @@ pub(super) async fn link_reviewed_plan_fixture(
     planned_text: &str,
     task_title: &str,
 ) -> Result<(WorkflowArtifact, WorkflowArtifact, WorkflowArtifact)> {
+    let alternative = "Alternative: deliver only the first change.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]}]}\n```";
+    let (plans, _) =
+        workflow_plan_candidates_fixture(store, repo, run, [planned_text, alternative]).await?;
+    link_reviewed_plan_candidates_fixture(store, repo, task_id, run, plans, task_title).await
+}
+
+pub(super) async fn workflow_plan_candidates_fixture(
+    store: &Store,
+    repo: &ProjectCheckout,
+    run: &WorkflowRun,
+    [planned_text, alternative]: [&str; 2],
+) -> Result<([WorkflowArtifact; 2], Vec<crate::conversations::MessageRevision>)> {
     let project = repo.project_id.clone();
     let root = Path::new(&repo.checkout_root);
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
@@ -758,7 +770,7 @@ pub(super) async fn link_reviewed_plan_fixture(
         .await?;
     store.record_agent_observation(planned.run.id.clone(), EventSource::Provider, ProviderEvent {
         location: ProviderLocation::default(), data: ProviderEventData::PlanProposed {
-            text: "Alternative: deliver only the first change.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]}]}\n```".into(),
+            text: alternative.into(),
             source: PlanSource::CodexPlanItem,
         },
     }).await?;
@@ -800,6 +812,18 @@ pub(super) async fn link_reviewed_plan_fixture(
             },
         )
         .await?;
+    Ok(([plan, alternate_plan], planned.input))
+}
+
+pub(super) async fn link_reviewed_plan_candidates_fixture(
+    store: &Store,
+    repo: &ProjectCheckout,
+    task_id: Option<String>,
+    run: &WorkflowRun,
+    [plan, alternate_plan]: [WorkflowArtifact; 2],
+    task_title: &str,
+) -> Result<(WorkflowArtifact, WorkflowArtifact, WorkflowArtifact)> {
+    let project = repo.project_id.clone();
     store
         .set_job_pipeline_plan(project.clone(), run.id.clone(), None, plan.id.clone())
         .await?;
@@ -815,7 +839,10 @@ pub(super) async fn link_reviewed_plan_fixture(
     reviewer.scope.profile_id = "fixture-independent-review".into();
     store.submit_workflow_agent(reviewer).await?;
     let reviewed = store
-        .claim_next_job(env())
+        .claim_next_job(AdmissionEnvironment {
+            runner: "fixture-runner".into(),
+            bridge_available: false,
+        })
         .await?
         .context("plan review was not admitted")?;
     store.mark_agent_running(reviewed.run.id.clone()).await?;
@@ -846,6 +873,13 @@ pub(super) async fn link_reviewed_plan_fixture(
         None => WorkflowHostRequest::CreateTask {
             title: task_title.into(),
         },
+    };
+    let host = |node: &str, inputs, request| WorkflowHostSubmission {
+        project_id: project.clone(),
+        run_id: run.id.clone(),
+        node_id: node.into(),
+        inputs,
+        request,
     };
     let task = store
         .execute_workflow_host(host("work", links.clone(), work.clone()))

@@ -10,6 +10,8 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
+import { workflowRunTarget } from "@/workflow-execution-model";
+import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 import type { WorkflowGraph } from "@/workflow-graph-model";
 
@@ -219,6 +221,9 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
           <strong>{artifact.name}</strong> · {artifact.version.kind.replaceAll("_", " ")} · {artifact.version.destination}
           <p className="break-all"><code>{artifact.version.id}</code> · <code>{artifact.version.revision}</code></p>
           <WorkflowEditorAssistance projectId={projectId} checkoutId={checkoutId} artifact={artifact} openWorkspace={openWorkspace} />
+          {artifact.version.kind === "pipeline" && artifact.version.destination === "project" && !artifact.blockers.length &&
+            <WorkflowLaunchPicker projectId={projectId} checkoutId={checkoutId} preferred={artifact.version}
+              openWorkspace={(workspace, target) => openWorkspace(workspace, target && workflowRunTarget(target))} />}
           {artifact.body.graph && <WorkflowReusableDerivation projectId={projectId} graph={artifact.body.graph}
             source={{ type: "published", version: artifact.version }} disabled={false} onSaved={openDerived} />}
           {artifact.blockers.map((blocker) => <p key={blocker}>{blocker}</p>)}

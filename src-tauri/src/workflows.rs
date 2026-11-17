@@ -66,6 +66,7 @@ pub(crate) use command::publish_command_result;
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
 pub use iteration::{BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration, ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem, WorkflowJsonList};
 pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input};
+pub(crate) use job_inputs::stage_job_input_with_repair;
 pub use launch::{
     ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
 };
@@ -87,6 +88,7 @@ pub use unit_execution::{WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitS
 pub use units::{WorkflowDeliveryUnit, WorkflowPlanUnit};
 pub(crate) use units::{
     bind_delivery_commit, load_delivery_unit, load_delivery_units, validate_unit_capture,
+    validate_selected_plan_revision,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

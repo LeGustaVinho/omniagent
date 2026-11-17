@@ -12,6 +12,7 @@ import { controlForNode, wiredExecutionInputs, type ExecutionPinnedNode, type Ex
 
 const agentStages = new Map<string, DeliveryNode>([
   ["plan", "plan"], ["review_plan", "review-plan"], ["implement", "implement"], ["review_candidate", "review-candidate"],
+  ["review_diff_candidate", "review-diff"],
 ]);
 
 export function WorkflowExecutionAgent({ snapshot, node, unit, openActivity }: {
