@@ -2,11 +2,11 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { reconcileFavoriteItems } from "@/checkout-favorites";
+import { moveCheckoutFavorites, reconcileFavoriteItems, saveCheckoutFavoriteGroup, setCheckoutFavorites, useCheckoutFavorites } from "@/checkout-favorites";
 import { FileTree, type FileTreeTarget } from "@/ide-file-workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -146,6 +146,98 @@ it("filters Windows attributes separately and reveals a favorite hidden folder w
   await rootCommand("Show Windows hidden items");
   expect(screen.getByRole("button", { name: "root-secret.md" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: ".dot.md" })).toBeNull();
+});
+
+it("groups legacy favorites through the shared explorer menus and keeps assignments in the exact worktree", async () => {
+  const checkoutId = "grouped worktree";
+  const key = `omniagent:checkout-favorites:${encodeURIComponent(checkoutId)}`;
+  localStorage.setItem(key, JSON.stringify([
+    { kind: "folder", path: "docs" },
+    { kind: "file", path: "docs/note.md" },
+    { kind: "file", path: "code.ts" },
+  ]));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const onOpen = vi.fn();
+  function fixture(workspace: "ide" | "knowledge" = "ide", currentCheckout = checkoutId, folder = "docs") {
+    return <QueryClientProvider client={client}><FileTree paths={workspace === "ide" ? [`${folder}/note.md`, "code.ts"] : [`${folder}/note.md`]}
+      folders={[folder]} checkoutId={currentCheckout} workspace={workspace} simulated={false} actions={() => []} onOpen={onOpen} /></QueryClientProvider>;
+  }
+  const mounted = render(fixture());
+  const user = userEvent.setup();
+  const favorites = () => within(screen.getByRole("region", { name: "Favorites" }));
+  const group = (name: string) => within(favorites().getByRole("region", { name: `Favorite group ${name}` }));
+  async function createGroup(name: string) {
+    fireEvent.contextMenu(root());
+    await user.click(await screen.findByRole("menuitem", { name: "New favorite group…" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New favorite group" }));
+    await user.type(dialog.getByRole("textbox", { name: "Group name" }), name);
+    await user.click(dialog.getByRole("button", { name: "Create group" }));
+  }
+  async function moveFavorite(button: HTMLElement, name: string) {
+    fireEvent.contextMenu(button);
+    const groups = await screen.findByRole("menuitem", { name: "Move to favorite group" });
+    groups.focus();
+    await user.keyboard("{ArrowRight}");
+    await user.click(await screen.findByRole("menuitem", { name: `Move to ${name}` }));
+  }
+
+  expect(favorites().getByRole("button", { name: /^note\.md/ })).toBeTruthy();
+  await createGroup("Reading");
+  await createGroup("Current");
+  await moveFavorite(favorites().getByRole("button", { name: /^note\.md/ }), "Reading");
+  await moveFavorite(group("Reading").getByRole("button", { name: /^note\.md/ }), "Current");
+  await moveFavorite(favorites().getByRole("button", { name: /^docs/ }), "Current");
+  expect(group("Reading").queryByRole("button", { name: /^note\.md/ })).toBeNull();
+
+  fireEvent.contextMenu(group("Current").getByRole("button", { name: "Current" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Rename favorite group…" }));
+  const rename = within(await screen.findByRole("dialog", { name: "Rename favorite group" }));
+  await user.clear(rename.getByRole("textbox", { name: "Group name" }));
+  await user.type(rename.getByRole("textbox", { name: "Group name" }), "Research");
+  await user.click(rename.getByRole("button", { name: "Rename group" }));
+  expect(group("Research").getByRole("button", { name: /^note\.md/ })).toBeTruthy();
+
+  act(() => reconcileFavoriteItems(checkoutId, (path) => path === "docs" || path.startsWith("docs/") ? `archive${path.slice(4)}` : undefined));
+  mounted.rerender(fixture("knowledge", checkoutId, "archive"));
+  const note = group("Research").getByRole("button", { name: /^note\.md/ });
+  expect(note.title).toBe("archive/note.md");
+  expect(group("Research").getByRole("button", { name: /^archive/ }).title).toBe("archive");
+  expect(favorites().queryByRole("button", { name: /^code\.ts/ })).toBeNull();
+  await user.click(note);
+  expect(onOpen).toHaveBeenCalledWith("archive/note.md");
+  await user.click(group("Research").getByRole("button", { name: /^archive/ }));
+  const physicalNote = await screen.findByRole("button", { name: "note.md" });
+  fireEvent.contextMenu(note);
+  await user.click(await screen.findByRole("menuitem", { name: "Remove from favorites" }));
+  expect(group("Research").queryByRole("button", { name: /^note\.md/ })).toBeNull();
+  expect(physicalNote.isConnected).toBe(true);
+  expect(invoke).not.toHaveBeenCalled();
+
+  mounted.rerender(fixture("knowledge", "different worktree", "archive"));
+  expect(screen.queryByRole("region", { name: "Favorites" })).toBeNull();
+  mounted.rerender(fixture("ide", checkoutId, "archive"));
+  expect(group("Research").getByRole("button", { name: /^archive/ })).toBeTruthy();
+  expect(favorites().getByRole("button", { name: /^code\.ts/ })).toBeTruthy();
+});
+
+it("keeps group assignments on repeated adds and when an exact move replaces a stale favorite path", () => {
+  const checkout = "grouped-reconciliation";
+  const source = { kind: "file", path: "before.md" } as const;
+  const destination = { kind: "file", path: "after.md" } as const;
+  const state = renderHook(() => useCheckoutFavorites(checkout));
+  act(() => {
+    setCheckoutFavorites(checkout, [source, destination], false);
+    saveCheckoutFavoriteGroup(checkout, { name: "Active", paths: [source.path] });
+    saveCheckoutFavoriteGroup(checkout, { name: "Old", paths: [destination.path] });
+    setCheckoutFavorites(checkout, [source], false);
+  });
+  const active = state.result.current.groups.find((group) => group.name === "Active")!;
+  expect(() => saveCheckoutFavoriteGroup(checkout, { name: " active " })).toThrow(/already exists/);
+  expect(state.result.current.favorites.find((favorite) => favorite.path === source.path)?.groupId).toBe(active.id);
+  act(() => reconcileFavoriteItems(checkout, (path) => path === source.path ? destination.path : undefined));
+  expect(state.result.current.favorites).toEqual([{ ...destination, groupId: active.id }]);
+  act(() => moveCheckoutFavorites(checkout, [destination.path]));
+  expect(state.result.current.favorites).toEqual([destination]);
 });
 
 it("reports a Windows-attribute lookup failure while keeping the known checkout files usable", async () => {
