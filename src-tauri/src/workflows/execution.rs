@@ -74,7 +74,8 @@ impl Store {
     ) -> Result<WorkflowArtifact> {
         self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
             self.resolve_workflow_github_base(project, checkout, destination)
-        }).await
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -85,7 +86,8 @@ impl Store {
     ) -> Result<WorkflowArtifact> {
         self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
             self.resolve_workflow_github_base_with_client(project, checkout, destination, client)
-        }).await
+        })
+        .await
     }
 
     async fn execute_workflow_host_with_base<F>(
@@ -267,9 +269,11 @@ impl Store {
                             project_id.clone(),
                             decision.source_checkout_id.clone(),
                             plan.destination_branch.clone(),
-                        ).await?;
+                        )
+                        .await?;
                         if let Some(repair) = &plan.repair {
-                            let tip = verified_tip.clone()
+                            let tip = verified_tip
+                                .clone()
                                 .context("The GitHub retry lost its verified destination")?;
                             let managed = self
                                 .live_managed_worktree(project_id.clone(), task.task_id.clone())
@@ -289,8 +293,11 @@ impl Store {
                                         == expected,
                                     "The task worktree advanced after the failed CI revision"
                                 );
-                                integration.registered_tip(db, &project, &checkout)
-                                    .context("The GitHub destination lost the previously tested history")?;
+                                integration
+                                    .registered_tip(db, &project, &checkout)
+                                    .context(
+                                        "The GitHub destination lost the previously tested history",
+                                    )?;
                                 Ok(())
                             })
                             .await?;
@@ -468,10 +475,18 @@ impl Store {
                     "brief"
                 ) | (super::BuiltinNode::OpenOrUpdatePullRequest, "risk")
                     | (super::BuiltinNode::MergePullRequest, "approval")
+                    | (
+                        super::BuiltinNode::MaterializeBacklog,
+                        "design" | "strategy"
+                    )
             ) || pinned.instance.kind
                 == super::BuiltinNode::AcceptCandidate
                 && matches!(pinned.instance.configuration, NodeConfiguration::None)
-                && matches!(port.name.as_str(), "quality" | "build");
+                && matches!(port.name.as_str(), "quality" | "build")
+                || pinned.instance.kind == super::BuiltinNode::VerifyCandidate
+                    && port.name == "strategy"
+                    && !matches!(&pinned.instance.configuration, NodeConfiguration::StagedChecks { strategy_checks, .. }
+                        if !strategy_checks.is_empty());
             if source.is_none()
                 && (mcp_arguments || optional_agent_input || optional_delivery_input)
             {

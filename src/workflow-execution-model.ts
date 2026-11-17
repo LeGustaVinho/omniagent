@@ -109,6 +109,11 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
       if (["implement", "review_candidate"].includes(node.definition.kind) && port.name === "brief") continue;
       if (node.definition.kind === "accept_candidate" && node.instance.configuration.kind === "none"
         && ["quality", "build"].includes(port.name)) continue;
+      if (node.definition.kind === "verify_candidate" && port.name === "strategy") {
+        const checks = node.instance.configuration.strategyChecks;
+        if (node.instance.configuration.kind !== "staged_checks" || !Array.isArray(checks) || checks.length === 0) continue;
+      }
+      if (node.definition.kind === "materialize_backlog" && ["design", "strategy"].includes(port.name)) continue;
       return null;
     }
     const selected = controlForNode(snapshot, wire.from.node, unit);
