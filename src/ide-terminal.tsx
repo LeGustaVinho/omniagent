@@ -357,11 +357,28 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     const directory = attachment.current?.directoryAt?.(reference.bufferLine);
     setReferenceMenu({ terminal, reference, point: { x, y }, directory });
   }
+  function openSelectedPath() {
+    const current = attachment.current;
+    if (!current) return;
+    const { terminal, directoryAt } = current;
+    const text = terminal.getSelection().trim();
+    if (!text) return;
+    if (text.length >= 32_767 || /[\r\n\0]/u.test(text)) {
+      navigateSequence.current++;
+      setFileError("Select a single checkout path.");
+      return;
+    }
+    const reference = parseTerminalPathReference(text, true) ?? { path: text, text };
+    const row = terminal.getSelectionPosition()?.start.y;
+    restoringTerminalFocus.current = false;
+    openReference(terminal, reference, directoryAt?.(row));
+  }
   function addContext(text: string) {
     restoringTerminalFocus.current = false;
     onContextText?.(text);
   }
   const terminalActions: MenuGroups = [[
+    ...(onOpenFile || onRevealFolder ? [{ label: "Open selected checkout path", disabled: !hasSelection, run: openSelectedPath }] : []),
     { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
       const selection = terminal.getSelection();
       return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();

@@ -18,6 +18,7 @@ type FixtureTerminal = {
   paste: ReturnType<typeof vi.fn>;
   linkProvider?: ILinkProvider;
   selected: string;
+  selectionRow?: number;
   onOsc?: (data: string) => boolean;
   onScreenClear?: () => boolean;
   onTerminalResize?: () => void;
@@ -52,6 +53,7 @@ vi.mock("@xterm/xterm", () => ({
     paste = vi.fn();
     element?: HTMLElement;
     selected = "";
+    selectionRow?: number;
     linkProvider?: ILinkProvider;
     open(element: HTMLElement) {
       this.element = element;
@@ -65,7 +67,10 @@ vi.mock("@xterm/xterm", () => ({
     }
     getSelection() { return this.selected; }
     hasSelection() { return Boolean(this.selected); }
-    getSelectionPosition() { return undefined; }
+    getSelectionPosition() {
+      if (this.selectionRow === undefined) return;
+      return { start: { x: 0, y: this.selectionRow } };
+    }
     private readonly oscHandlers: ((data: string) => boolean)[] = [];
     onOsc = (data: string) => this.oscHandlers.findLast((callback) => callback(data)) !== undefined;
     onScreenClear?: () => boolean;
@@ -552,4 +557,74 @@ it("keeps each relative file reference bound to its authenticated PowerShell pro
   }));
   expect(onOpenFile).toHaveBeenNthCalledWith(1, String.raw`C:\checkout/src/main.ts`, 1, undefined);
   expect(onOpenFile).toHaveBeenNthCalledWith(2, String.raw`C:\checkout\subdirectory/src/main.ts`, 2, undefined);
+});
+
+it("opens explicitly selected path names using the selected output's directory without adding automatic links", async () => {
+  fixture.lines = [{ text: "src", isWrapped: false }, { text: "README", isWrapped: false }, { text: "finished", isWrapped: false }];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "start_manual_terminal") return { checkoutId: "linked", terminalId: "terminal-token" };
+    if (command === "resolve_manual_terminal_path") {
+      const { path } = args as { path: string };
+      if (path === "src") return { kind: "folder", path: "earlier/src" };
+      if (path === "README") return { kind: "file", path: "later/README" };
+      throw new Error("This terminal reference does not resolve to a matching path in the current checkout.");
+    }
+  });
+  const onOpenFile = vi.fn();
+  const onRevealFolder = vi.fn();
+  const onContextText = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId="linked" relativeDirectory="initial" active autoStart
+    onOpenFile={onOpenFile} onRevealFolder={onRevealFolder} onContextText={onContextText} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const surface = screen.getByLabelText("Manual PowerShell terminal");
+  const terminal = fixture.terminals[0]!;
+  const earlier = String.raw`C:\linked\earlier`;
+  const later = String.raw`C:\linked\later`;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(earlier)}`);
+  fixture.cursorRow = 1;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(later)}`);
+  for (const row of [1, 3]) terminal.linkProvider?.provideLinks(row, (links) => expect(links).toBeUndefined());
+
+  const select = (text: string, row: number) => act(() => {
+    terminal.selected = text;
+    terminal.selectionRow = row;
+    terminal.onTerminalSelection?.();
+  });
+  const action = () => screen.findByRole("menuitem", { name: "Open selected checkout path" });
+  fireEvent.contextMenu(surface);
+  expect((await action()).getAttribute("aria-disabled")).toBe("true");
+  await user.keyboard("{Escape}");
+  select("src", 0);
+  fireEvent.keyDown(surface, { key: "F10", shiftKey: true });
+  await user.click(await action());
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", relativeDirectory: "initial", observedDirectory: earlier, path: "src", expectedKind: undefined,
+  });
+  expect(onRevealFolder).toHaveBeenCalledExactlyOnceWith("earlier/src");
+
+  select("README", 1);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", relativeDirectory: "initial", observedDirectory: later, path: "README", expectedKind: undefined,
+  });
+  expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("later/README", undefined, undefined);
+
+  select("finished", 2);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect((await screen.findByRole("alert")).textContent).toContain("matching path in the current checkout");
+  expect(onOpenFile).toHaveBeenCalledTimes(1);
+  expect(onRevealFolder).toHaveBeenCalledTimes(1);
+  fireEvent.contextMenu(surface);
+  await user.click(await screen.findByRole("menuitem", { name: "Add selection to conversation…" }));
+  expect(onContextText).toHaveBeenCalledExactlyOnceWith("finished");
+
+  const pathCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "resolve_manual_terminal_path").length;
+  select("src\nREADME", 0);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect((await screen.findByRole("alert")).textContent).toBe("Select a single checkout path.");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "resolve_manual_terminal_path")).toHaveLength(pathCalls);
 });
