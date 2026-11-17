@@ -13,7 +13,7 @@ import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
 import { FileDialog } from "@/ide-file-workspace";
 import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
-import { fileContextActions, isGitCheckoutTarget, isNewWorktreeTarget, openWorkspaceFile, readFileHistoryTarget, readWorkingDiffTarget } from "@/file-context-actions";
+import { fileContextActions, isGitCheckoutTarget, isNewWorktreeTarget, openWorkspaceFile, readFileHistoryTarget, readWorkingDiffTarget, terminalFolderTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
@@ -50,9 +50,11 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
   const [requestedFile, setRequestedFile] = useState(() => readWorkingDiffTarget(props.target));
   const [historyPath, setHistoryPath] = useState(() => readFileHistoryTarget(props.target));
   const [tab, setTab] = useState<Tab>(() => tabFor(props.target));
+  const [savedWorktree, setSavedWorktree] = useState<Pick<ProjectCheckout, "checkoutId" | "checkoutRoot">>();
   const [creating, setCreating] = useState<{ checkoutId: string; base?: WorktreeBase }>();
   useEffect(() => {
     setTab(tabFor(props.target));
+    setSavedWorktree(undefined);
     const file = readWorkingDiffTarget(props.target);
     const history = readFileHistoryTarget(props.target);
     setRequestedFile(file);
@@ -70,7 +72,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
     setCreating({ checkoutId: source, base });
   };
 
-  return <GitWorkspaceFrame tabs={tabs} active={tab} select={setTab} controls={tab !== "Saved attempts" && <>
+  return <GitWorkspaceFrame tabs={tabs} active={tab} select={(view) => { setSavedWorktree(undefined); setTab(view); }} controls={tab !== "Saved attempts" && <>
     <label className="ml-auto min-w-0"><span className="sr-only">Git worktree</span>
       <select className="delivery-filter w-full max-w-60" value={checkoutId} onChange={(event) => {
         setRequestedFile(undefined);
@@ -84,7 +86,8 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
       onClick={() => openWorktreeSetup(checkoutId)}><Plus size={14} /> New worktree</Button>}
     <Button type="button" variant="ghost" aria-label="Refresh Git review" title="Refresh Git review" onClick={() => void review.refetch()}><RefreshCw size={15} aria-hidden /></Button>
   </>}>
-    {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={props.target} openActivity={props.openActivity} /> : <>
+    {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={savedWorktree ? undefined : props.target}
+      worktree={savedWorktree} openActivity={props.openActivity} /> : <>
       {review.isPending && <p role="status" className="p-4 text-sm text-muted-foreground">Loading Git review…</p>}
       {review.error && <div className="p-4"><InlineIssue>{String(review.error)}</InlineIssue></div>}
       {review.data && !review.error && <>
@@ -96,7 +99,8 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
           setRequestedFile(undefined);
           setCheckout(id);
           if (view) { setHistoryPath(undefined); setTab(view); }
-        }} createFrom={openWorktreeSetup} />}
+        }} createFrom={openWorktreeSetup} openCheckoutWorkspace={props.openCheckoutWorkspace}
+          openAttempts={(selected) => { setSavedWorktree(selected); setTab("Saved attempts"); }} />}
         {creating && creating.checkoutId === review.data.checkoutId && <CreateGitWorktree projectId={props.checkout.projectId}
           review={review.data} startingPoint={creating.base}
           select={(id) => { setCreating(undefined); setCheckout(id); setTab("Worktrees"); }} close={() => setCreating(undefined)} />}
@@ -167,12 +171,27 @@ function CreateGitWorktree({ projectId, review, startingPoint, select, close }: 
   />;
 }
 
-function WorktreeTable({ review, project, select, createFrom }: {
+function WorktreeTable({ review, project, select, createFrom, openCheckoutWorkspace, openAttempts }: {
   review: CheckoutReview; project: ProjectCheckout; select: (id: string, view?: Tab) => void;
   createFrom: (checkoutId: string, base: WorktreeBase) => void;
+  openCheckoutWorkspace: WorkspaceProps["openCheckoutWorkspace"];
+  openAttempts: (worktree: Pick<ProjectCheckout, "checkoutId" | "checkoutRoot">) => void;
 }) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  async function openWorktree(checkoutId: string, target?: string) {
+    if (!openCheckoutWorkspace) return;
+    setError("");
+    setStatus("");
+    try {
+      const checkouts = await invoke<ProjectCheckout[]>("registered_checkouts");
+      const checkout = checkouts.find((item) => item.checkoutId === checkoutId && item.projectId === project.projectId);
+      if (!checkout) throw new Error("This worktree is no longer registered in the current project.");
+      await openCheckoutWorkspace(checkout, { workspace: "ide", target });
+    } catch (error) {
+      setError(String(error));
+    }
+  }
   return <div className="delivery-main p-4">
     <h3 className="mb-3 text-sm font-semibold">Repository worktrees</h3>
     {status && <p role="status" className="mb-2 text-xs">{status}</p>}
@@ -189,6 +208,11 @@ function WorktreeTable({ review, project, select, createFrom }: {
               { label: "Use worktree", disabled: selected, run: () => select(checkoutId) },
               { label: "Review worktree changes", run: () => select(checkoutId, "Changes") },
               { label: "Open worktree history", run: () => select(checkoutId, "History") },
+              ...(openCheckoutWorkspace ? [
+                { label: "Open worktree in IDE", run: () => void openWorktree(checkoutId) },
+                { label: "Open terminal in worktree", run: () => void openWorktree(checkoutId, terminalFolderTarget("")) },
+              ] : []),
+              { label: "View saved attempts for worktree", run: () => openAttempts({ checkoutId, checkoutRoot: tree.root }) },
               ...(head ? [{ label: "Create worktree from this HEAD…", run: () => createFrom(checkoutId, {
                 reference: head, expectedHead: head, label: `${branch ?? "Detached HEAD"} · ${head.slice(0, 12)}`,
               }) }] : []),

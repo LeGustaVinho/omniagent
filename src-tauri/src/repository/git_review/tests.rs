@@ -1639,7 +1639,7 @@ async fn reviews_real_worktrees_and_updates_only_the_selected_index_path() -> Re
         fs::read_to_string(root.join(changed))?,
         "second unsaved version\n"
     );
-    assert!(store.git_saved_attempts(main.project_id).await?.is_empty());
+    assert!(store.git_saved_attempts(main.project_id, None).await?.is_empty());
     Ok(())
 }
 

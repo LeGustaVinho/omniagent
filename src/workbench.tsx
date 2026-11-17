@@ -198,6 +198,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
       openActivity: (runId, conversationId, requestId) => showSide({
         type: "activity", runId, conversationId, focusQuestion: requestId === undefined ? undefined : { requestId },
       }),
+      openCheckoutWorkspace: simulation ? undefined : async (selected, destination) => {
+        if (selected.projectId !== checkout.projectId) throw new Error("This worktree is unavailable in the current project.");
+        if (selected.checkoutId === checkout.checkoutId) setRealNavigation((current) => show(destination.workspace, destination.target, current));
+        else await onSelectCheckout(selected, undefined, destination);
+      },
       openChanges: (target) => showSide({ type: "changes", target }),
       openQueueJob: simulation ? undefined : (jobId) => {
         setQueueFocus({ projectId: checkout.projectId, jobId });

@@ -400,9 +400,10 @@ pub async fn commit_git_index(
 pub async fn git_saved_attempts(
     store: State<'_, Store>,
     project_id: String,
+    checkout_id: Option<String>,
 ) -> Result<Vec<SavedGitAttempt>, String> {
     store
-        .git_saved_attempts(project_id)
+        .git_saved_attempts(project_id, checkout_id)
         .await
         .map_err(review_error)
 }

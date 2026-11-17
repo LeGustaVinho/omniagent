@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
-import { fileHistoryTarget, newWorktreeTarget } from "@/file-context-actions";
+import { fileHistoryTarget, newWorktreeTarget, readTerminalFolderTarget } from "@/file-context-actions";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -532,6 +532,43 @@ it("registers a manual worktree from the shared dialog and selects the returned 
   });
   const row = await screen.findByRole("row", { name: /new-local/ });
   expect(within(row).getByRole("button", { name: "Selected" })).toBeTruthy();
+});
+
+it("opens the clicked registered worktree in the IDE or terminal and filters its recorded Git attempts", async () => {
+  const linked = { ...checkout, checkoutId: "linked-task", checkoutRoot: "C:/linked" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, worktrees, branches, managed: false,
+      revision: originalRevision, changes: [],
+    };
+    if (command === "registered_checkouts") return [checkout, { ...linked, projectId: "foreign-project" }, linked];
+    if (command === "git_saved_attempts") return (payload as { checkoutId?: string }).checkoutId === linked.checkoutId
+      ? [{ runId: "linked-run", checkoutId: linked.checkoutId, label: "Linked attempt" }]
+      : [{ runId: "local-run", checkoutId: checkout.checkoutId, label: "Local attempt" }];
+    if (command === "attempt_worktree_evidence") return null;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const openCheckoutWorkspace = vi.fn<NonNullable<WorkspaceProps["openCheckoutWorkspace"]>>(async () => {});
+  openGit({ target: "worktrees", openCheckoutWorkspace });
+  const table = within(await screen.findByRole("table", { name: "Git worktrees" }));
+  fireEvent.contextMenu(table.getByText("C:/external"));
+  expect(screen.queryByRole("menuitem", { name: "Open worktree in IDE" })).toBeNull();
+  await user.keyboard("{Escape}");
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree in IDE" }));
+  await waitFor(() => expect(openCheckoutWorkspace).toHaveBeenCalledWith(linked, { workspace: "ide", target: undefined }));
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Open terminal in worktree" }));
+  await waitFor(() => expect(openCheckoutWorkspace).toHaveBeenLastCalledWith(linked, { workspace: "ide", target: expect.any(String) }));
+  expect(readTerminalFolderTarget(openCheckoutWorkspace.mock.lastCall?.[1].target)).toBe("");
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "View saved attempts for worktree" }));
+  expect(await screen.findByRole("option", { name: /^Linked attempt/ })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: /^Local attempt/ })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_saved_attempts", { projectId: checkout.projectId, checkoutId: linked.checkoutId });
+  await user.click(screen.getByRole("button", { name: "Saved attempts" }));
+  expect(await screen.findByRole("option", { name: /^Local attempt/ })).toBeTruthy();
 });
 
 it("compares live paths and sends the current index, branch and HEAD for each staging change", async () => {

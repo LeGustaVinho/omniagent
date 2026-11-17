@@ -43,17 +43,20 @@ const captureDetails = (artifact: ChangeArtifact) => [
 ];
 
 type SavedGitDiffsProps = {
-  projectId: string; target?: string; openActivity: WorkspaceProps["openActivity"]; onClose?: () => void;
+  projectId: string; target?: string; worktree?: Pick<WorkspaceProps["checkout"], "checkoutId" | "checkoutRoot">;
+  openActivity: WorkspaceProps["openActivity"]; onClose?: () => void;
 };
 
 export function SavedGitDiffs(props: SavedGitDiffsProps) {
-  return <RecordedAttempts key={`${props.projectId}:${props.target ?? ""}`} {...props} />;
+  return <RecordedAttempts key={JSON.stringify([props.projectId, props.target, props.worktree?.checkoutId])} {...props} />;
 }
 
-function RecordedAttempts({ projectId, target, openActivity, onClose }: SavedGitDiffsProps) {
-  const requested = target?.startsWith("attempt:") ? target.slice("attempt:".length) : undefined;
+function RecordedAttempts({ projectId, target, worktree, openActivity, onClose }: SavedGitDiffsProps) {
+  const requested = !worktree && target?.startsWith("attempt:") ? target.slice("attempt:".length) : undefined;
   const [selected, select] = useState(requested);
-  const attempts = useQuery({ queryKey: ["git-saved-attempts", projectId], queryFn: () => invoke<SavedAttempt[]>("git_saved_attempts", { projectId }), retry: false });
+  const checkoutId = worktree?.checkoutId;
+  const attempts = useQuery({ queryKey: ["git-saved-attempts", projectId, checkoutId],
+    queryFn: () => invoke<SavedAttempt[]>("git_saved_attempts", checkoutId ? { projectId, checkoutId } : { projectId }), retry: false });
   const runId = selected ?? attempts.data?.[0]?.runId ?? "";
   const loadEvidence = (id: string) => invoke<Evidence | null>("attempt_worktree_evidence", { projectId, runId: id });
   const evidence = useQuery({
@@ -69,6 +72,7 @@ function RecordedAttempts({ projectId, target, openActivity, onClose }: SavedGit
     else openActivity(id);
   }
   return <GitDiffFrame source="saved" title="Saved diff" onClose={onClose}>
+    {worktree && <p className="border-b border-border px-3 py-2 text-sm">Worktree <code className="wrap-anywhere">{worktree.checkoutRoot}</code></p>}
     <div className="delivery-toolbar delivery-filters items-end">
       <label className="delivery-field min-w-0 flex-1">Recorded attempt
         <select className="delivery-filter" value={runId} onChange={(event) => select(event.target.value)} disabled={!runId}>

@@ -357,7 +357,11 @@ impl Store {
         }
     }
 
-    pub async fn git_saved_attempts(&self, project: String) -> Result<Vec<SavedGitAttempt>> {
+    pub async fn git_saved_attempts(
+        &self,
+        project: String,
+        checkout: Option<String>,
+    ) -> Result<Vec<SavedGitAttempt>> {
         self.execute(move |db| {
             let mut query = db.prepare(
                 "SELECT r.id, r.checkout_id, coalesce(t.title, 'Repository attempt'), agent.conversation_id,
@@ -367,9 +371,10 @@ impl Store {
                  JOIN agent_attempts agent ON agent.run_id = r.id
                  JOIN jobs j ON j.id = a.job_id LEFT JOIN project_tasks t ON t.project_id = j.project_id AND t.id = j.task_id
                  WHERE j.project_id = ?1 AND candidate.capture_confirmed = 1
+                   AND (?2 IS NULL OR r.checkout_id = ?2)
                  ORDER BY r.created_at DESC, r.id LIMIT 100",
             )?;
-            Ok(query.query_map(params![project], |row| Ok(SavedGitAttempt {
+            Ok(query.query_map(params![project, checkout], |row| Ok(SavedGitAttempt {
                 run_id: row.get(0)?, checkout_id: row.get(1)?, label: row.get(2)?,
                 conversation_id: row.get(3)?, history_deleted: row.get(4)?,
             }))?
