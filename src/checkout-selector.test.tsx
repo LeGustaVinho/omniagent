@@ -10,7 +10,7 @@ import { readTerminalFolderTarget, terminalFolderTarget } from "@/file-context-a
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-afterEach(() => { cleanup(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); localStorage.clear(); });
 
 it("opens the clicked worktree folder from the chooser without switching projects", async () => {
   const clicked = { ...exampleCheckout, checkoutId: "linked-checkout", checkoutRoot: "C:\\worktrees\\review" };
@@ -44,4 +44,33 @@ it("opens the scoped terminal in the clicked checkout and gives repeated request
   expect(onSelect.mock.calls[0]![1].target).not.toBe(onSelect.mock.calls[1]![1].target);
   expect(readTerminalFolderTarget(terminalFolderTarget("docs/[drafts]"))).toBe("docs/[drafts]");
   expect(readTerminalFolderTarget("omni-terminal-folder:[drafts]")).toBe("[drafts]");
+});
+
+it("favorites the exact project from a linked worktree and keeps it first across mounts", async () => {
+  const primary = { ...exampleCheckout, repositoryRoot: "C:/Projects/Primary", checkoutRoot: "C:/Projects/Primary" };
+  const other = { projectId: "other-project", repositoryRoot: "C:/Projects/Other", checkoutId: "other-root", checkoutRoot: "C:/Projects/Other" };
+  const linked = { ...other, checkoutId: "other-linked", checkoutRoot: "C:/Worktrees/Other linked" };
+  vi.mocked(invoke).mockResolvedValue([primary, other, linked]);
+  const onSelect = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const chooser = () => <QueryClientProvider client={client}><CheckoutSelector checkout={primary} onSelect={onSelect} /></QueryClientProvider>;
+  const user = userEvent.setup();
+  const open = async () => {
+    await user.click(screen.getByRole("button", { name: "Switch repository or worktree" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Registered checkouts" }));
+    const rows = await dialog.findAllByRole("listitem");
+    return rows.map((row) => within(row).getByRole("button", { name: /^(Primary|Other) / }).getAttribute("title"));
+  };
+  const original = render(chooser());
+  expect(await open()).toEqual([primary.checkoutRoot, other.checkoutRoot, linked.checkoutRoot]);
+  fireEvent.contextMenu(screen.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Favorite project" }));
+  expect(await screen.findByText("Added Other to project favorites.")).toBeTruthy();
+  expect(onSelect).not.toHaveBeenCalled();
+  original.unmount();
+  render(chooser());
+  expect(await open()).toEqual([other.checkoutRoot, linked.checkoutRoot, primary.checkoutRoot]);
+  fireEvent.contextMenu(screen.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Remove project from favorites" }));
+  expect(await screen.findByText("Removed Other from project favorites.")).toBeTruthy();
 });

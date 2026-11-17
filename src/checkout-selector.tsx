@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, FolderGit2, GitFork } from "lucide-react";
+import { ChevronDown, FolderGit2, GitFork, Star } from "lucide-react";
 import { Popover } from "radix-ui";
 import { useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
@@ -14,6 +14,17 @@ function basename(path: string) {
 }
 
 const checkoutAreas: [WorkspaceId, string][] = [["ide", "IDE"], ["knowledge", "Knowledge"], ["git", "Git"], ["conversations", "Conversations"]];
+const favoriteProjectsKey = "omniagent-favorite-projects";
+
+function readFavoriteProjects(): ReadonlySet<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(favoriteProjectsKey) ?? "[]");
+    if (Array.isArray(saved)) return new Set(saved.filter((id): id is string => typeof id === "string" && id !== ""));
+  } catch {
+    return new Set();
+  }
+  return new Set();
+}
 
 export function CheckoutSelector({ checkout, onSelect, disabled }: {
   checkout: ProjectCheckout | null;
@@ -24,11 +35,30 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [favorites, setFavorites] = useState(readFavoriteProjects);
   const registered = useQuery({
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
     enabled: open,
   });
+  const checkouts = [...(registered.data ?? [])].sort((left, right) =>
+    Number(favorites.has(right.projectId)) - Number(favorites.has(left.projectId)));
+
+  function toggleFavorite(project: ProjectCheckout) {
+    const next = new Set(favorites);
+    const removed = next.delete(project.projectId);
+    if (!removed) next.add(project.projectId);
+    setFavorites(next);
+    setStatus("");
+    setError("");
+    try {
+      localStorage.setItem(favoriteProjectsKey, JSON.stringify([...next]));
+      const name = basename(project.repositoryRoot);
+      setStatus(removed ? `Removed ${name} from project favorites.` : `Added ${name} to project favorites.`);
+    } catch (failure) {
+      setError(`Could not save project favorites. ${String(failure)}`);
+    }
+  }
 
   async function select(checked: ProjectCheckout, destination?: WorkspaceDestination) {
     setPending(true);
@@ -64,8 +94,9 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
         {status && <p role="status">{status}</p>}
         {registered.data?.length === 0 && <p>No registered repositories yet.</p>}
         <ul>
-          {registered.data?.map((item) => {
+          {checkouts.map((item) => {
             const selected = item.checkoutId === checkout?.checkoutId;
+            const favorite = favorites.has(item.projectId);
             const actions = fileContextActions({ checkout: item, simulated: false, status: setStatus,
               report: (message) => { setStatus(""); setError(message); } });
             return <li key={item.checkoutId}>
@@ -78,13 +109,16 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
                 { label: "Open terminal here", disabled: pending, run: () => void select(item, { workspace: "ide", target: terminalFolderTarget("") }) },
                 { label: "Create worktree…", disabled: pending, run: () => void select(item, { workspace: "git", target: newWorktreeTarget() }) },
               ], [
+                { label: favorite ? "Remove project from favorites" : "Favorite project", disabled: pending, run: () => toggleFavorite(item) },
                 { label: "Copy repository path", run: () => actions.copy(item.repositoryRoot, "Copied repository path") },
                 { label: "Copy checkout ID", run: () => actions.copy(item.checkoutId, "Copied checkout ID") },
               ], ...actions.location({ kind: "root", path: "" })]}>
                 <button className="work-project-option" type="button" aria-current={selected ? "true" : undefined}
+                  aria-label={`${basename(item.repositoryRoot)} · ${item.checkoutRoot}`} aria-description={favorite ? "Favorite project" : undefined}
                   disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
                   {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
                   <span><strong>{basename(item.repositoryRoot)}</strong><small>{item.checkoutRoot}</small></span>
+                  {favorite && <Star aria-hidden size={14} className="ml-auto shrink-0 fill-current text-primary" />}
                 </button>
               </ContextActions>
             </li>;
