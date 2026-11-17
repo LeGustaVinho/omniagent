@@ -220,6 +220,14 @@ pub(crate) fn bind_workflow_trigger_origin(
 pub(crate) struct WorkStateChanges(Vec<(String, TaskWorkflowState)>);
 
 impl WorkStateChanges {
+    pub(super) fn include(&mut self, other: Self) {
+        for (id, state) in other.0 {
+            if !self.0.iter().any(|(saved_id, _)| *saved_id == id) {
+                self.0.push((id, state));
+            }
+        }
+    }
+
     pub(crate) fn capture(db: &Connection, project: &str, task: &str) -> Result<Self> {
         load_project_task(db, project, task)?.context("work is outside the selected project")?;
         let mut statement = db.prepare(

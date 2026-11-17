@@ -186,6 +186,7 @@ it("uses a checkout's indexed edges to focus a canonical tab and keeps identitie
   await act(async () => { reference.target().emit("tap"); });
   await waitFor(() => expect(screen.queryByRole("list", { name: "Graph notes" })).toBeNull());
   expect(screen.getAllByRole("button", { name: "Close Guia.md" })).toHaveLength(1);
+  await user.click(fileTree.getByText("planos", { selector: "summary" }));
   expect(fileTree.getByRole("button", { name: "Guia.md" }).getAttribute("aria-current")).toBe("page");
   expect(invoke).toHaveBeenCalledWith("open_repository_document", { checkoutId: alpha, path: guide });
 

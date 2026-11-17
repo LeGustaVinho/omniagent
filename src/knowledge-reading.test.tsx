@@ -35,3 +35,12 @@ it("renders note syntax on the same source while keeping comments and active HTM
   expect(container.textContent).not.toContain("source-only comment");
   expect(container.querySelector("script")).toBeNull();
 });
+
+it("maps a source-line jump after frontmatter and an expanded embed to the rendered paragraph", () => {
+  const source = "---\r\nstatus: ready\r\n---\r\n# Start\r\n\r\n![[Details]]\r\n\r\nJump here.\r\n\r\nAfter.";
+  const { container } = render(<NoteReading path="Release.md" content={source}
+    files={[{ path: "Details.md", content: "# Details\n\nEmbedded paragraph." }]}
+    jump={{ line: 8, token: 1 }} onLink={vi.fn()} onAttachment={vi.fn()} />);
+
+  expect(container.querySelector("[data-note-line-target]")?.nextElementSibling).toBe(screen.getByText("Jump here."));
+});

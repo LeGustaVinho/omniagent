@@ -52,6 +52,13 @@ async function openConversation(browser, title) {
 async function splitFiles(browser, paths, workspace, split) {
   const dock = browser.$(`section[aria-label=${JSON.stringify(workspace + " workspace")}]`);
   for (const path of paths) {
+    const folders = path.split("/").slice(0, -1);
+    for (let depth = 1; depth <= folders.length; depth += 1) {
+      const folder = JSON.stringify(folders.slice(0, depth).join("/"));
+      if (!await dock.$(`details[open] > summary[title=${folder}]`).isExisting()) {
+        await click(dock, `summary[title=${folder}]`);
+      }
+    }
     await click(dock, `button.file-tree-row[title=${JSON.stringify(path)}]`);
     await dock.$(`.file-tab-label[title=${JSON.stringify(path)}]`).waitForDisplayed();
   }

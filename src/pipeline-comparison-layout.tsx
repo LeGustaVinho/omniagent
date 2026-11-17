@@ -31,3 +31,10 @@ export function PipelineComparisonCard({ name, state, rating, children }: {
     {children}
   </li>;
 }
+
+export function PipelineComparisonChoice({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return <label className="pipeline-checkline">
+    <input type="checkbox" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} />
+    Use this result
+  </label>;
+}

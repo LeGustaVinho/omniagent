@@ -1,19 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, Pause, Play, Plus, RefreshCw } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { ArrowRight, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { ModelOption } from "@/bindings/ModelOption";
-import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { QueueState } from "@/bindings/QueueState";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { JobFailurePanel } from "@/job-failure";
-import { ModelPicker } from "@/components/model-picker";
-import { Button } from "@/components/ui/button";
-import { QueueEmpty, QueueLayout } from "@/queue-layout";
+import {
+  AddQueueJobButton, PendingQueueJobActions, QueueButton, QueueEmpty, QueueJobActions, QueueJobFacts, QueueJobForm,
+  QueueLayout, QueuePauseButton, QueueRecoveryButton, type QueueJobDraft,
+} from "@/queue-layout";
 import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, type QueueView } from "@/queue-model";
 import { QueuePolicy } from "@/queue-policy";
 import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
@@ -70,8 +70,6 @@ function firstWaitReason(inspection: JobInspection) {
   return "—";
 }
 
-const buttonClass = "px-2.5 py-1.5 text-xs";
-
 type ParentAttempt = { runId: string; mode: SessionMode };
 
 function ManagedJobForm({ checkout, parent, onQueued, onClose }: Pick<WorkspaceProps, "checkout"> & {
@@ -80,56 +78,28 @@ function ManagedJobForm({ checkout, parent, onQueued, onClose }: Pick<WorkspaceP
   onClose: () => void;
 }) {
   const [provider, setProvider] = useState<Provider>("codex");
-  const [selection, setSelection] = useState<ModelSelection | null>(null);
-  const [mode, setMode] = useState<SessionMode>("read_only");
-  const [instructions, setInstructions] = useState("");
   const models = useQuery({
     queryKey: ["conversation-models", provider],
     queryFn: () => invoke<{ option: ModelOption }[]>("conversation_models", { provider }),
     staleTime: 60_000,
   });
   const options = models.data?.map(({ option }) => option) ?? [];
-  const selected = options.find(({ selection: model, selectable }) => selectable && model.provider === selection?.provider
-    && model.profileId === selection.profileId && model.modelId === selection.modelId);
   const enqueue = useMutation({
-    mutationFn: (model: ModelSelection) => invoke<Job>("enqueue_managed_agent_job", {
+    mutationFn: (draft: QueueJobDraft) => invoke<Job>("enqueue_managed_agent_job", {
       projectId: checkout.projectId, checkoutId: checkout.checkoutId, parentRunId: parent?.runId ?? null,
-      selection: model, mode, instructions: instructions.trim(),
+      ...draft,
     }),
     onSuccess: ({ id }) => onQueued(id),
   });
 
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (selected && instructions.trim() && !enqueue.isPending) enqueue.mutate(selected.selection);
-  }
-
-  return (
-    <form aria-label={parent ? "Managed subagent" : "Managed job"} className="grid gap-3 border-b border-border p-3" onSubmit={submit}>
-      <label className="delivery-field">Instructions<textarea required className="delivery-filter min-h-20" value={instructions}
-        onChange={(event) => setInstructions(event.target.value)} disabled={enqueue.isPending} /></label>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <label className="delivery-field">CLI<select className="delivery-filter" value={provider} disabled={enqueue.isPending} onChange={(event) => {
-          setProvider(event.target.value as Provider);
-          setSelection(null);
-        }}><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option></select></label>
-        <ModelPicker label="Model" options={options} loading={models.isPending} disabled={enqueue.isPending}
-          selection={{ mode: "single", selected: selection, onChange: setSelection }} />
-        <label className="delivery-field">Operation<select className="delivery-filter" value={mode} disabled={enqueue.isPending}
-          onChange={(event) => setMode(event.target.value as SessionMode)}>
-          <option value="read_only">Read only</option><option value="plan">Plan</option>
-          {(!parent || parent.mode === "approved_write") && <option value="approved_write">Repository write</option>}
-        </select></label>
-      </div>
-      {models.isError && <div className="flex flex-wrap items-center gap-2"><InlineIssue>{String(models.error)}</InlineIssue>
-        <Button type="button" variant="outline" className={buttonClass} disabled={models.isFetching} onClick={() => void models.refetch()}>Refresh models</Button></div>}
+  return <QueueJobForm provider={provider} onProvider={setProvider} options={options} loading={models.isPending}
+    pending={enqueue.isPending} child={Boolean(parent)} allowWrite={!parent || parent.mode === "approved_write"}
+    onSubmit={enqueue.mutate} onCancel={onClose} feedback={<>
+      {models.isError && <QueueJobActions><InlineIssue>{String(models.error)}</InlineIssue>
+        <QueueButton variant="outline" disabled={models.isFetching} onClick={() => void models.refetch()}>Refresh models</QueueButton>
+      </QueueJobActions>}
       {enqueue.isError && <InlineIssue>{String(enqueue.error)}</InlineIssue>}
-      <div className="flex gap-2">
-        <Button type="submit" className={buttonClass} disabled={!selected || !instructions.trim() || enqueue.isPending}>{parent ? "Queue subagent" : "Queue job"}</Button>
-        <Button type="button" variant="outline" className={buttonClass} disabled={enqueue.isPending} onClick={onClose}>Cancel</Button>
-      </div>
-    </form>
-  );
+    </>} />;
 }
 
 function ApprovalReview({ projectId, approvalId, busy, onAction }: {
@@ -147,12 +117,12 @@ function ApprovalReview({ projectId, approvalId, busy, onAction }: {
       {request.isPending && <p role="status">Loading the approval request…</p>}
       {request.isError && <p role="alert">{String(request.error)}</p>}
       {request.data && <pre aria-label="Requested instructions" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2">{request.data.instructions}</pre>}
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" className={buttonClass} disabled={busy || !request.isSuccess}
-          onClick={() => onAction({ type: "approval", approvalId, approved: true })}>Approve job</Button>
-        <Button type="button" variant="outline" className={buttonClass} disabled={busy}
-          onClick={() => onAction({ type: "approval", approvalId, approved: false })}>Decline job</Button>
-      </div>
+      <QueueJobActions>
+        <QueueButton disabled={busy || !request.isSuccess}
+          onClick={() => onAction({ type: "approval", approvalId, approved: true })}>Approve job</QueueButton>
+        <QueueButton variant="outline" disabled={busy}
+          onClick={() => onAction({ type: "approval", approvalId, approved: false })}>Decline job</QueueButton>
+      </QueueJobActions>
     </div>
   );
 }
@@ -174,28 +144,29 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
     Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding") || inspection.queuedQuestion);
   const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
   const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
+  const pipeline = job.pipeline;
 
   return <>
         {attempt?.cancelRequested && <InlineIssue>Cancellation requested. Waiting for the runtime to confirm the outcome.</InlineIssue>}
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm">
-          <dt className="text-muted-foreground">Job ID</dt><dd className="break-all font-mono text-xs">{job.id}</dd>
-          <dt className="text-muted-foreground">Requester</dt><dd className="break-all">{jobRequester(inspection)}</dd>
-          <dt className="text-muted-foreground">Worktree</dt><dd className="break-all font-mono text-xs">{ownCheckout ? checkout.checkoutRoot : job.checkoutId}</dd>
-          <dt className="text-muted-foreground">Profile mode</dt><dd>{job.mode.replaceAll("_", " ")}</dd>
-          <dt className="text-muted-foreground">Priority</dt><dd>{job.priority}</dd>
-          {job.pipeline && <>
-            <dt className="text-muted-foreground">Pipeline run</dt><dd className="break-all">{job.pipeline.pipelineRunId}</dd>
-            <dt className="text-muted-foreground">Node instance</dt><dd className="break-all">{job.pipeline.nodeInstanceId}</dd>
-            {job.pipeline.planRevision && <><dt className="text-muted-foreground">Plan revision</dt><dd className="break-all">{job.pipeline.planRevision}</dd></>}
-            {job.pipeline.release && <>
-              <dt className="text-muted-foreground">Implementation release</dt><dd className="break-all">{job.pipeline.release.id}</dd>
-              <dt className="text-muted-foreground">Released scope</dt><dd className="break-all">{job.pipeline.release.taskId} · {job.pipeline.release.checkoutId}</dd>
-            </>}
-          </>}
-          <dt className="text-muted-foreground">Attempt</dt><dd>{attempt ? `#${attempt.ordinal}` : "Awaiting dispatch"}</dd>
-          {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
-          {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
-        </dl>
+        <QueueJobFacts facts={[
+          { label: "Job ID", value: job.id, mono: true },
+          { label: "Requester", value: jobRequester(inspection) },
+          { label: "Worktree", value: ownCheckout ? checkout.checkoutRoot : job.checkoutId, mono: true },
+          { label: "Profile mode", value: job.mode.replaceAll("_", " ") },
+          { label: "Priority", value: job.priority },
+          ...(pipeline ? [
+            { label: "Pipeline run", value: pipeline.pipelineRunId, mono: true },
+            { label: "Node instance", value: pipeline.nodeInstanceId, mono: true },
+          ] : []),
+          ...(pipeline?.planRevision ? [{ label: "Plan revision", value: pipeline.planRevision, mono: true }] : []),
+          ...(pipeline?.release ? [
+            { label: "Implementation release", value: pipeline.release.id, mono: true },
+            { label: "Released scope", value: `${pipeline.release.taskId} · ${pipeline.release.checkoutId}`, mono: true },
+          ] : []),
+          { label: "Attempt", value: attempt ? `#${attempt.ordinal}` : "Awaiting dispatch" },
+          ...(attempt ? [{ label: "Run ID", value: attempt.runId, mono: true }] : []),
+          ...(attempt?.recovery ? [{ label: "Recovery", value: attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input" }] : []),
+        ]} />
         {attempt && !inspection.questionWait && (!job.downstreamWait || job.downstreamWait.state === "needs_review")
           && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
@@ -228,38 +199,29 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
             </li>)}
           </ul>
         </section>}
-        <div className="flex flex-wrap gap-2">
-          {pending && <>
-            <Button type="button" variant="outline" className={buttonClass} disabled={busy}
-              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: job.queueState === "paused" ? "queued" : "paused" })}>
-              {job.queueState === "paused" ? "Resume job" : "Pause job"}
-            </Button>
-            <Button type="button" variant="outline" className={buttonClass} disabled={busy}
-              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>
-              {inspection.queuedQuestion ? "Cancel queued answer" : "Cancel pending job"}
-            </Button>
-          </>}
-          {savedQuestions && <Button type="button" variant="outline" className={buttonClass} disabled={busy}
-            onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel saved questions</Button>}
-          {running && <Button type="button" variant="outline" className={buttonClass} disabled={busy || attempt.cancelRequested}
+        <QueueJobActions>
+          {pending && <PendingQueueJobActions paused={job.queueState === "paused"} queuedAnswer={inspection.queuedQuestion} disabled={busy}
+            onPauseToggle={() => onAction({ type: "pending_state", jobId: job.id, state: job.queueState === "paused" ? "queued" : "paused" })}
+            onCancel={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })} />}
+          {savedQuestions && <QueueButton variant="outline" disabled={busy}
+            onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel saved questions</QueueButton>}
+          {running && <QueueButton variant="outline" disabled={busy || attempt.cancelRequested}
             onClick={() => onAction({ type: "interrupt", jobId: job.id, runId: attempt.runId })}>
             {attempt.cancelRequested ? "Interrupting…" : "Interrupt attempt"}
-          </Button>}
-          {running && ownCheckout && job.kind === "agent" && <Button type="button" variant="outline" className={buttonClass}
-            disabled={busy || attempt.cancelRequested} onClick={() => onAddChild({ runId: attempt.runId, mode: job.mode })}>Add subagent</Button>}
-          {attempt && inspection.recoveryActions.map((action) => <Button type="button" variant="outline" key={action}
-            className={buttonClass} disabled={busy} onClick={() => onAction({ type: "recovery", jobId: job.id, runId: attempt.runId, action })}>
-            {action === "retry" ? "Retry saved input" : "Resume from checkpoint"}
-          </Button>)}
-          {conversationId && ownCheckout && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("conversations", conversationId)}>Open conversation <ArrowRight size={13} /></Button>}
+          </QueueButton>}
+          {running && ownCheckout && job.kind === "agent" && <QueueButton variant="outline"
+            disabled={busy || attempt.cancelRequested} onClick={() => onAddChild({ runId: attempt.runId, mode: job.mode })}>Add subagent</QueueButton>}
+          {attempt && inspection.recoveryActions.map((action) => <QueueRecoveryButton key={action} action={action}
+            disabled={busy} onClick={() => onAction({ type: "recovery", jobId: job.id, runId: attempt.runId, action })} />)}
+          {conversationId && ownCheckout && <QueueButton variant="outline" onClick={() => openWorkspace("conversations", conversationId)}>Open conversation <ArrowRight size={13} aria-hidden /></QueueButton>}
           {conversationId && !ownCheckout && <p className="w-full text-xs text-muted-foreground">Select the linked worktree to open this conversation.</p>}
-          {job.taskId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} /></Button>}
-          {attempt && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>
+          {job.taskId && <QueueButton variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} aria-hidden /></QueueButton>}
+          {attempt && <QueueButton variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>
             {inspection.questionWait ? "Open originating turn" : "Inspect attempt"}
-          </Button>}
-          {attempt?.previousRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</Button>}
-          {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>{job.operatorRequested ? "Open parent run" : "Open requesting run"}</Button>}
-        </div>
+          </QueueButton>}
+          {attempt?.previousRunId && <QueueButton variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</QueueButton>}
+          {requestingRunId && <QueueButton variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>{job.operatorRequested ? "Open parent run" : "Open requesting run"}</QueueButton>}
+        </QueueJobActions>
   </>;
 }
 
@@ -301,16 +263,12 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
   return <QueueLayout occupancy={occupancy} paused={settings?.paused ?? false} onClose={onClose}
     view={view} onViewChange={setView} onSelect={setSelected} onDeselect={() => setSelected(undefined)}
     actions={<>
-      {active && <Button type="button" className={buttonClass} disabled={showSetup} onClick={() => setSetup({ checkoutId: checkout.checkoutId })}>
-        <Plus size={14} aria-hidden="true" /> Add job
-      </Button>}
-      {settings && <Button type="button" variant="outline" className={buttonClass} disabled={control.isPending}
-        onClick={() => control.mutate({ type: "pause_queue", paused: !settings.paused })}>
-        {settings.paused ? <><Play size={14} aria-hidden="true" /> Resume queue</> : <><Pause size={14} aria-hidden="true" /> Pause queue</>}
-      </Button>}
-      <Button type="button" variant="outline" className={buttonClass} disabled={query.isFetching} onClick={() => void query.refetch()} aria-label="Refresh queue">
+      {active && <AddQueueJobButton disabled={showSetup} onClick={() => setSetup({ checkoutId: checkout.checkoutId })} />}
+      {settings && <QueuePauseButton paused={settings.paused} disabled={control.isPending}
+        onClick={() => control.mutate({ type: "pause_queue", paused: !settings.paused })} />}
+      <QueueButton variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()} aria-label="Refresh queue">
         <RefreshCw size={14} aria-hidden="true" /> Refresh
-      </Button>
+      </QueueButton>
     </>}
     controls={<>
       {control.isError && <div className="px-3 py-2"><InlineIssue>{String(control.error)}</InlineIssue></div>}

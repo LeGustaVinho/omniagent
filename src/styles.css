@@ -231,12 +231,13 @@ button:disabled { cursor: default; }
 }
 
 .work-shade { position: fixed; inset: 0; z-index: 59; background: #0008; }
-.work-queue-panel { flex: 0 0 min(56%, 480px); min-height: 140px; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid var(--border); }
-.work-inspector { display: flex; flex-direction: column; width: 320px; flex: none; border-left: 1px solid var(--border); background: var(--card); }
-.work-inspector[data-kind="changes"] { width: clamp(390px, 51vw, 1000px); }
+.work-queue-panel { --queue-default-height: min(56%, 480px); flex: 0 0 clamp(min(140px, 85%), var(--panel-height, var(--queue-default-height)), 85%); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid var(--border); }
+.work-inspector { --inspector-default-width: 320px; display: flex; flex-direction: column; width: clamp(min(240px, 84%), var(--panel-width, var(--inspector-default-width)), 84%); flex: none; border-left: 1px solid var(--border); background: var(--card); }
+.work-inspector[data-kind="changes"] { --inspector-default-width: clamp(390px, 51vw, 1000px); }
 .work-inspector[data-expanded="true"] { width: calc(100vw - 48px); }
-.work-inspector-drawer { position: fixed; inset: 0 0 0 auto; z-index: 60; max-width: calc(100vw - 24px); box-shadow: -12px 0 28px #0006; }
-.work-inspector-drawer[data-kind="changes"] { width: min(740px, calc(100vw - 24px)); }
+.work-inspector[data-expanded="true"] > .panel-resize-handle { display: none; }
+.work-inspector-drawer { position: fixed; inset: 0 0 0 auto; z-index: 60; width: clamp(min(240px, 90vw), var(--panel-width, var(--inspector-default-width)), calc(100vw - 24px)); box-shadow: -12px 0 28px #0006; }
+.work-inspector-drawer[data-kind="changes"] { --inspector-default-width: 740px; }
 .work-inspector-drawer[data-expanded="true"] { width: 100vw; max-width: 100vw; }
 
 .work-panel-header {
@@ -357,7 +358,7 @@ button:disabled { cursor: default; }
   .work-titlebar { gap: 8px; }
   .work-breadcrumb :is(.work-crumb-divider, .work-current-area) { display: none; }
   .work-reset span { display: none; }
-  .work-queue-panel { flex-basis: 70%; }
+  .work-queue-panel { --queue-default-height: 70%; }
 }
 @media (max-width: 510px) {
   .work-titlebar .work-brand-name { display: none; }

@@ -67,6 +67,84 @@ it("opens the real Builder from the Runs empty state", async () => {
   expect(openWorkspace).toHaveBeenCalledWith("pipelines", "drafts");
 });
 
+it("hands selected saved responses to the exact plan review and queues only after user confirmation", async () => {
+  const plan = node("planner", "Plan", [], [port("plan", "plan")]);
+  const review = node("review_plan", "Plan review", [port("plan", "plan")], [port("review", "review")]);
+  const planRevision = "saved-plan";
+  const origin = "plan-attempt";
+  const reviewer = { provider: "codex", profileId: "reviewer-profile", modelId: "reviewer-model" } as const;
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision },
+    definition: { version, name: "Authored workflow", nodes: [plan, review], wires: [
+      { from: { node: plan.instance.id, port: "plan" }, to: { node: review.instance.id, port: "plan" } },
+    ] },
+    outputs: [output(plan.instance.id, planRevision, "plan", "plan", { run_id: origin, event_sequence: 2 })],
+    unitNodeIds: [], units: [], control: [],
+    jobs: [job(plan.instance.id, [{ runId: origin, previousRunId: null, conversationId: null, status: "succeeded", ordinal: 1 }])],
+    rolePins: [{
+      nodeId: review.instance.id, nodeRevision: review.revision, requirementsOnly: false,
+      version: { destination: "project", kind: "role", id: "reviewer", revision: "reviewer-r1" },
+      role: { name: "Reviewer", model: reviewer, effort: null, toolScope: "read_only", reviewPolicy: "cross_review" },
+    }],
+  };
+  const wrongCheckout = { ...snapshot, run: { ...snapshot.run, id: "foreign-checkout-run" },
+    jobs: snapshot.jobs.map((row) => ({ ...row, job: { ...row.job, checkoutId: "wrong-checkout" } })) };
+  const commit = "a".repeat(40);
+  const group = {
+    id: "review-comparison", sourceCheckoutId: exampleCheckout.checkoutId, commit, tree: "worktree",
+    prompt: "Review the exact document", candidates: [
+      { selection: reviewer, jobId: "source-job", runId: "source-result", dispatchId: "source-dispatch", state: "succeeded" },
+      { selection: reviewer, jobId: "failed-job", runId: "failed-run", dispatchId: null, state: "failed" },
+    ],
+  };
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
+    switch (command) {
+      case "conversation_models": return (input as { provider: string }).provider === "codex"
+        ? [{ option: { selection: reviewer, name: "Reviewer model", selectable: true, rating: null } }] : [];
+      case "comparison_source_commit": return commit;
+      case "model_comparisons": return [group];
+      case "model_comparison_outcomes": return [{
+        jobId: "source-job", runId: "source-result", response: "Saved comparison response", reasoning: [], failure: null,
+        reportedModel: null, durationSeconds: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null,
+      }];
+      case "model_comparison_environments": return [];
+      case "list_repository_deliveries": return [wrongCheckout.run, snapshot.run];
+      case "inspect_workflow_execution": return (input as { runId: string }).runId === runId ? snapshot : wrongCheckout;
+      case "submit_repository_delivery_agent": return job(review.instance.id, []).job;
+      default: throw new Error(command);
+    }
+  });
+  function Harness() {
+    const [target, setTarget] = useState("compare");
+    return <PipelinesWorkspace checkout={exampleCheckout} target={target} simulation={null} startSimulation={vi.fn()}
+      openWorkspace={(_workspace, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
+  }
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <Harness />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("checkbox", { name: "Use this result" }));
+  await user.click(screen.getByRole("button", { name: "Use in pipeline" }));
+  const destination = within(screen.getByRole("region", { name: "Comparison destination" }));
+  const runs = await destination.findByRole("combobox", { name: "Workflow run" });
+  await user.selectOptions(runs, wrongCheckout.run.id);
+  expect(await destination.findByText(/no eligible plan-review stage/)).toBeTruthy();
+  expect(destination.getByRole<HTMLButtonElement>("button", { name: "Open plan review" }).disabled).toBe(true);
+  await user.selectOptions(runs, runId);
+  await user.selectOptions(await destination.findByRole("combobox", { name: "Plan-review stage" }), review.instance.id);
+  await user.click(destination.getByRole("button", { name: "Open plan review" }));
+  const inspector = within(await screen.findByRole("complementary", { name: "Execution node evidence" }));
+  expect((await inspector.findByRole<HTMLInputElement>("checkbox", { name: /source-result/ })).checked).toBe(true);
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "submit_repository_delivery_agent")).toBe(false);
+  const queue = inspector.getByRole<HTMLButtonElement>("button", { name: "Queue plan review" });
+  await waitFor(() => expect(queue.disabled).toBe(false));
+  await user.click(queue);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", { input: {
+    projectId, runId, nodeId: review.instance.id, unitId: null, inputs: { plan: planRevision }, selection: reviewer, effort: null,
+    comparison: { groupId: group.id, runIds: ["source-result"] },
+  } }));
+});
+
 it("queues an authored planner with the pinned role model and exact wired context", async () => {
   const source = node("frozen-context", "Saved context", [], [control("loaded"), port("context", "markdown")]);
   const plan = node("design-stage", "Design plan", [control("ready"), port("context", "markdown")], [port("plan", "plan")]);

@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { GitDiffReview, type GitTextComparison } from "@/git-diff-view";
-import { InlineIssue } from "@/tasks-git-ui";
+import { GitDiffSourceSelect } from "@/git-workspace-frame";
+import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
 
 type ReviewRevision = { branch: string | null; head: string | null; index: string | null };
 type FileStatus = { path: string; staged: string | null; working: string | null };
@@ -12,7 +13,10 @@ export type Worktree = { checkoutId: string | null; root: string; branch: string
 export type CheckoutReview = { checkoutId: string; root: string; revision: ReviewRevision; managed: boolean; changes: FileStatus[]; branches: Branch[]; worktrees: Worktree[] };
 type FileSide = { status: "missing" } | { status: "text"; content: string } | { status: "unavailable"; reason: string };
 type Source = "working" | "staged";
-type LiveDiff = { path: string; source: Source; original: FileSide; modified: FileSide };
+type TextDiff = { path: string; original: FileSide; modified: FileSide };
+type BranchRevisions = { base: string; head: string; mergeBase: string };
+const reviewSources = ["working", "staged", "branch"] as const;
+type ReviewSource = typeof reviewSources[number];
 
 const statusLabels: Record<string, string> = { A: "Added", D: "Deleted", M: "Modified", U: "Unmerged", T: "Type changed", "?": "Untracked" };
 const languages: Record<string, string> = {
@@ -36,16 +40,16 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   openPanel?: () => void;
   onClose?: () => void;
 }) {
-  const [source, setSource] = useState(initialSource);
+  const [source, setSource] = useState<ReviewSource>(initialSource);
   const [selection, setSelection] = useState<string>();
-  const files = review.changes.flatMap((file) => {
+  const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
     return status ? [{ path: file.path, kind: statusLabels[status] ?? status }] : [];
   });
   const path = selection === "" ? undefined : files.find((file) => file.path === selection)?.path ?? files[0]?.path;
   const diff = useQuery({
     queryKey: ["git-live-diff", review.checkoutId, source, path, review.revision.branch, review.revision.head, review.revision.index],
-    queryFn: () => invoke<LiveDiff>("git_checkout_diff", { checkoutId: review.checkoutId, path, source }),
+    queryFn: () => invoke<TextDiff>("git_checkout_diff", { checkoutId: review.checkoutId, path, source }),
     enabled: !!path, refetchInterval: 2500, retry: false,
   });
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
@@ -53,15 +57,10 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <div className="delivery-toolbar delivery-filters">
-      <label className="min-w-0">
-        <span className="sr-only">Diff source</span>
-        <select className="delivery-filter" value={source} onChange={(event) => { setSource(event.currentTarget.value as Source); setSelection(undefined); }}>
-          <option value="working">Working tree</option><option value="staged">Staged</option>
-        </select>
-      </label>
+      <GitDiffSourceSelect sources={reviewSources} value={source} onChange={(next) => { setSource(next); setSelection(undefined); }} />
       {source === "working" && openPanel && <Button className="ml-auto px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={openPanel}>Open changes panel</Button>}
     </div>
-    <div className="delivery-body">
+    {source === "branch" ? <GitBranchComparison review={review} onClose={onClose} /> : <div className="delivery-body">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
@@ -73,7 +72,70 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined} />
       </div>
       {indexActions && <IndexOperations review={review} />}
+    </div>}
+  </div>;
+}
+
+function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onClose?: () => void }) {
+  const [baseReference, setBase] = useState(() => review.branches.find((branch) => branch.reference === "refs/remotes/origin/main")?.reference
+    ?? review.branches.find((branch) => branch.reference === "refs/heads/main")?.reference
+    ?? review.branches[0]?.reference ?? "");
+  const [headReference, setHead] = useState("");
+  const [selection, setSelection] = useState<string>();
+  const base = review.branches.find((branch) => branch.reference === baseReference);
+  const head = headReference && review.branches.find((branch) => branch.reference === headReference);
+  const headSha = headReference ? (head || undefined)?.sha : review.revision.head;
+  const range = { baseReference, headReference: headReference || null };
+  const checkoutId = review.checkoutId;
+  const summary = useQuery({
+    queryKey: ["git-branch-comparison", checkoutId, baseReference, base?.sha, headReference, headSha],
+    queryFn: () => invoke<{ revisions: BranchRevisions; changes: { path: string; status: string }[] }>("git_branch_comparison", { checkoutId, range }),
+    enabled: Boolean(base && headSha), retry: false,
+  });
+  const files = summary.data?.changes.map(({ path, status }) => ({ path, kind: statusLabels[status] ?? status })) ?? [];
+  const path = selection === "" ? undefined : files.find((file) => file.path === selection)?.path ?? files[0]?.path;
+  const revisions = summary.data?.revisions;
+  const diff = useQuery({
+    queryKey: ["git-branch-comparison-diff", checkoutId, baseReference, headReference, revisions, path],
+    queryFn: () => invoke<TextDiff>("git_branch_comparison_diff", { checkoutId, range, expected: revisions, path }),
+    enabled: Boolean(path && revisions), retry: false,
+  });
+  const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
+  const options = review.branches.map(({ name, reference }) => <option key={reference} value={reference}>{name}</option>);
+  return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="delivery-toolbar delivery-filters">
+      <label className="delivery-field">Base reference
+        <select aria-label="Base reference" className="delivery-filter" value={baseReference} onChange={(event) => {
+          setBase(event.currentTarget.value); setSelection(undefined);
+        }}>
+          {!base && <option value={baseReference} disabled>{baseReference ? "Base reference is unavailable" : "Select a branch"}</option>}
+          {options}
+        </select>
+      </label>
+      <label className="delivery-field">Compare reference
+        <select aria-label="Compare reference" className="delivery-filter" value={headReference} onChange={(event) => {
+          setHead(event.currentTarget.value); setSelection(undefined);
+        }}>
+          <option value="">Current checkout HEAD</option>
+          {headReference && !head && <option value={headReference} disabled>Compare reference is unavailable</option>}
+          {options}
+        </select>
+      </label>
     </div>
+    <GitDiffReview source="branch" title="Branch comparison" files={files} selectedPath={path} select={setSelection} comparison={comparison}
+      ranges={{
+        base: `Merge base of ${base?.name ?? "selected branch"}${revisions ? ` · ${revisions.mergeBase.slice(0, 12)}` : ""}`,
+        revised: `${head ? head.name : "Checkout HEAD"}${revisions ? ` · ${revisions.head.slice(0, 12)}` : ""}`,
+      }}
+      preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
+        : diff.error ? <div className="p-3"><InlineIssue>{String(diff.error)}</InlineIssue></div>
+        : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
+      empty={!base || !headSha ? <p>Select two available revisions to compare.</p>
+        : summary.error ? <InlineIssue>{String(summary.error)}</InlineIssue>
+        : summary.isPending ? <p role="status">Loading branch comparison…</p>
+        : <p>No committed changes since the merge base.</p>}
+      onClose={onClose} />
   </div>;
 }
 
@@ -89,7 +151,7 @@ function IndexOperations({ review }: { review: CheckoutReview }) {
     ]),
   });
   const stagedCount = review.changes.filter((file) => file.staged).length;
-  return <aside className="delivery-detail" aria-label="Stage files">
+  return <DeliveryDetailPanel label="Stage files" resizeKey="git-stage">
     <div className="delivery-detail-content grid content-start gap-3 p-3.5">
       <div>
         <h3 className="text-sm font-semibold">Index</h3>
@@ -112,7 +174,7 @@ function IndexOperations({ review }: { review: CheckoutReview }) {
       {review.managed ? <p className="text-xs text-muted-foreground">Commit approved changes from the linked Task delivery.</p>
         : <CommitIndex review={review} />}
     </div>
-  </aside>;
+  </DeliveryDetailPanel>;
 }
 
 function CommitIndex({ review }: { review: CheckoutReview }) {
@@ -149,7 +211,7 @@ function CommitIndex({ review }: { review: CheckoutReview }) {
   </form>;
 }
 
-function comparisonFile(diff?: LiveDiff): GitTextComparison | null {
+function comparisonFile(diff?: TextDiff): GitTextComparison | null {
   if (!diff || diff.original.status === "unavailable" || diff.modified.status === "unavailable") return null;
   const content = (side: FileSide) => side.status === "text" ? side.content : "";
   const extension = diff.path.split(".").at(-1)?.toLowerCase() ?? "";

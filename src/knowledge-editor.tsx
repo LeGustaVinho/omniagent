@@ -351,7 +351,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   };
 
   return (
-    <div className="note-editor">
+    <div className="note-editor" data-mode={mode}>
       <div className="note-editor-tools" aria-label="Editing commands">
         <button type="button" className="fw-icon" title="Undo" aria-label="Undo" onClick={() => { if (instance.current) undo(instance.current); }}><Undo2 size={15} /></button>
         <button type="button" className="fw-icon" title="Redo" aria-label="Redo" onClick={() => { if (instance.current) redo(instance.current); }}><Redo2 size={15} /></button>

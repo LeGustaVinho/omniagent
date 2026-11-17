@@ -53,6 +53,13 @@
 }
 
 .queue-controls { flex: none; }
+.queue-job-fields { display: grid; gap: .75rem; }
+.queue-job-fields .model-picker-field { align-content: start; }
+
+@container delivery-view (min-width: 36rem) {
+  .queue-job-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 .queue-body { min-block-size: 11rem; }
 .queue-job-table { overflow-wrap: anywhere; }
 
@@ -110,7 +117,6 @@
 
 @container delivery-view (max-width: 50rem) {
   .queue-body { min-block-size: 17rem; }
-  .queue-body .queue-detail { flex-basis: 55%; }
 }
 
 @container delivery-view (max-width: 42rem) {
@@ -144,10 +150,6 @@
     display: block;
     font-size: .68rem;
     color: var(--muted-foreground);
-  }
-  .queue-body .queue-detail {
-    flex: 0 0 auto;
-    max-height: 58%;
   }
 }
 

@@ -47,6 +47,77 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+it("compares two tracked refs in the shared text diff without reading the worktree", async () => {
+  const revisions = { base: "current-main", head: "current-feature", mergeBase: "common-ancestor" };
+  const range = { baseReference: "refs/heads/main", headReference: "refs/heads/feature" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { range?: typeof range } | undefined;
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot, managed: false,
+      revision: originalRevision, changes: [],
+    };
+    if (command === "git_branch_comparison") {
+      return args?.range?.headReference
+        ? { revisions, changes: [{ path: "notes.md", status: "M" }] }
+        : { revisions, changes: [] };
+    }
+    if (command === "git_branch_comparison_diff") return {
+      path: "notes.md", original: { status: "text", content: "merge base text" }, modified: { status: "text", content: "feature text" },
+    };
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit();
+  await user.selectOptions(await screen.findByLabelText("Diff source"), "branch");
+  await user.selectOptions(screen.getByLabelText("Base reference"), range.baseReference);
+  await user.selectOptions(screen.getByLabelText("Compare reference"), range.headReference);
+  const original = within(await screen.findByRole("region", { name: "Base file" }));
+  const modified = within(await screen.findByRole("region", { name: "Revised file" }));
+  expect(original.getByText("merge base text")).toBeTruthy();
+  expect(modified.getByText("feature text")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_branch_comparison_diff", {
+    checkoutId: checkout.checkoutId, range, expected: revisions, path: "notes.md",
+  });
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
+  const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
+  let created = false;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { checkoutId?: string } | undefined;
+    if (command === "git_checkout_review") {
+      const selected = args?.checkoutId === tree.checkoutId;
+      return {
+        checkoutId: args?.checkoutId, worktrees: created ? [...worktrees, tree] : worktrees,
+        branches, root: selected ? tree.root : checkout.checkoutRoot, managed: false,
+        revision: selected ? { ...originalRevision, branch: "refs/heads/new-local" } : originalRevision,
+        changes: [],
+      };
+    }
+    if (command === "git_checkout_history") return [];
+    if (command === "create_git_worktree") {
+      created = true;
+      return { ...checkout, checkoutId: tree.checkoutId, checkoutRoot: tree.root };
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "worktrees" });
+  await waitFor(() => expect((screen.getByRole("button", { name: "New worktree" }) as HTMLButtonElement).disabled).toBe(false));
+  await user.click(screen.getByRole("button", { name: "New worktree" }));
+  const dialog = within(screen.getByRole("dialog", { name: "New worktree" }));
+  await user.type(dialog.getByLabelText("Branch", { exact: true }), "new-local");
+  await user.type(dialog.getByLabelText("Worktree path"), tree.root);
+  await user.click(dialog.getByRole("button", { name: "Create worktree" }));
+  expect(invoke).toHaveBeenCalledWith("create_git_worktree", {
+    projectId: checkout.projectId, checkoutId: checkout.checkoutId,
+    request: { branch: "new-local", existing: false, baseReference: null, expectedHead: "current-main", path: tree.root },
+  });
+  const row = await screen.findByRole("row", { name: /new-local/ });
+  expect(within(row).getByRole("button", { name: "Selected" })).toBeTruthy();
+});
+
 it("compares live paths and sends the current index, branch and HEAD for each staging change", async () => {
   let staged = false;
   vi.mocked(invoke).mockImplementation(async (command, payload) => {

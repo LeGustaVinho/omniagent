@@ -5,6 +5,7 @@ import { Position, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import { Button } from "@/components/ui/button";
 import { deliveryGitModes, type DeliveryGitPolicy } from "@/delivery-git-policy";
 import { deliveryMergeReceiptQuery, type MergeOutcome, type VerifiedMerge } from "@/delivery-merge-model";
+import { ResizablePanel } from "@/panel-resize";
 import { commitQuery } from "@/project-agile-model";
 import {
   deliveryGitControlId, type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit, type DeliveryWorkflowDefinition,
@@ -122,11 +123,12 @@ export function RepositoryDeliveryGitGraph({
     </div>
     {mode && <p>Project Git mode · {mode}</p>}
     {policy.error && <p role="alert">{String(policy.error)}</p>}
-    <div className="h-36 min-w-0 rounded border border-border">
+    <ResizablePanel className="pipeline-delivery-git-flow min-w-0 rounded border border-border"
+      edge="bottom" resizeKey="delivery-git-graph" resizeLabel="delivery Git graph">
       <ReactFlow nodes={nodes} edges={edges} onNodeClick={(_, node) => inspect(node.id)}
         nodesDraggable={false} nodesConnectable={false} elementsSelectable={false}
         minZoom={0.35} maxZoom={1.2} fitView fitViewOptions={{ padding: 0.2 }} />
-    </div>
+    </ResizablePanel>
     <div role="group" aria-label="Git node details" className="flex flex-wrap gap-2">
       <Button type="button" variant="outline" aria-pressed={selected === "commit"} onClick={() => inspect(commit)}>Inspect Commit</Button>
       {merge && <Button type="button" variant="outline" aria-pressed={selected === "merge"} onClick={() => inspect(merge)}>Inspect Merge</Button>}

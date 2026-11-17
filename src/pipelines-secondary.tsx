@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, Check, CircleAlert, Clock3, Columns2, FileCode2, GitBranch, ListChecks, Plus, ShieldCheck } from "lucide-react";
-import { PipelineComparisonCard, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
-import { PipelineSectionHeading } from "@/pipeline-layout";
+import { ArrowRight, Check, CircleAlert, Columns2, GitBranch, ListChecks, Plus, ShieldCheck } from "lucide-react";
+import { PipelineComparisonCard, PipelineComparisonChoice, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
+import { PipelineMaintenanceLayout, PipelinePluginItem, PipelineSectionHeading, PipelineTemplateList } from "@/pipeline-layout";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
@@ -87,16 +87,12 @@ export function TemplateHistory({ revisions, onLoad }: { revisions: WorkflowRevi
   return (
     <section className="pipeline-box">
       <h3>Saved templates</h3>
-      {revisions.length ? <ul className="pipeline-select-list">
-        {[...revisions].reverse().map((revision) => (
-          <li key={revision.revision}>
-            <button type="button" onClick={() => onLoad(revision)}><FileCode2 size={15} />
-              <span>{revision.label}<small>Revision {revision.revision} · {revision.nodes.length} stages</small></span>
-              <ArrowRight size={14} className="pipeline-end" />
-            </button>
-          </li>
-        ))}
-      </ul> : <p className="text-muted-foreground">No saved templates.</p>}
+      <PipelineTemplateList entries={[...revisions].reverse().map((revision) => ({
+        id: String(revision.revision), name: revision.label, detail: `Revision ${revision.revision} · ${revision.nodes.length} stages`,
+      }))} onOpen={(id) => {
+        const revision = revisions.find((item) => String(item.revision) === id);
+        if (revision) onLoad(revision);
+      }} />
     </section>
   );
 }
@@ -199,7 +195,8 @@ export function ComparisonView({ simulated, onSimulate, onUse }: { simulated: bo
                   {status === "completed" && <><p>{response}</p><details className="pipeline-evidence"><summary>Reported reasoning</summary><p>Checked the pinned release criteria and the proposed verification boundary.</p></details></>}
                   {status === "failed" && <p className="pipeline-warning"><CircleAlert size={15} /> Example provider timed out.</p>}
                   <details className="pipeline-evidence"><summary>Context and dispatch</summary><p>{run.prompt}</p><p className="pipeline-meta">{run.context} · read-only tools · {candidate.provider} reported its own instruction inventory.</p></details>
-                  {status === "completed" && <label className="pipeline-checkline"><input type="checkbox" checked={included.includes(candidate.modelId)} onChange={(event) => setIncluded(event.currentTarget.checked ? [...included, candidate.modelId] : included.filter((id) => id !== candidate.modelId))} /> Use this result</label>}
+                  {status === "completed" && <PipelineComparisonChoice checked={included.includes(candidate.modelId)}
+                    onChange={(checked) => setIncluded(checked ? [...included, candidate.modelId] : included.filter((id) => id !== candidate.modelId))} />}
                 </PipelineComparisonCard>
               );
             })}
@@ -235,37 +232,27 @@ export function PipelineMaintenance({ simulation, startSimulation, openWorkspace
   const [proposal, setProposal] = useState<"pending" | "accepted" | "rejected">("pending");
   const [plugins, setPlugins] = useState(initialPlugins);
   const [pluginHistory, setPluginHistory] = useState<string[]>([]);
-  return (
-    <div className="pipeline-stack">
-      <PipelineSectionHeading title="Maintenance" description="Review proposals and candidate build evidence." icon={<ShieldCheck size={20} aria-hidden />} />
-      {!simulation ? <PendingPipeline label="No maintenance proposals" onSimulate={() => startSimulation("pipelines")} /> : <>
-        <div className="pipeline-two-columns">
-          <section className="pipeline-box pipeline-stack">
-            <h3>Setting proposal</h3>
-            <p className="pipeline-meta">Run release-maintenance · Project · Expected revision 12</p>
-            <dl className="pipeline-data"><dt>Setting</dt><dd>Default review policy</dd><dt>From</dt><dd>Single review</dd><dt>To</dt><dd>Independent cross-review</dd><dt>Decision</dt><dd>{proposal === "pending" ? "Human confirmation required" : proposal === "accepted" ? "Accepted · revision 13" : "Declined"}</dd></dl>
-            <p className="pipeline-meta">Automatic changes are limited to fields approved for this project. Running workflows retain their pinned revisions.</p>
-            {proposal === "pending" ? <div className="pipeline-actions"><Button onClick={() => setProposal("accepted")}>Accept proposal</Button><Button variant="outline" onClick={() => setProposal("rejected")}>Decline</Button></div> : <p role="status" className="pipeline-note"><Check size={15} /> Decision recorded for this scenario.</p>}
-          </section>
-          <section className="pipeline-box pipeline-stack">
-            <h3>Candidate package</h3>
-            <dl className="pipeline-data"><dt>Running</dt><dd>0.1.0 · 41ac02e</dd><dt>Candidate</dt><dd>0.2.0 · 48ecf27</dd><dt>Digest</dt><dd className="font-mono">sha256:a48ecf27…5f99be3</dd><dt>Evidence</dt><dd>Build, checks and approved change</dd></dl>
-            <div className="pipeline-actions"><Button variant="outline" onClick={() => openWorkspace("tasks", "release")}>Open task</Button><Button variant="outline" onClick={() => openChanges("saved")}>Open diff evidence</Button><Button variant="outline" onClick={() => startSimulation("windows")}>Open update simulation</Button></div>
-          </section>
-        </div>
-        <section className="pipeline-box pipeline-stack">
-          <div className="pipeline-card-heading"><h3>Plugin inventory</h3><Clock3 size={16} /></div>
-          {plugins.map((plugin) => {
-            const action = plugin.state === "available" ? "Install" : plugin.state === "enabled" ? "Disable" : "Enable";
-            const next = plugin.state === "enabled" ? "disabled" : "enabled";
-            return <div key={plugin.id} className="pipeline-plugin"><div><strong>{plugin.name}</strong><p className="pipeline-meta">{plugin.scope} · {plugin.state}</p></div><Button variant="outline" onClick={() => {
-              setPlugins(plugins.map((item) => item.id === plugin.id ? { ...item, state: next } : item));
-              setPluginHistory([...pluginHistory, plugin.name + " · " + plugin.state + " → " + next]);
-            }}>{action}</Button></div>;
-          })}
-          <details className="pipeline-evidence"><summary>Inventory history</summary>{pluginHistory.length ? <ul>{pluginHistory.map((entry, index) => <li key={index}>{entry}</li>)}</ul> : <p>No inventory changes in this session.</p>}</details>
-        </section>
-      </>}
-    </div>
-  );
+  if (!simulation) return <PendingPipeline label="No maintenance proposals" onSimulate={() => startSimulation("pipelines")} />;
+  return <PipelineMaintenanceLayout proposals={<>
+    <h3>Setting proposal</h3>
+    <p className="pipeline-meta">Run release-maintenance · Project · Expected revision 12</p>
+    <dl className="pipeline-data"><dt>Setting</dt><dd>Default review policy</dd><dt>From</dt><dd>Single review</dd><dt>To</dt><dd>Independent cross-review</dd><dt>Decision</dt><dd>{proposal === "pending" ? "Human confirmation required" : proposal === "accepted" ? "Accepted · revision 13" : "Declined"}</dd></dl>
+    <p className="pipeline-meta">Automatic changes are limited to fields approved for this project. Running workflows retain their pinned revisions.</p>
+    {proposal === "pending" ? <div className="pipeline-actions"><Button onClick={() => setProposal("accepted")}>Accept proposal</Button><Button variant="outline" onClick={() => setProposal("rejected")}>Decline</Button></div> : <p role="status" className="pipeline-note"><Check size={15} /> Decision recorded for this scenario.</p>}
+  </>} releases={<>
+    <h3>Candidate package</h3>
+    <dl className="pipeline-data"><dt>Running</dt><dd>0.1.0 · 41ac02e</dd><dt>Candidate</dt><dd>0.2.0 · 48ecf27</dd><dt>Digest</dt><dd className="font-mono">sha256:a48ecf27…5f99be3</dd><dt>Evidence</dt><dd>Build, checks and approved change</dd></dl>
+    <div className="pipeline-actions"><Button variant="outline" onClick={() => openWorkspace("tasks", "release")}>Open task</Button><Button variant="outline" onClick={() => openChanges("saved")}>Open diff evidence</Button><Button variant="outline" onClick={() => startSimulation("windows")}>Open update simulation</Button></div>
+  </>} inventory={<>
+    {plugins.map((plugin) => {
+      const action = plugin.state === "available" ? "Install" : plugin.state === "enabled" ? "Disable" : "Enable";
+      const next = plugin.state === "enabled" ? "disabled" : "enabled";
+      return <PipelinePluginItem key={plugin.id} name={plugin.name} detail={plugin.scope + " · " + plugin.state}
+        action={<Button variant="outline" onClick={() => {
+          setPlugins(plugins.map((item) => item.id === plugin.id ? { ...item, state: next } : item));
+          setPluginHistory([...pluginHistory, plugin.name + " · " + plugin.state + " → " + next]);
+        }}>{action}</Button>} />;
+    })}
+    <details className="pipeline-evidence"><summary>Inventory history</summary>{pluginHistory.length ? <ul>{pluginHistory.map((entry, index) => <li key={index}>{entry}</li>)}</ul> : <p>No inventory changes in this session.</p>}</details>
+  </>} />;
 }

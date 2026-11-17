@@ -76,17 +76,18 @@ export function withoutProperties(content: string) {
   return block ? content.slice(block.start.length + block.body.length + block.end.length) : content;
 }
 
-function byMarkdownLine(content: string, map: (line: string) => string, inComment?: () => boolean) {
+function byMarkdownLine(content: string, map: (line: string, lineIndex: number) => string, inComment?: () => boolean) {
   let fence: string | undefined;
-  return content.split(/(\r?\n)/).map((line) => {
+  return content.split(/(\r?\n)/).map((line, index) => {
     if (line === "\n" || line === "\r\n") return line;
-    if (!fence && inComment?.()) return map(line);
+    const lineIndex = index / 2;
+    if (!fence && inComment?.()) return map(line, lineIndex);
     const boundary = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (boundary && (!fence || fence[0] === boundary[0] && boundary.length >= fence.length)) {
       fence = fence ? undefined : boundary;
       return line;
     }
-    return fence ? line : map(line);
+    return fence ? line : map(line, lineIndex);
   }).join("");
 }
 
@@ -362,8 +363,16 @@ export function notePreviewLinks(source: string, path: string): NoteTarget[] {
 }
 
 export function prepareReading(source: string, path: string, files: readonly ExampleFile[], lineage: readonly string[] = [path], resolve: PreviewLinkResolver = resolveWiki): string {
-  const content = byText(withoutProperties(source), (text) => text, true);
-  return byMarkdownLine(content, (line) => {
+  return readingDocument(source, path, files, resolve, undefined, lineage).markdown;
+}
+
+export function readingDocument(source: string, path: string, files: readonly ExampleFile[], resolve: PreviewLinkResolver = resolveWiki,
+  sourceLine?: number, lineage: readonly string[] = [path]) {
+  const body = withoutProperties(source);
+  const content = byText(body, (text) => text, true);
+  const firstLine = sourceLine === undefined ? 1 : source.slice(0, source.length - body.length).split("\n").length;
+  let renderedLine = sourceLine === undefined ? undefined : Math.max(1, sourceLine - firstLine + 1);
+  const markdown = byMarkdownLine(content, (line, lineIndex) => {
     const wholeEmbed = /^\s*!\[\[([^\]]+)\]\]\s*$/.exec(line)?.[1];
     if (wholeEmbed) {
       const matches = resolve(parseWiki(wholeEmbed, true), path, files);
@@ -377,7 +386,9 @@ export function prepareReading(source: string, path: string, files: readonly Exa
         const excerptSource = excerpt(note.content, target.anchor);
         if (excerptSource !== undefined) {
           const embedded = prepareReading(excerptSource, target.path, files, [...lineage, scope], resolve);
-          return `> **Embedded · ${fileName(target.path)}**\n>\n` + embedded.split("\n").map((row) => `> ${row}`).join("\n");
+          const rows = embedded.split("\n");
+          if (sourceLine !== undefined && renderedLine !== undefined && firstLine + lineIndex < sourceLine) renderedLine += rows.length + 1;
+          return `> **Embedded · ${fileName(target.path)}**\n>\n` + rows.map((row) => `> ${row}`).join("\n");
         }
       }
     }
@@ -393,4 +404,5 @@ export function prepareReading(source: string, path: string, files: readonly Exa
     }).replace(/==([^=]+)==/g, (_match, value: string) => `[${escapedLabel(value)}](omni-mark:${encodeURIComponent(value)})`)
       .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`));
   });
+  return { markdown, renderedLine };
 }

@@ -125,6 +125,7 @@ it("centers Local on the active note, follows incoming and outgoing links, and a
 it("keeps indexed file IDs distinct across checkout projections even when their paths match", () => {
   const open = vi.fn();
   const { rerender, unmount } = render(<NoteGraph projection={projection} selected={active} onOpen={open} />);
+  const canvas = screen.getByRole("img", { name: "Graph of repository notes" });
   const first = graph();
   rerender(<NoteGraph selected={active} onOpen={open} projection={{
     notes: notes.map((note) => note.path === active ? { ...note, id: 85, title: "Café atualizado" } : note),
@@ -140,8 +141,9 @@ it("keeps indexed file IDs distinct across checkout projections even when their 
   expect(open).toHaveBeenCalledExactlyOnceWith(active);
   unmount();
   expect(second.destroyed()).toBe(true);
-  expect(observe).toHaveBeenCalledTimes(2);
-  expect(disconnect).toHaveBeenCalledTimes(2);
+  const canvasObservers = observe.mock.contexts.filter((_, index) => observe.mock.calls[index]?.[0] === canvas);
+  expect(canvasObservers).toHaveLength(2);
+  for (const observer of canvasObservers) expect(disconnect.mock.contexts).toContain(observer);
 });
 
 it("keeps the sample resolver working and represents an explicitly empty checkout", () => {

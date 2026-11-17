@@ -11,6 +11,7 @@ mod agile_transition;
 mod checklists;
 mod delivery;
 mod descriptions;
+mod workspace_editor;
 pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
     PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkFields,
@@ -52,6 +53,7 @@ pub use descriptions::{
     DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
 };
+pub use workspace_editor::{WorkspaceDraft, WorkspacePlacement, WorkspaceWorkEditor};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -338,25 +340,37 @@ pub(crate) fn insert_project_work(
     placement: TaskPlacement,
     origin: &AgileEventOrigin,
 ) -> Result<ProjectTask> {
+    let existing = match &placement {
+        TaskPlacement::Subtask { parent_task_id } => {
+            Some(WorkStateChanges::capture(db, &project_id, parent_task_id)?)
+        }
+        TaskPlacement::Task { .. } => None,
+    };
+    let task = insert_project_work_record(db, project_id, title, &placement)?;
+    publish_work_creation(db, &task, placement, origin)?;
+    if let Some(existing) = existing {
+        existing.publish(db, &task.project_id, origin)?;
+    }
+    Ok(task)
+}
+
+fn insert_project_work_record(
+    db: &Connection,
+    project_id: String,
+    title: String,
+    placement: &TaskPlacement,
+) -> Result<ProjectTask> {
     ensure!(!title.trim().is_empty(), "task title is empty");
     let task = ProjectTask {
         id: Uuid::new_v4().to_string(),
         project_id,
         title,
     };
-    let existing = match &placement {
-        TaskPlacement::Subtask { parent_task_id } => Some(WorkStateChanges::capture(
-            db,
-            &task.project_id,
-            parent_task_id,
-        )?),
-        TaskPlacement::Task { .. } => None,
-    };
     db.execute(
         "INSERT INTO project_tasks(project_id, id, title) VALUES (?1, ?2, ?3)",
         params![task.project_id, task.id, task.title],
     )?;
-    match &placement {
+    match placement {
         TaskPlacement::Task {
             epic_id: Some(epic_id),
         } => {
@@ -373,15 +387,20 @@ pub(crate) fn insert_project_work(
         }
         TaskPlacement::Task { epic_id: None } => {}
     }
+    Ok(task)
+}
+
+fn publish_work_creation(
+    db: &Connection,
+    task: &ProjectTask,
+    placement: TaskPlacement,
+    origin: &AgileEventOrigin,
+) -> Result<()> {
     agile_events::publish_event(
         db,
         &task.project_id,
         &task.id,
         AgileEventData::Created { placement },
         origin,
-    )?;
-    if let Some(existing) = existing {
-        existing.publish(db, &task.project_id, origin)?;
-    }
-    Ok(task)
+    )
 }

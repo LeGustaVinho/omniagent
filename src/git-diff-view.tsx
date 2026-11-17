@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, ChevronUp, Columns2, ExternalLink, FileCode2
 import type { editor } from "monaco-editor";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
 
 export type GitTextComparison = {
@@ -94,7 +95,9 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
     {notice}
     {files.length === 0 ? <div className="delivery-empty"><GitCompare size={22} aria-hidden />{empty}</div>
       : <div className="flex min-h-0 flex-1 flex-col">
-        <section className="max-h-44 shrink-0 overflow-auto border-b border-border" aria-label="Changed files">
+        <ResizablePanel as="section" className="diff-files" aria-label="Changed files"
+          edge="bottom" resizeKey="git-changed-files" resizeLabel="changed files">
+          <div className="diff-files-scroll">
           {files.map((file) => <button type="button" key={file.path} className="diff-file-row" aria-expanded={selected?.path === file.path}
             onClick={() => { select(selected?.path === file.path ? "" : file.path); setPatchPath(undefined); }}>
             {selected?.path === file.path ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} className="text-muted-foreground" aria-hidden />}
@@ -103,7 +106,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
             <span className="text-muted-foreground">{file.kind}</span>
             {file.additions !== undefined && file.deletions !== undefined && file.kind !== "Binary" && <ChangeCounts additions={file.additions} deletions={file.deletions} />}
           </button>)}
-        </section>
+          </div>
+        </ResizablePanel>
         {selected && <div className="flex min-h-0 flex-1 flex-col">
           {(hasPatch || openFile) && <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
             {hasPatch && <button className="delivery-tab" type="button" aria-pressed={showingPatch} onClick={() => setPatchPath(showingPatch ? undefined : selected.path)}>{showingPatch ? "Compare side by side" : "View saved patch"}</button>}

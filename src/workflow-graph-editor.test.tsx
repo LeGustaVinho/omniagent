@@ -67,6 +67,44 @@ it("opens the real Library and searches the same definitions used by the Builder
   expect(openWorkspace).toHaveBeenCalledWith("pipelines", "maintenance");
 });
 
+it("opens the graph from the exact saved workflow revision in Roles & templates", async () => {
+  const version = { id: "release-template", revision: "pinned-workflow-revision", kind: "pipeline", destination: "project" };
+  const name = "Release template";
+  const body = { kind: "pipeline", graph: { name, nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }], wires: [] } };
+  const ipc = vi.mocked(invoke);
+  const openWorkspace = vi.fn();
+  ipc.mockImplementation(async (command) => {
+    if (command === "list_conversation_templates") return [];
+    if (command === "workflow_package_catalog") return [{ name, version }];
+    if (command === "read_published_workflow_package_artifact") return {
+      name, version, definitions: { start: old }, references: {}, layout: { start: { x: 72, y: 15 } },
+      body,
+    };
+    if (command === "create_workflow_package") return { id: "revision-draft" };
+    throw new Error(command);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="templates" openWorkspace={openWorkspace}
+      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  const history = within(screen.getByRole("region", { name: "Saved workflow templates" }));
+  await user.click(await history.findByRole("button", { name: /Release template/ }));
+  expect(ipc).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: exampleCheckout.projectId, version });
+  const template = within(await history.findByRole("region", { name: "Selected workflow template" }));
+  const card = await template.findByTestId("node-start");
+  expect(card.getAttribute("data-position")).toBe(JSON.stringify({ x: 72, y: 15 }));
+  expect(card.querySelector('[data-port-handle="source:old-document"]')).toBeTruthy();
+  expect(template.getByRole<HTMLButtonElement>("button", { name: "Add node" }).disabled).toBe(true);
+  expect(template.getByRole("button", { name: "Run published workflow" })).toBeTruthy();
+  await user.click(template.getByRole("button", { name: "Edit in Builder" }));
+  expect(ipc).toHaveBeenCalledWith("create_workflow_package", {
+    projectId: exampleCheckout.projectId, conversationId: null,
+    package: { name, members: [{ key: "pipeline", name, destination: "project", base: version, body, references: {} }] },
+  });
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:revision-draft"));
+});
+
 it("opens a protected draft, reviews an affected port upgrade, wires typed nodes, and restores the saved graph and layout", async () => {
   const graph: WorkflowGraph = {
     name: "Versioned review",

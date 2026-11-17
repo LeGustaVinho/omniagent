@@ -1,10 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus } from "lucide-react";
 import { Dialog } from "radix-ui";
 import type { JobInspection } from "@/bindings/JobInspection";
-import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkDialog, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
+import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkRelations, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
 import { Button } from "@/components/ui/button";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants, taskParticipantsQuery } from "@/task-participants";
@@ -13,6 +13,7 @@ import { ProjectDescription } from "@/project-description";
 import { AgileParticipantFilters, hasParticipantFilter, matchesParticipant, type ParticipantFilter } from "@/project-agile-filters";
 import { ProjectAgileTable, ProjectKanban, TaskJobLinks } from "@/project-agile-views";
 import { ProjectWorkModes, TaskWorkSettings } from "@/project-agile-settings";
+import { ProjectWorkEditor, type ProjectEditorSelection, type WorkspaceWorkInput } from "@/project-work-editor";
 import { projectQueueQuery } from "@/queue-model";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
@@ -29,13 +30,13 @@ type DeliveryLink = { taskId: string; title: string; deliveryId: string };
 
 function LiveTaskDetails({
   projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check,
-  relatedWork, parentWork, childWork, view, selectView, close,
+  relatedWork, parentWork, childWork, view, selectView, close, edit,
 }: {
   projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps; contributors: DeliveryLink[];
   selectedEvidence?: EvidenceTarget; selectedDeliveryId?: string; openDelivery: (link: DeliveryLink) => void; openWork: (id: string) => void;
   move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
   relatedWork: Work[]; parentWork?: AgileRow; childWork: AgileRow[];
-  view: WorkDetailView; selectView: (view: WorkDetailView) => void; close: () => void;
+  view: WorkDetailView; selectView: (view: WorkDetailView) => void; close: () => void; edit: () => void;
 }) {
   const args = { projectId, taskId: task.id };
   const [itemText, setItemText] = useState("");
@@ -61,7 +62,7 @@ function LiveTaskDetails({
     state={saved ? statusLabel(saved.state) : undefined} note={question ? undefined : waiting}
     closeLabel="Close detail" close={close} navigation={<AgileDetailTabs view={view} onViewChange={selectView} />}>
     <div className="pipeline-stack" hidden={view !== "Overview"}>
-      <WorkRelations parent={parentWork} children={childWork} openWork={openWork} />
+      <AgileWorkRelations parent={parentWork && workRelation(parentWork)} children={childWork.map(workRelation)} openWork={openWork} title="Sub-Tasks" />
       {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
         const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
         if (next) move({ ...task, workflow: saved }, next);
@@ -99,6 +100,7 @@ function LiveTaskDetails({
       </section>
       {saved?.pendingRepositoryChanges && <p>Additional repository changes are assigned to this work item.</p>}
       <div className="pipeline-actions">
+        <Button type="button" variant="outline" aria-label={`Edit ${workLabel(task.kind).toLowerCase()}`} disabled={busy} onClick={edit}>Edit {workLabel(task.kind).toLowerCase()}</Button>
         {mayCompleteManually && <Button disabled={busy} onClick={() => change(() =>
           invoke("record_manual_task_delivery", { ...args, note: null }))}>Record manual completion</Button>}
         {closed && (saved?.hasDirectWork || !task.hasChildren) && <Button variant="outline" disabled={busy}
@@ -173,30 +175,35 @@ function LiveTaskDetails({
   </AgileDetailFrame>;
 }
 
-function WorkRelations({ parent, children, openWork }: { parent?: AgileRow; children: AgileRow[]; openWork: (id: string) => void }) {
-  return <>
-    {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => openWork(parent.id)}>
-      {workLabel(parent.kind)} · {parent.title}
-    </button>}
-    {children.length > 0 && <section aria-label="Child work" className="pipeline-stack">
-      <h4 className="text-xs font-semibold">Child work</h4>
-      <ul className="divide-y divide-border">{children.map((child) => <li key={child.id} className="py-1.5">
-        <button type="button" className="agile-ref" aria-label={`Open ${workLabel(child.kind)} ${child.title}`}
-          onClick={() => openWork(child.id)}>{child.title}</button>
-      </li>)}</ul>
-    </section>}
-  </>;
+function workRelation(work: AgileRow) {
+  return { id: work.id, kind: workLabel(work.kind), title: work.title, state: work.status && statusLabel(work.status) };
 }
 
-function EpicState({ projectId, epic, links, children, openWork, close }: {
-  projectId: string; epic: Work; links: WorkspaceProps; children: AgileRow[]; openWork: (id: string) => void; close: () => void;
+function EpicDetails({ epic, links, tasks, descendants, openWork, openEvidence, close, edit, busy, view, selectView }: {
+  epic: AgileRow; links: WorkspaceProps; tasks: AgileRow[]; descendants: AgileRow[];
+  openWork: (id: string, view?: WorkDetailView) => void; openEvidence: (evidence: EvidenceTarget) => void;
+  close: () => void; edit: () => void; busy: boolean; view: WorkDetailView; selectView: (view: WorkDetailView) => void;
 }) {
-  const state = useQuery(epicStateQuery(projectId, epic.id));
+  const linked = descendants.filter(({ workflow }) => Boolean(workflow?.activeWorkflowRunId));
+  const history = descendants.filter(({ attempts, deliveries }) => Boolean(attempts?.length || deliveries?.length));
+  const revisions = descendants.filter(({ evidence }) => Boolean(evidence));
   return <AgileDetailFrame label="Work detail" title={epic.title} identity="Epic"
-    state={state.data ? statusLabel(state.data) : undefined} closeLabel="Close detail" close={close}>
-    <WorkRelations children={children} openWork={openWork} />
-    <ProjectDescription kind="epic" id={epic.id} links={links} />
-    {state.error && <p role="alert">{String(state.error)}</p>}
+    state={epic.status && statusLabel(epic.status)} closeLabel="Close detail" close={close}
+    navigation={<AgileDetailTabs view={view} onViewChange={selectView} />}>
+    {view === "Overview" && <>
+      <ProjectDescription kind="epic" id={epic.id} links={links} preview />
+      <AgileWorkRelations children={tasks.map(workRelation)} openWork={openWork} title="Tasks" />
+      {!tasks.length && <p className="text-sm text-muted-foreground">No Tasks linked to this Epic.</p>}
+      <Button type="button" variant="outline" aria-label="Edit epic" className="justify-self-start" disabled={busy} onClick={edit}>Edit epic</Button>
+    </>}
+    {view === "Workflow" && (linked.length > 0 ? <AgileWorkRelations children={linked.map(workRelation)}
+      openWork={(id) => openWork(id, "Workflow")} title="Workflows" /> : <p className="text-sm text-muted-foreground">No active workflows in this Epic.</p>)}
+    {view === "Work history" && (history.length > 0 ? <AgileWorkRelations children={history.map(workRelation)}
+      openWork={(id) => openWork(id, "Work history")} title="Work history" /> : <p className="text-sm text-muted-foreground">No linked attempts or deliveries.</p>)}
+    {view === "Context" && <ProjectDescription kind="epic" id={epic.id} links={links} />}
+    {view === "Changes" && (revisions.length > 0 ? <AgileWorkRelations children={revisions.map(workRelation)}
+      openWork={(id) => { const evidence = revisions.find((row) => row.id === id)?.evidence; if (evidence) openEvidence(evidence); }}
+      title="Recorded Git evidence" /> : <p className="text-sm text-muted-foreground">No verified repository changes recorded.</p>)}
   </AgileDetailFrame>;
 }
 
@@ -215,10 +222,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [participantFilter, setParticipantFilter] = useState<ParticipantFilter>({ agent: "", provider: "", model: null });
-  const [createOpen, setCreateOpen] = useState(false);
-  const [kind, setKind] = useState<WorkKind>("task");
-  const [parent, setParent] = useState("");
-  const [title, setTitle] = useState("");
+  const [editing, setEditing] = useState<ProjectEditorSelection>();
   const hierarchy = useQuery({
     queryKey: ["project-tasks", projectId, "hierarchy"],
     queryFn: () => invoke<Hierarchy>("project_work_hierarchy", { projectId }),
@@ -232,7 +236,6 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   });
   const epics = hierarchy.data?.epics ?? [];
   const all = hierarchy.data?.work ?? [];
-  const tasks = all.filter(({ placement }) => placement.kind === "task");
   const epicStates = useQueries({ queries: epics.map(({ id }) => epicStateQuery(projectId, id)) });
   const states = useQueries({ queries: all.map(({ task }) => taskStateQuery(projectId, task.id)) });
   const checklists = useQueries({ queries: all.map(({ task }) => checklistQuery(projectId, task.id)) });
@@ -303,29 +306,31 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       client.setQueryData(taskStateQuery(projectId, row.id).queryKey, state);
     });
   }
-  const add = (event: FormEvent) => {
-    event.preventDefault();
-    if (!title.trim() || (kind === "subtask" && !parent)) return;
-    const placement = kind === "task" ? { kind, epicId: parent || null } :
-      kind === "subtask" ? { kind, parentTaskId: parent } : { kind };
+  function save(input: WorkspaceWorkInput) {
     mutation.mutate(async () => {
-      const id = await invoke<string>("create_workspace_work", { projectId, title: title.trim(), placement });
-      openWork(id);
-      setLevel(kind);
-      setTitle("");
-      setCreateOpen(false);
+      if (input.workId) {
+        await invoke("update_workspace_work", { projectId, ...input });
+      } else {
+        const id = await invoke<string>("create_workspace_work", { projectId, ...input });
+        openWork(id);
+        setLevel(input.placement.kind);
+      }
+      setEditing(undefined);
     });
-  };
-  function changeCreationOpen(next: boolean) {
+  }
+  function changeEditorOpen(next: boolean) {
     if (mutation.isPending) return;
-    if (next) {
-      mutation.reset();
-      if (!title.trim()) { setKind(view === "kanban" ? level : "task"); setParent(""); }
-    }
-    setCreateOpen(next);
+    mutation.reset();
+    setEditing(next ? { kind: view === "kanban" ? level : "task" } : undefined);
+  }
+  function edit(work: AgileRow) {
+    mutation.reset();
+    setEditing({ kind: work.kind, work });
   }
   const related = current ? rows.filter(({ parentId }) => parentId === current.id) : [];
-  return <Dialog.Root open={createOpen} onOpenChange={changeCreationOpen}>
+  const relatedIds = new Set(related.map(({ id }) => id));
+  const descendants = [...related, ...rows.filter(({ parentId }) => parentId && relatedIds.has(parentId))];
+  return <Dialog.Root open={Boolean(editing)} onOpenChange={changeEditorOpen}>
     <AgileWorkspaceFrame title="Tasks" view={view} onViewChange={setView}
       action={<Dialog.Trigger asChild><Button type="button" className="px-3 py-1.5 text-xs aria-disabled:opacity-50" aria-disabled={mutation.isPending}>
         <Plus size={15} aria-hidden="true" /> New work
@@ -356,9 +361,10 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
             <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
         </div>
         {current && (current.kind === "epic" ?
-          <EpicState key={current.id} projectId={projectId} epic={current} links={props} children={related} openWork={openWork} close={closeWork} /> :
+          <EpicDetails key={current.id} epic={current} links={props} tasks={related} descendants={descendants} openWork={openWork}
+            openEvidence={views.openEvidence} close={closeWork} edit={() => edit(current)} busy={mutation.isPending} view={detailView} selectView={setDetailView} /> :
           <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending} relatedWork={all.map(({ task }) => task)}
-            view={detailView} selectView={setDetailView} close={closeWork} links={props} openWork={openWork} move={move} check={check}
+            view={detailView} selectView={setDetailView} close={closeWork} edit={() => edit(current)} links={props} openWork={openWork} move={move} check={check}
             parentWork={rows.find(({ id }) => id === current.parentId)} childWork={related}
             change={(operation) => mutation.mutate(operation)}
             contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
@@ -366,26 +372,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
             selectedEvidence={selectedEvidence?.taskId === current.id ? selectedEvidence : undefined} />)}
       </div>
     </AgileWorkspaceFrame>
-    <AgileWorkDialog title="New work" description="Choose the work type, parent, and title." closeLabel="Close work editor"
-      busy={mutation.isPending}>
-      <form className="agile-create-form" onSubmit={add}>
-        <label className="delivery-field">Work type <select className="delivery-filter" value={kind} disabled={mutation.isPending} onChange={(event) => {
-          setKind(event.currentTarget.value as WorkKind);
-          setParent("");
-        }}><option value="task">Task</option><option value="epic">Epic</option><option value="subtask">Sub-Task</option></select></label>
-        {kind !== "epic" && <label className="delivery-field">{kind === "task" ? "Epic" : "Parent Task"}
-          <select className="delivery-filter" value={parent} required={kind === "subtask"} disabled={mutation.isPending} onChange={(event) => setParent(event.currentTarget.value)}>
-            <option value="">{kind === "task" ? "Standalone Task" : "Select a Task"}</option>
-            {(kind === "task" ? epics : tasks.map(({ task }) => task)).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          </select></label>}
-        <label className="delivery-field">Title <input className="delivery-filter" value={title} required disabled={mutation.isPending}
-          onChange={(event) => setTitle(event.currentTarget.value)} /></label>
-        {mutation.error && <p role="alert">{String(mutation.error)}</p>}
-        <div className="agile-dialog-actions">
-          <Dialog.Close asChild><Button type="button" variant="outline" disabled={mutation.isPending}>Cancel</Button></Dialog.Close>
-          <Button type="submit" disabled={mutation.isPending || !title.trim() || (kind === "subtask" && !parent)}>Create work</Button>
-        </div>
-      </form>
-    </AgileWorkDialog>
+    {editing && <ProjectWorkEditor checkout={props.checkout} selection={editing} rows={rows}
+      close={() => changeEditorOpen(false)} busy={mutation.isPending} error={mutation.error} save={save} resetError={mutation.reset} />}
   </Dialog.Root>;
 }

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import { WorkflowExecutionCandidate } from "@/workflow-execution-candidate";
+import type { ComparisonSelection } from "@/workflow-comparison-selection";
 import type { DeliveryInputs, DeliveryNode } from "@/repository-delivery-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { readStageGoal, type StageGoalConfiguration } from "@/workflow-stage-goal";
@@ -19,9 +20,10 @@ const agentStages = new Map<string, DeliveryNode>([
   ["review_diff_candidate", "review-diff"], ["agent", "agent"],
 ]);
 
-export function WorkflowExecutionAgent({ snapshot, node, unit, openActivity }: {
+export function WorkflowExecutionAgent({ snapshot, node, unit, openActivity, initialComparison }: {
   snapshot: WorkflowExecutionSnapshot; node: ExecutionPinnedNode; unit?: ExecutionUnit;
   openActivity: WorkspaceProps["openActivity"];
+  initialComparison?: ComparisonSelection;
 }) {
   const stage = agentStages.get(node.instance.kind);
   const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
@@ -29,13 +31,15 @@ export function WorkflowExecutionAgent({ snapshot, node, unit, openActivity }: {
   const inputs = stage && (!unitScoped || unit?.planRevision === snapshot.run.planRevision)
     ? wiredExecutionInputs(snapshot, node, scopedUnit) : null;
   if (!stage || !inputs || controlForNode(snapshot, node.instance.id, scopedUnit)?.state === "skipped") return null;
-  return <AgentActions key={`${node.instance.id}:${scopedUnit?.unit.id ?? ""}`}
-    snapshot={snapshot} node={node} unit={scopedUnit} stage={stage} inputs={inputs} openActivity={openActivity} />;
+  return <AgentActions key={`${node.instance.id}:${scopedUnit?.unit.id ?? ""}:${inputs.plan ?? ""}`}
+    snapshot={snapshot} node={node} unit={scopedUnit} stage={stage} inputs={inputs} openActivity={openActivity}
+    initialComparison={stage === "review-plan" ? initialComparison : undefined} />;
 }
 
-function AgentActions({ snapshot, node, unit, stage, inputs, openActivity }: {
+function AgentActions({ snapshot, node, unit, stage, inputs, openActivity, initialComparison }: {
   snapshot: WorkflowExecutionSnapshot; node: ExecutionPinnedNode; unit?: ExecutionUnit;
   stage: DeliveryNode; inputs: DeliveryInputs; openActivity: WorkspaceProps["openActivity"];
+  initialComparison?: ComparisonSelection;
 }) {
   const [sequence, setSequence] = useState("");
   const client = useQueryClient();
@@ -74,7 +78,8 @@ function AgentActions({ snapshot, node, unit, stage, inputs, openActivity }: {
     {genericPlan && <p>Plan Mode · {genericPlan.questionRoute === "native" ? "Verified CLI questions" : "App-managed questions"}</p>}
     {!published && <DeliveryAgent scope={scope} nodeId={nodeId} stage={stage} inputs={inputs} unitId={unitId} taskId={unit?.taskId}
       job={job} label={node.definition.title} actions={{ execute: (operation) => mutate.mutate(operation), busy: mutate.isPending }}
-      openActivity={openActivity} pinnedModel={modelOverride ?? role?.model} pinnedEffort={role?.effort} goalEnabled={Boolean(goal)} />}
+      openActivity={openActivity} pinnedModel={modelOverride ?? role?.model} pinnedEffort={role?.effort} goalEnabled={Boolean(goal)}
+      initialComparison={initialComparison} />}
     {stage === "agent" && goal && terminal && <AgentGoalVerification attempt={terminal} projectId={projectId} goal={goal} />}
     {stage === "implement" && unit && terminal && !published && <WorkflowExecutionCandidate
       key={terminal.runId} snapshot={snapshot} node={node} unit={unit} attemptId={terminal.runId} />}

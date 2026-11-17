@@ -1,20 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
-import type { Capability } from "@/bindings/Capability";
 import type { ModelRating } from "@/bindings/ModelRating";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
+import { capabilitySubjectLabel, type CapabilitySubject } from "@/capability-subject";
 import { SideCapabilityValidation, SideFixtureEvidence, type SideValidationTarget } from "@/capability-side-validation";
 import { ModelRatingMeters } from "@/components/model-picker";
 import { CapabilityOutputEvidence, type GeneratedImageEvidence } from "@/generated-image-evidence";
 import { useRecordedCapabilityProfile } from "@/model-capability-preview";
-
-type CapabilitySubject =
-  | { kind: "protocol"; capability: Capability }
-  | { kind: "tool"; id: string; version: string; operation: string }
-  | { kind: "native_attachment"; format: string; encoding: string }
-  | { kind: "attachment_limits" };
 
 type Verification = {
   id: string;
@@ -91,15 +85,6 @@ function words(value: string) {
   return value.replaceAll("_", " ");
 }
 
-function subjectLabel(subject: CapabilitySubject) {
-  switch (subject.kind) {
-    case "protocol": return words(subject.capability);
-    case "tool": return `${subject.id} ${subject.version} · ${subject.operation}`;
-    case "native_attachment": return `${words(subject.format)} · ${words(subject.encoding)}`;
-    case "attachment_limits": return "Attachment limits";
-  }
-}
-
 function VerificationDetails({ evidence }: { evidence: Verification }) {
   const limits = evidence.attachmentLimits;
   return <div className="grid gap-1">
@@ -137,7 +122,7 @@ function AssessmentDetails({ assessment, conversationId, validation }: {
         const sideRequest = descriptor.subject.kind === "protocol" && descriptor.subject.capability === "side_request";
         return <li key={JSON.stringify(descriptor.subject)}>
           <details className="rounded border border-border px-2 py-1">
-            <summary className="cursor-pointer break-words capitalize">{subjectLabel(descriptor.subject)} · {status}</summary>
+            <summary className="cursor-pointer break-words capitalize">{capabilitySubjectLabel(descriptor.subject)} · {status}</summary>
             <div className="grid gap-1 pt-1 text-muted-foreground">
               <p>Verification status · {status}</p>
               <p>Source {descriptor.source} · Availability {descriptor.availability} · Scope {words(descriptor.boundary)}</p>

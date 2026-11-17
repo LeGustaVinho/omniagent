@@ -87,6 +87,33 @@ pub(crate) fn pin_branch_strategy(
     Ok(())
 }
 
+pub(crate) fn write_task_branch_strategy(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    strategy: Option<BranchStrategy>,
+) -> Result<TaskBranchStrategy> {
+    let (parent, current) = branch_strategy_for_scope(db, project, task)?;
+    ensure!(
+        parent == task,
+        "a sub-task inherits its task's branch strategy"
+    );
+    if current.override_strategy == strategy {
+        return Ok(current);
+    }
+    ensure!(
+        !current.locked,
+        "branch strategy is locked once worktree provisioning begins"
+    );
+    db.execute(
+        "INSERT INTO task_branch_strategies(project_id, task_id, override_strategy)
+         VALUES (?1, ?2, ?3) ON CONFLICT(project_id, task_id) DO UPDATE
+         SET override_strategy = excluded.override_strategy",
+        params![project, task, strategy.map(BranchStrategy::as_str)],
+    )?;
+    Ok(branch_strategy_for_scope(db, project, task)?.1)
+}
+
 impl Store {
     pub async fn project_branch_strategy(&self, project_id: String) -> Result<BranchStrategy> {
         self.execute(move |db| {
@@ -135,25 +162,7 @@ impl Store {
     ) -> Result<TaskBranchStrategy> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (parent, current) = branch_strategy_for_scope(&tx, &project_id, &task_id)?;
-            ensure!(
-                parent == task_id,
-                "a sub-task inherits its task's branch strategy"
-            );
-            if current.override_strategy == strategy {
-                return Ok(current);
-            }
-            ensure!(
-                !current.locked,
-                "branch strategy is locked once worktree provisioning begins"
-            );
-            tx.execute(
-                "INSERT INTO task_branch_strategies(project_id, task_id, override_strategy)
-                 VALUES (?1, ?2, ?3) ON CONFLICT(project_id, task_id) DO UPDATE
-                 SET override_strategy = excluded.override_strategy",
-                params![project_id, task_id, strategy.map(BranchStrategy::as_str)],
-            )?;
-            let (_, updated) = branch_strategy_for_scope(&tx, &project_id, &task_id)?;
+            let updated = write_task_branch_strategy(&tx, &project_id, &task_id, strategy)?;
             tx.commit()?;
             Ok(updated)
         })

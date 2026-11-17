@@ -5,12 +5,13 @@ import { Columns2 } from "lucide-react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
-import { PipelineComparisonCard, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
+import { PipelineComparisonCard, PipelineComparisonChoice, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
 import { PipelineSectionHeading } from "@/pipeline-layout";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { ComparisonCandidateOutcome, comparisonOutcome, type CandidateOutcome } from "@/workflow-comparison-outcomes";
-import type { ComparisonGroup as Comparison } from "@/workflow-comparison-selection";
+import { selectableComparisonRun, type ComparisonGroup as Comparison, type ComparisonSelection } from "@/workflow-comparison-selection";
+import { WorkflowComparisonDestination, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { ComparisonSyntheses } from "@/workflow-comparison-synthesis";
 
 type Environment = {
@@ -25,13 +26,17 @@ const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 const active = (comparison: Comparison) => comparison.candidates.some(({ state }) => !terminal.has(state));
 const validCommit = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
-export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: WorkspaceProps) {
+export function WorkflowComparisons({ checkout, openActivity, openQueueJob, onUseInPipeline }: WorkspaceProps & {
+  onUseInPipeline?: (handoff: ComparisonHandoff) => void;
+}) {
   const client = useQueryClient();
   const { projectId, checkoutId } = checkout;
   const [prompt, setPrompt] = useState("");
   const [commitOverride, setCommit] = useState<string>();
   const [models, setModels] = useState<ModelSelection[]>([]);
   const [activeId, setActiveId] = useState<string>();
+  const [included, setIncluded] = useState<ComparisonSelection>();
+  const [destination, setDestination] = useState<string>();
   const modelsQuery = useLiveModelOptions();
   const source = useQuery({
     queryKey: ["comparison-source-commit", projectId, checkoutId],
@@ -49,6 +54,8 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
     onSuccess: (group) => {
       client.setQueryData<Comparison[]>(groupsKey, (current) => [group, ...(current ?? [])]);
       setActiveId(group.id);
+      setIncluded(undefined);
+      setDestination(undefined);
     },
   });
   const canRun = Boolean(prompt.trim()) && validCommit.test(commit.trim()) && models.length > 1 && !run.isPending;
@@ -65,6 +72,11 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
     queryFn: () => invoke<CandidateOutcome[]>("model_comparison_outcomes", { projectId, groupId }),
     enabled: Boolean(groupId && result?.candidates.some(({ state, runId }) => runId && terminal.has(state))),
   });
+  const selectedRuns = included && included.groupId === groupId ? included.runIds : [];
+  const sourceRuns = result?.candidates.flatMap((candidate) => {
+    const runId = selectableComparisonRun(candidate, outcomes.data);
+    return runId && selectedRuns.includes(runId) ? [runId] : [];
+  }) ?? [];
 
   return <section className="pipeline-stack min-h-0 overflow-auto p-4" aria-label="Model comparisons">
     <PipelineSectionHeading title="Compare models" icon={<Columns2 size={20} aria-hidden />} />
@@ -91,7 +103,11 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
     </>} />
     {groups.error && <p role="alert">{String(groups.error)}</p>}
     {result && <section className="pipeline-stack pipeline-box" aria-label="Saved comparison">
-      <label className="pipeline-form">Comparison <select value={result.id} onChange={(event) => setActiveId(event.currentTarget.value)}>
+      <label className="pipeline-form">Comparison <select value={result.id} onChange={(event) => {
+        setActiveId(event.currentTarget.value);
+        setIncluded(undefined);
+        setDestination(undefined);
+      }}>
         {groups.data?.map((group) => <option value={group.id} key={group.id}>{group.prompt} · {group.commit.slice(0, 12)}</option>)}
       </select></label>
       <p className="break-all text-sm">Pinned Git commit <code>{result.commit}</code></p>
@@ -100,6 +116,7 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
       {outcomes.error && <p role="alert">{String(outcomes.error)}</p>}
       <ol className="pipeline-results" aria-label="Comparison results">
         {result.candidates.map((candidate) => {
+          const sourceRun = onUseInPipeline && result.sourceCheckoutId && selectableComparisonRun(candidate, outcomes.data);
           const rating = candidate.modelReference
             ? candidate.modelReference.rating
             : modelsQuery.options.find((entry) => sameModelSelection(entry.selection, candidate.selection))?.rating ?? null;
@@ -112,9 +129,18 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
             {candidate.runId && candidate.conversationId && <Button type="button" variant="outline"
               onClick={() => openActivity(candidate.runId!, candidate.conversationId!)}>Open execution</Button>}
             {!candidate.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(candidate.jobId)}>Open queued job</Button>}
+            {sourceRun && <PipelineComparisonChoice checked={selectedRuns.includes(sourceRun)} onChange={(checked) =>
+              setIncluded({ groupId: result.id, runIds: checked ? [...selectedRuns, sourceRun] : selectedRuns.filter((id) => id !== sourceRun) })} />}
           </PipelineComparisonCard>;
         })}
       </ol>
+      {onUseInPipeline && result.sourceCheckoutId && !active(result) &&
+        result.candidates.some((candidate) => selectableComparisonRun(candidate, outcomes.data)) && <div className="pipeline-actions">
+          <Button type="button" variant="outline" disabled={!sourceRuns.length} aria-expanded={destination === result.id}
+            onClick={() => setDestination(destination === result.id ? undefined : result.id)}>Use in pipeline</Button>
+        </div>}
+      {onUseInPipeline && destination === result.id && <WorkflowComparisonDestination key={`destination:${result.id}`} projectId={projectId}
+        sourceCheckoutId={result.sourceCheckoutId} selection={{ groupId: result.id, runIds: sourceRuns }} onUse={onUseInPipeline} />}
       <ComparisonSyntheses key={result.id} projectId={projectId} group={result} outcomes={outcomes.data} options={modelsQuery.options}
         openActivity={openActivity} openQueueJob={openQueueJob} />
     </section>}

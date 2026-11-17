@@ -10,6 +10,7 @@ import {
 import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch } from "@/ide-file-search";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
+import { ResizablePanel } from "@/panel-resize";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -50,7 +51,6 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [jumps, setJumps] = useState<Record<string, { line: number; token: number }>>({});
   const [markers, setMarkers] = useState<Record<string, CodeProblem[]>>({});
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
-  const [terminalHeight, setTerminalHeight] = useState(34);
   const [clearRevision, setClearRevision] = useState(0);
   const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered unsaved changes in src/health.ts" : "");
   const [problem, setProblem] = useState("");
@@ -246,7 +246,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={openFile} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
-              <FileTree paths={paths} active={active} onOpen={openFile} /></>}
+              <FileTree paths={paths} active={active} onOpen={openFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} /></>}
         </div>
       </FileSidebar>}
       <div className="file-workspace-main">
@@ -291,11 +291,10 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           }} />
         </div>
 
-        {bottom && <div className="ide-bottom" style={{ height: `${terminalHeight}%` }}>
+        {bottom && <ResizablePanel className="ide-bottom" edge="top" resizeKey="ide-bottom" resizeLabel="IDE bottom panel">
           <div className="ide-bottom-toolbar">
             <button type="button" className="fw-btn" aria-pressed={bottom === "terminal"} onClick={() => setBottom("terminal")}><TerminalSquare size={14} /> Terminal</button>
             <button type="button" className="fw-btn" aria-pressed={bottom === "problems"} onClick={() => setBottom("problems")}><CircleAlert size={14} /> Problems{markerEntries.length ? ` (${markerEntries.length})` : ""}</button>
-            <input aria-label="Resize bottom panel" title="Resize bottom panel" type="range" min={23} max={55} value={terminalHeight} onChange={(event) => setTerminalHeight(Number(event.target.value))} />
             <div className="file-toolbar">
               <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" disabled={bottom !== "terminal"}
                 onClick={() => setClearRevision((value) => value + 1)}><Trash2 size={14} /></button>
@@ -319,7 +318,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               {simulated && <li className="file-help">ripgrep missing · Configure its executable in Settings to enable live repository search.</li>}
             </ul>}
           </div>
-        </div>}
+        </ResizablePanel>}
         {active && buffer && <footer className="ide-statusbar">
           <span>{dirty(active) ? "Unsaved changes" : "Saved"} · UTF-8</span>
           {buffer.external !== undefined && <button type="button" className="fw-btn" onClick={() => setDialog({ kind: "conflict", path: active })}>Review external change</button>}

@@ -5,6 +5,7 @@ import { useEffect, useId, useReducer, useRef, useState, type ReactNode } from "
 import { Button } from "@/components/ui/button";
 import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
+import { QualificationMatrix } from "@/qualification-matrix";
 import { SystemInstallation } from "@/system-installation";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -436,24 +437,6 @@ function SimulatedSystem({ state, dispatch }: Simulation) {
         </form>
       </SystemGroup>
     </div>
-  );
-}
-
-export function QualificationMatrix({ examples = false }: { examples?: boolean }) {
-  return (
-    <details className="settings-matrix">
-      <summary>Qualification matrix</summary>
-      <div className="settings-table-scroll">
-        <table>
-          <thead><tr><th>CLI</th><th>Model</th><th>Host</th><th>Runner</th><th>Qualification</th></tr></thead>
-          <tbody>{examples ? <>
-            <tr><td>Codex</td><td>GPT-6.1 Sol</td><td>Windows 11</td><td>Direct</td><td>Verified · read-only and writing</td></tr>
-            <tr><td>Claude Code</td><td>Claude Sonnet 5.5</td><td>Windows 11</td><td>Direct</td><td>Verified · approval prompts</td></tr>
-            <tr><td>Antigravity</td><td>Gemini 4 Argon</td><td>Windows 10 22H2</td><td>Hyper-V guest</td><td>Blocked · pairing required</td></tr>
-          </> : <tr><td colSpan={5}>Qualification data unavailable</td></tr>}</tbody>
-        </table>
-      </div>
-    </details>
   );
 }
 

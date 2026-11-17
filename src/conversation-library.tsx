@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { MessageSquare, Search } from "lucide-react";
-import { Popover } from "radix-ui";
-import { createContext, useState } from "react";
+import { Archive, ArrowUp, MessageSquare, Search } from "lucide-react";
+import { Dialog, Popover } from "radix-ui";
+import { createContext, useCallback, useRef, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
-import { ConversationLibraryLayout } from "@/conversation-layout";
+import { ConversationLibraryGroup, ConversationLibraryLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
 
@@ -18,11 +18,21 @@ type ConversationLibraryEntry = {
   model: string | null;
   status: string | null;
   lastActivityAt: number | null;
+  organization: { pinned: boolean; unread: boolean; archived: boolean; section: ConversationLibrarySection | null };
 };
+
+type ConversationLibrarySection = { id: string; projectId: string; name: string };
+type OrganizationChange =
+  | { type: "pin"; pinned: boolean }
+  | { type: "read"; unread: boolean }
+  | { type: "archive"; archived: boolean }
+  | { type: "move"; sectionId: string | null }
+  | { type: "newSection"; name: string };
 
 type ConversationIdentity = Pick<Conversation, "id" | "checkoutId" | "title">;
 export type OpenLibraryConversation = (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
 export const conversationLibraryKey = ["conversation-library"];
+const sectionKey = ["conversation-library-sections"];
 export const ConversationLibraryNavigation = createContext<{
   checkoutId: string;
   projectId: string;
@@ -62,14 +72,27 @@ export function useConversationRename(conversation: ConversationIdentity | undef
   });
 }
 
-function useConversationLibrary(query: string, projectId: string | null, enabled = true) {
+function useConversationLibrary(query: string, projectId: string | null, enabled = true, archived = false) {
   const title = query.trim();
   return useQuery({
-    queryKey: [...conversationLibraryKey, projectId, title],
-    queryFn: () => invoke<ConversationLibraryEntry[]>("conversation_library", { query: title || null, projectId }),
+    queryKey: [...conversationLibraryKey, projectId, title, archived],
+    queryFn: () => invoke<ConversationLibraryEntry[]>("conversation_library", { query: title || null, projectId, ...(archived ? { archived } : {}) }),
     enabled,
     refetchInterval: 5_000,
   });
+}
+
+function organizeConversation({ checkoutId, id }: Pick<Conversation, "checkoutId" | "id">, change: OrganizationChange) {
+  return invoke<boolean>("organize_conversation", { checkoutId, conversationId: id, change });
+}
+
+export function useConversationLibraryRead() {
+  const client = useQueryClient();
+  return useCallback((checkoutId: string, id: string) => {
+    void organizeConversation({ checkoutId, id }, { type: "read", unread: false })
+      .then((changed) => { if (changed) return client.invalidateQueries({ queryKey: conversationLibraryKey }); })
+      .catch(() => { /* Opening a conversation remains available if updating its read status fails. */ });
+  }, [client]);
 }
 
 const activityTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -113,7 +136,20 @@ function openEntry(onOpen: OpenLibraryConversation, { checkout, conversation }: 
   return onOpen(checkout, conversation.id);
 }
 
-const libraryActionAvailable = (action: ConversationAction) => action === "rename" || action === "copy-title";
+function libraryGroups(entries: ConversationLibraryEntry[], allProjects: boolean, archived: boolean) {
+  const groups = new Map<string, { id: string; title: string; pinned: boolean; entries: ConversationLibraryEntry[] }>();
+  for (const entry of entries) {
+    const { pinned, section } = entry.organization;
+    const isPinned = pinned && !archived;
+    const id = isPinned ? "pinned" : `${entry.checkout.projectId}:${section?.id ?? ""}`;
+    const title = isPinned ? "Pinned"
+      : [allProjects ? entry.projectName : null, section?.name ?? "Conversations"].filter(Boolean).join(" · ");
+    const group = groups.get(id);
+    if (group) group.entries.push(entry);
+    else groups.set(id, { id, title, pinned: isPinned, entries: [entry] });
+  }
+  return [...groups.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
+}
 
 export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen }: {
   checkout: ProjectCheckout;
@@ -123,12 +159,33 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   onStart: () => void;
   onOpen: OpenLibraryConversation;
 }) {
+  const client = useQueryClient();
+  const libraryRef = useRef<HTMLElement>(null);
   const [projectId, setProjectId] = useState<string | null>(checkout.projectId);
   const [query, setQuery] = useState("");
+  const [archived, setArchived] = useState(false);
   const [renaming, setRenaming] = useState<ConversationIdentity>();
+  const [sectionConversation, setSectionConversation] = useState<ConversationIdentity>();
+  const [sectionName, setSectionName] = useState("");
   const [notice, setNotice] = useState("");
-  const list = useConversationLibrary(query, projectId);
+  const list = useConversationLibrary(query, projectId, true, archived);
+  const sections = useQuery({
+    queryKey: [...sectionKey, projectId],
+    queryFn: () => invoke<ConversationLibrarySection[]>("conversation_library_sections", { projectId }),
+  });
   const open = useMutation({ mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry) });
+  const organize = useMutation({
+    mutationFn: ({ conversation, change }: { conversation: ConversationIdentity; change: OrganizationChange }) =>
+      organizeConversation(conversation, change),
+    onSuccess: async (_, { change }) => {
+      await client.invalidateQueries({ queryKey: conversationLibraryKey });
+      if (change.type === "newSection") {
+        await client.invalidateQueries({ queryKey: sectionKey });
+        setSectionConversation(undefined);
+      }
+      if (change.type === "archive") setNotice(change.archived ? "Conversation moved to Archived." : "Conversation restored.");
+    },
+  });
   const registered = useQuery({
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
@@ -136,48 +193,107 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const projects = new Map([checkout, ...(registered.data ?? [])].map((item) => [
     item.projectId, item.repositoryRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? item.repositoryRoot,
   ]));
-  const error = open.error ?? list.error ?? registered.error ?? startError;
+  const error = open.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
+    (!sectionConversation ? organize.error : undefined);
 
-  function rowAction(action: ConversationAction, conversation: ConversationIdentity) {
+  function rowAction(action: ConversationAction, { conversation, organization }: ConversationLibraryEntry, sectionId?: string) {
     if (action === "rename") setRenaming(conversation);
+    if (action === "new-section") {
+      organize.reset();
+      setSectionName("");
+      setSectionConversation(conversation);
+    }
     if (action === "copy-title") {
       setNotice("");
       void Promise.resolve().then(() => navigator.clipboard.writeText(conversation.title))
         .then(() => setNotice("Title copied."))
         .catch(() => setNotice("Couldn’t copy the title."));
     }
+    if (action === "pin") organize.mutate({ conversation, change: { type: "pin", pinned: !organization.pinned } });
+    if (action === "unread") organize.mutate({ conversation, change: { type: "read", unread: !organization.unread } });
+    if (action === "archive") organize.mutate({ conversation, change: { type: "archive", archived: !organization.archived } });
+    if (action === "move") organize.mutate({ conversation, change: { type: "move", sectionId: sectionId ?? null } });
   }
 
-  return <ConversationLibraryLayout query={query} searchLabel="Search conversation titles" onQuery={setQuery}
-    onCreate={onStart} creating={startPending} filters={
+  return <ConversationLibraryLayout sectionRef={libraryRef} query={query} searchLabel="Search conversation titles" onQuery={setQuery}
+    onCreate={() => { setArchived(false); setQuery(""); setProjectId(checkout.projectId); onStart(); }} creating={startPending} filters={<>
       <select className="conv-select conv-project-filter" aria-label="Project" value={projectId ?? ""}
         onChange={(event) => setProjectId(event.currentTarget.value || null)}>
         <option value="">All projects</option>
         {[...projects].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select>
-    }>
+      <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
+        title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
+    </>}>
     {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
     {list.isPending && <p role="status" className="conv-sidebar-note">Loading conversations…</p>}
-    {list.data?.length === 0 && <p className="conv-sidebar-note">{query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
-    <ul className="conv-session-list">
-      {list.data?.map((entry) => <li key={entry.conversation.id}>
-        {renaming?.id === entry.conversation.id
-          ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
-          : <ConversationRow title={entry.conversation.title} available={libraryActionAvailable}
-            onAction={(action) => rowAction(action, entry.conversation)}>
-            <button type="button" className="conv-session-button items-start" disabled={open.isPending}
-              aria-label={entry.conversation.title} aria-describedby={`library-metadata-${entry.conversation.id}`}
-              aria-current={entry.conversation.id === activeId ? "page" : undefined} onClick={() => open.mutate(entry)}>
-              <MessageSquare className="mt-0.5" aria-hidden />
-              <span className="min-w-0">
-                <span className="block font-medium">{entry.conversation.title}</span>
-                <ConversationMetadata entry={entry} id={`library-metadata-${entry.conversation.id}`} />
-              </span>
-            </button>
-          </ConversationRow>}
-      </li>)}
-    </ul>
+    {list.data?.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
+      : query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
+    {libraryGroups(list.data ?? [], projectId === null, archived).map(({ id, title, entries }) =>
+      <ConversationLibraryGroup key={id} title={title}>
+        {entries.map((entry) => {
+          const { conversation, organization } = entry;
+          const metadataId = `library-metadata-${conversation.id}`;
+          const unreadId = `library-unread-${conversation.id}`;
+          return <li key={conversation.id}>
+            {renaming?.id === conversation.id
+              ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
+              : <ConversationRow title={conversation.title} {...organization}
+                sections={sections.data?.filter(({ projectId }) => projectId === entry.checkout.projectId)}
+                available={(action) => action === "rename" || action === "copy-title" ||
+                  (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
+                onAction={(action, sectionId) => rowAction(action, entry, sectionId)}>
+                <button type="button" className="conv-session-button items-start" disabled={open.isPending}
+                  data-conversation-id={conversation.id} aria-description={organization.unread ? "Unread" : undefined}
+                  aria-label={conversation.title} aria-describedby={organization.unread ? `${unreadId} ${metadataId}` : metadataId}
+                  aria-current={conversation.id === activeId ? "page" : undefined} onClick={() => open.mutate(entry)}>
+                  <MessageSquare className="mt-0.5" aria-hidden />
+                  <span className="min-w-0">
+                    <span className="block font-medium">{conversation.title}</span>
+                    <ConversationMetadata entry={entry} id={metadataId} />
+                  </span>
+                  {organization.unread && <>
+                    <i className="conv-unread mt-1.5" aria-hidden />
+                    <span id={unreadId} className="sr-only">Unread</span>
+                  </>}
+                </button>
+              </ConversationRow>}
+          </li>;
+        })}
+      </ConversationLibraryGroup>)}
     {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}
+    {sectionConversation && <Dialog.Root open onOpenChange={(shown) => {
+      if (!shown && !organize.isPending) { setSectionConversation(undefined); organize.reset(); }
+    }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="conv-dialog-scrim" />
+        <Dialog.Content className="conv-dialog" onCloseAutoFocus={(event) => {
+          const library = libraryRef.current;
+          const row = Array.from(library?.querySelectorAll<HTMLElement>("[data-conversation-id]") ?? [])
+            .find(({ dataset }) => dataset.conversationId === sectionConversation.id);
+          const focus = row ?? library?.querySelector<HTMLElement>('input[type="search"]');
+          if (focus) { event.preventDefault(); focus.focus(); }
+        }}>
+          <Dialog.Title>Create section</Dialog.Title>
+          <Dialog.Description>{sectionConversation.title}</Dialog.Description>
+          <form className="conv-dialog-form" onSubmit={(event) => {
+            event.preventDefault();
+            if (sectionName.trim() && !organize.isPending) organize.mutate({ conversation: sectionConversation,
+              change: { type: "newSection", name: sectionName.trim() } });
+          }}>
+            <label>Section name<input value={sectionName} maxLength={96} required disabled={organize.isPending}
+              onChange={(event) => setSectionName(event.currentTarget.value)} /></label>
+            {organize.error && <p role="alert" className="text-destructive">{String(organize.error)}</p>}
+            <footer>
+              <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={organize.isPending}>Cancel</button></Dialog.Close>
+              <button type="submit" className="conv-primary-button" disabled={!sectionName.trim() || organize.isPending}>
+                Save <ArrowUp size={14} aria-hidden />
+              </button>
+            </footer>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>}
   </ConversationLibraryLayout>;
 }
 

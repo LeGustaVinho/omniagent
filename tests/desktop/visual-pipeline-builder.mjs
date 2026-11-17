@@ -520,5 +520,20 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     name: "visual-pipeline-runs", canvas: executionCanvas, inspector: '[aria-label="Execution node evidence"]', nodeLabel: "Inspect execution node",
   });
   await launchFromTask({ browser, invoke, capture, checkout, title: `Task for ${title}`, version, sourceRevision });
+
+  await click(browser.$('nav[aria-label="Pipelines views"]').$("button=Roles & templates"));
+  const templates = browser.$('[aria-label="Saved workflow templates"]');
+  await click(templates.$(`.//button[.//span[contains(normalize-space(.), '${title}')]]`));
+  const pinnedTemplate = templates.$('[aria-label="Selected workflow template"]');
+  await textIsVisible(browser, pinnedTemplate, revision);
+  await click(pinnedTemplate.$("button=Edit in Builder"));
+  const edit = browser.$('[aria-label="Workflow package editor"]');
+  await textIsVisible(browser, edit, title);
+  const revisionDraft = (await invoke(browser, "list_workflow_packages", { projectId }))
+    .find((entry) => entry.id !== saved.id && entry.name === title && !entry.published);
+  assert.ok(revisionDraft, "Opening a saved template should create a real revision draft");
+  const based = await invoke(browser, "inspect_workflow_package", { projectId, draftId: revisionDraft.id });
+  assert.deepEqual(based.package.members[0].base, { ...version, kind: "pipeline", destination: "project" });
+  closePosition(based.layouts.pipeline[load], saved.layouts.pipeline[load]);
   return browser;
 }

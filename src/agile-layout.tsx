@@ -1,7 +1,7 @@
 import { LayoutGrid, List, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react";
-import { DeliveryStatus } from "@/tasks-git-ui";
+import { DeliveryDetailPanel, DeliveryStatus } from "@/tasks-git-ui";
 import "./agile-layout.css";
 
 type BoardView = "kanban" | "table";
@@ -76,7 +76,7 @@ export function AgileDetailFrame({ label, title, identity, state, note, closeLab
   label: string; title: string; identity: string; state?: string; note?: string;
   closeLabel: string; close: () => void; navigation?: ReactNode; children: ReactNode;
 }) {
-  return <aside className="delivery-detail" aria-label={label}>
+  return <DeliveryDetailPanel label={label} resizeKey="task-details">
     <section className="agile-detail-frame" aria-label={title}>
       <header className="agile-detail-heading">
         <div className="min-w-0">
@@ -93,7 +93,7 @@ export function AgileDetailFrame({ label, title, identity, state, note, closeLab
       {navigation}
       <div className="delivery-detail-content agile-detail-content">{children}</div>
     </section>
-  </aside>;
+  </DeliveryDetailPanel>;
 }
 
 export function AgileDetailTabs({ view, onViewChange }: { view: WorkDetailView; onViewChange: (view: WorkDetailView) => void }) {
@@ -101,6 +101,26 @@ export function AgileDetailTabs({ view, onViewChange }: { view: WorkDetailView; 
     {workDetailViews.map((item) => <button type="button" key={item} className="delivery-tab"
       aria-pressed={view === item} onClick={() => onViewChange(item)}>{item}</button>)}
   </nav>;
+}
+
+type WorkRelation = { id: string; kind: string; title: string; state?: string };
+
+export function AgileWorkRelations({ parent, children, openWork, title = "Child work" }: {
+  parent?: WorkRelation; children: WorkRelation[]; openWork: (id: string) => void; title?: string;
+}) {
+  return <>
+    {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => openWork(parent.id)}>
+      {parent.kind} · {parent.title}
+    </button>}
+    {children.length > 0 && <section aria-label={title} className="grid gap-2">
+      <h4 className="text-xs font-semibold">{title}</h4>
+      <ul className="divide-y divide-border">{children.map((child) => <li key={child.id} className="flex items-center justify-between gap-2 py-1.5">
+        <button type="button" className="agile-ref text-left" aria-label={`Open ${child.kind} ${child.title}`}
+          onClick={() => openWork(child.id)}>{child.title}</button>
+        {child.state && <DeliveryStatus>{child.state}</DeliveryStatus>}
+      </li>)}</ul>
+    </section>}
+  </>;
 }
 
 export function AgileWorkDialog({ title, description, closeLabel, busy, onCloseAutoFocus, children }: {

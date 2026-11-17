@@ -164,6 +164,55 @@ describe("project queue", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it("creates an example job with the same instructions, CLI, model and operation controls", async () => {
+    const user = userEvent.setup();
+    renderQueue({ simulation: { scenario: "delivery", epoch: 1, delivery: "queued", advanceDelivery: () => {} } });
+    await user.click(screen.getByRole("button", { name: "Add job" }));
+    const form = within(screen.getByRole("form", { name: "Managed job" }));
+    const queueJob = form.getByRole<HTMLButtonElement>("button", { name: "Queue job" });
+
+    await user.type(form.getByLabelText("Instructions"), "Review the generated candidate.");
+    await user.selectOptions(form.getByLabelText("Operation"), "plan");
+    await user.click(form.getByRole("button", { name: "Model · Choose model" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "GPT-6.1 Sol" }));
+    expect(queueJob.disabled).toBe(false);
+    await user.selectOptions(form.getByLabelText("CLI"), "claude");
+    expect(queueJob.disabled).toBe(true);
+    await user.click(form.getByRole("button", { name: "Model · Choose model" }));
+    expect(screen.queryByRole("menuitemradio", { name: "GPT-6.1 Sol" })).toBeNull();
+    await user.click(screen.getByRole("menuitemradio", { name: "Claude Sonnet 5.5" }));
+    await user.click(queueJob);
+
+    const details = within(screen.getByRole("complementary", { name: "Selected job" }));
+    expect(details.getByRole("heading", { name: "Review the generated candidate." })).toBeTruthy();
+    expect(details.getByText("Claude Sonnet 5.5")).toBeTruthy();
+    expect(details.getByText("plan")).toBeTruthy();
+    await user.click(details.getByRole("button", { name: "Pause job" }));
+    expect(details.getByText("Paused")).toBeTruthy();
+    await user.click(details.getByRole("button", { name: "Resume job" }));
+    await user.click(details.getByRole("button", { name: "Cancel pending job" }));
+    expect(details.getByText("Cancelled")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps the parent's execution scope when queuing an example subagent", async () => {
+    const user = userEvent.setup();
+    renderQueue({ simulation: { scenario: "delivery", epoch: 1, delivery: "queued", advanceDelivery: () => {} } });
+    await user.click(screen.getByRole("button", { name: "Index repository notes" }));
+    const details = within(screen.getByRole("complementary", { name: "Selected job" }));
+    await user.click(details.getByRole("button", { name: "Dispatch" }));
+    await user.click(details.getByRole("button", { name: "Add subagent" }));
+
+    const form = within(screen.getByRole("form", { name: "Managed subagent" }));
+    expect(form.queryByRole("option", { name: "Repository write" })).toBeNull();
+    await user.type(form.getByLabelText("Instructions"), "Check the release links.");
+    await user.click(form.getByRole("button", { name: "Model · Choose model" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "GPT-6.1 Sol" }));
+    await user.click(form.getByRole("button", { name: "Queue subagent" }));
+    expect(details.getByText("Operator · parent job Index repository notes")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it("links an unmet skill to the attempt that checked it", async () => {
     const rejected: JobInspection = {
       ...runningJob,

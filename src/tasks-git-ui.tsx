@@ -1,6 +1,7 @@
 import { AlertCircle, CircleOff, FlaskConical } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { ResizablePanel } from "@/panel-resize";
 import type { WorkspaceProps } from "@/workbench-contract";
 import "@/tasks-git.css";
 
@@ -13,6 +14,13 @@ const statusTone: Record<string, string> = {
 
 export function DeliveryStatus({ children }: { children: string }) {
   return <span className="delivery-status" data-tone={statusTone[children]}>{children}</span>;
+}
+
+export function DeliveryDetailPanel({ label, resizeKey, className, children }: {
+  label: string; resizeKey: string; className?: string; children: ReactNode;
+}) {
+  return <ResizablePanel as="aside" className={className ? `delivery-detail ${className}` : "delivery-detail"}
+    aria-label={label} edge={["left", "top"]} resizeKey={resizeKey} resizeLabel={label}>{children}</ResizablePanel>;
 }
 
 export function IntegrationNotice({ title, children, onSimulate }: {

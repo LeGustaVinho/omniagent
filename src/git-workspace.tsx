@@ -1,5 +1,4 @@
-import { ArrowDownToLine, ArrowRight, ChevronDown, FileDiff, GitBranch, GitCommitHorizontal, GitMerge, Plus, RefreshCw, X } from "lucide-react";
-import { Dialog } from "radix-ui";
+import { ArrowDownToLine, ArrowRight, ChevronDown, FileDiff, GitBranch, GitCommitHorizontal, GitMerge, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import ChangesPanel from "@/changes-panel";
 import { LiveGitWorkspace } from "@/git-live-workspace";
@@ -7,17 +6,15 @@ import { Button } from "@/components/ui/button";
 import { deliveryGitModes, deliveryGitSetting, deliveryGitWait, type DeliveryGitPolicy } from "@/delivery-git-policy";
 import { releaseCommits, revisionMessage, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { useGitSimulation } from "@/git-simulation";
-import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
+import { GitDiffSourceSelect, GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
+import { GitWorktreeDialog } from "@/git-worktree-dialog";
 import { deliveryBase, deliveryBranch, deliveryCommit, deliveryCommitSha, deliveryMergeSha, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
-import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
+import { DeliveryDetailPanel, DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const gitViews = ["Changes", "Worktrees", "History"] as const;
 type GitView = typeof gitViews[number];
-const sources: { id: ChangesSource; label: string }[] = [
-  { id: "working", label: "Working tree" }, { id: "staged", label: "Staged" },
-  { id: "branch", label: "Branch comparison" }, { id: "saved", label: "Saved diff" },
-];
+const sources: ChangesSource[] = ["working", "staged", "branch", "saved"];
 
 function EmptyGitView({ view, props }: { view: GitView; props: WorkspaceProps }) {
   const labels = {
@@ -30,39 +27,13 @@ function EmptyGitView({ view, props }: { view: GitView; props: WorkspaceProps })
 
 function WorktreeDialog({ onClose }: { onClose: () => void }) {
   const git = useGitSimulation();
-  const [branchName, setBranchName] = useState("");
-  const [path, setPath] = useState("");
-  const [base, setBase] = useState(deliveryBase);
-  const branch = branchName.trim();
-  const worktreePath = path.trim() || (branch ? `worktrees/${branch.replaceAll("/", "-")}` : "");
-  const duplicate = git.worktrees.some((tree) => tree.branch === branch || tree.path === worktreePath);
-
-  function create(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!branch || duplicate) return;
-    git.addWorktree(branch, worktreePath, base);
-    onClose();
-  }
-
-  return (
-    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[min(31rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-xl border border-border bg-card p-5 shadow-xl">
-          <header className="mb-3 flex items-center justify-between gap-2"><Dialog.Title className="font-semibold">New worktree</Dialog.Title><Dialog.Close aria-label="Close worktree setup"><X size={16} /></Dialog.Close></header>
-          <Dialog.Description className="mb-4 text-sm text-muted-foreground">Choose the branch, starting revision and path for the new checkout.</Dialog.Description>
-          <form className="grid gap-3" onSubmit={create}>
-            <label className="delivery-field">Branch<input className="delivery-filter" required placeholder="agent/my-task" value={branchName} onChange={(event) => setBranchName(event.target.value)} /></label>
-            <label className="delivery-field">Base revision<select className="delivery-filter" value={base} onChange={(event) => setBase(event.target.value)}>{releaseCommits.map((commit) => <option key={commit.id} value={commit.id}>{commit.id} · {commit.branch}</option>)}</select></label>
-            <label className="delivery-field">Worktree path<input className="delivery-filter" placeholder={worktreePath || "worktrees/my-task"} value={path} onChange={(event) => setPath(event.target.value)} /></label>
-            {branch && <p className="break-all text-xs text-muted-foreground">Preview <code>{base} → {branch} → {worktreePath}</code></p>}
-            {duplicate && <InlineIssue>A worktree with that branch or path already exists.</InlineIssue>}
-            <Button type="submit" className="justify-self-start px-2.5 py-1.5 text-xs" disabled={!branch || duplicate}>Create worktree</Button>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
+  return <GitWorktreeDialog
+    revisions={releaseCommits.map((commit) => ({ value: commit.id, label: `${commit.id} · ${commit.branch}` }))}
+    defaultBase={deliveryBase} pathHint="worktrees/my-task"
+    defaultPath={(branch) => branch ? `worktrees/${branch.replaceAll("/", "-")}` : ""}
+    validate={({ branch, path }) => git.worktrees.some((tree) => tree.branch === branch || tree.path === path)
+      ? "A worktree with that branch or path already exists." : undefined}
+    create={({ branch, path, base }) => { git.addWorktree(branch, path, base); onClose(); }} onClose={onClose} />;
 }
 
 function Worktrees({ props }: { props: WorkspaceProps }) {
@@ -119,7 +90,7 @@ function GitHistory({ props }: { props: WorkspaceProps }) {
           </tr>)}
         </GitWorkspaceTable>
       </div>
-      {commit && <aside className="delivery-detail" aria-label="Selected commit">
+      {commit && <DeliveryDetailPanel label="Selected commit" resizeKey="git-commit">
         <div className="delivery-detail-content grid content-start gap-3 p-3.5">
           <GitCommitHorizontal size={19} className="text-muted-foreground" />
           <h3 className="text-sm font-semibold">{commit.title}</h3>
@@ -127,7 +98,7 @@ function GitHistory({ props }: { props: WorkspaceProps }) {
           <p className="text-sm text-muted-foreground">{isCandidate ? "Captured candidate associated with the release task." : "No attempt snapshot is attached to this revision."}</p>
           {isCandidate && <Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openChanges("saved")}><FileDiff size={15} /> Inspect saved diff</Button>}
         </div>
-      </aside>}
+      </DeliveryDetailPanel>}
     </div>
   );
 }
@@ -160,7 +131,7 @@ function ChangeOperations({ props, source, baseRef }: { props: WorkspaceProps; s
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <ChangesPanel {...props} source={source} baseRef={baseRef} />
       </div>
-      <aside className="delivery-detail" aria-label="Git operations">
+      <DeliveryDetailPanel label="Git operations" resizeKey="git-operations">
         <div className="delivery-detail-content grid content-start gap-3 p-3.5">
           <h3 className="text-sm font-semibold">{source === "saved" ? "Candidate review" : "Git operations"}</h3>
           {writerBusy && <InlineIssue>This worktree has a reserved writer. Review the active or interrupted attempt to release it.</InlineIssue>}
@@ -200,7 +171,7 @@ function ChangeOperations({ props, source, baseRef }: { props: WorkspaceProps; s
               </div>
           )}
         </div>
-      </aside>
+      </DeliveryDetailPanel>
     </div>
   );
 }
@@ -229,7 +200,7 @@ function SimulatedGitWorkspace(props: WorkspaceProps) {
         {view === "Worktrees" && <Button type="button" variant="outline" className="ml-auto px-2.5 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Worktree integration pending"} onClick={() => setCreatingWorktree(true)}><Plus size={14} /> New worktree</Button>}
     </>}>
       {view === "Changes" && <div className="delivery-toolbar min-h-0 py-2">
-        <label><span className="sr-only">Diff source</span><select className="delivery-filter" value={source} onChange={(event) => setSource(event.target.value as ChangesSource)}>{sources.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select></label>
+        <GitDiffSourceSelect sources={sources} value={source} onChange={setSource} />
         {source === "branch" && <label><span className="sr-only">Base reference</span><select className="delivery-filter" value={baseRef} onChange={(event) => setBaseRef(event.target.value)}><option>origin/main</option><option>main</option></select></label>}
         {simulation && (source === "working" || source === "saved") && <Button type="button" variant="outline" className="ml-auto px-2.5 py-1.5 text-xs" onClick={() => props.openChanges(source === "saved" ? "saved" : "working")}>Open changes panel</Button>}
       </div>}

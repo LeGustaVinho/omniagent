@@ -9,7 +9,7 @@ export type NoteRevision = {
   baseCommit: string | null;
 };
 type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string };
-type DocumentOpen = { status: "document"; document: RepositoryDocument }
+export type DocumentOpen = { status: "document"; document: RepositoryDocument }
   | { status: "missing" | "unsupported_encoding"; relativePath?: string };
 type Recovery = { message: string; editedPath: string | null; displacedPath: string | null };
 type DocumentSave = { status: "saved"; document: RepositoryDocument }

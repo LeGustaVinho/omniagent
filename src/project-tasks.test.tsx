@@ -99,7 +99,8 @@ it("records manual completion after resolving the checklist and preserves histor
 
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "epic");
   await user.click(await screen.findByRole("button", { name: epic.title }));
-  await within(screen.getByRole("region", { name: epic.title })).findByText("Completed");
+  const epicStatus = within(screen.getByRole("region", { name: epic.title })).getByRole("status");
+  await waitFor(() => expect(epicStatus.textContent).toBe("Completed"));
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "task");
   await user.click(await screen.findByRole("button", { name: task.title }));
   details = within(screen.getByRole("region", { name: task.title }));
@@ -120,5 +121,6 @@ it("records manual completion after resolving the checklist and preserves histor
 
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "epic");
   await user.click(await screen.findByRole("button", { name: epic.title }));
-  await within(screen.getByRole("region", { name: epic.title })).findByText("Backlog");
+  const reopenedEpicStatus = within(screen.getByRole("region", { name: epic.title })).getByRole("status");
+  await waitFor(() => expect(reopenedEpicStatus.textContent).toBe("Backlog"));
 });

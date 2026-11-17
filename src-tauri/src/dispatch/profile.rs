@@ -312,7 +312,11 @@ fn reported_model(scope: &CapabilityScope) -> ObservedModel {
     }
 }
 
-fn same_profile(assessment: &CapabilityScope, selected: &SessionScope, checkout_id: &str) -> bool {
+pub(super) fn same_profile(
+    assessment: &CapabilityScope,
+    selected: &SessionScope,
+    checkout_id: &str,
+) -> bool {
     assessment.provider == selected.provider
         && assessment.profile_id == selected.profile_id
         && assessment.cli_version == selected.cli_version
@@ -497,6 +501,9 @@ mod tests {
                 vec![b"private wire bytes".to_vec()],
             )
             .await?;
+        let prepared_page =
+            serde_json::to_value(store.desktop_capability_qualifications(None, None).await?)?;
+        assert_eq!(prepared_page["records"], serde_json::json!([]));
         store
             .settle_dispatch(dispatch_id.clone(), Delivery::Submitted)
             .await?;
@@ -583,6 +590,26 @@ mod tests {
         drop(store);
 
         let store = Store::open(path)?;
+        let page =
+            serde_json::to_value(store.desktop_capability_qualifications(None, None).await?)?;
+        let profile = &page["records"][0];
+        assert_eq!(profile["runId"], run_id);
+        assert_eq!(profile["reportedModel"], "effective-at-dispatch");
+        assert_eq!(profile["capabilities"][0]["status"], "fixture_passed");
+        assert_eq!(
+            profile["capabilities"][0]["evidence"]["origin"],
+            "authenticated_fixture"
+        );
+        assert_eq!(profile["capabilities"][1]["status"], "blocked");
+        let public_page = page.to_string();
+        for private in [
+            "internal-account-binding",
+            "protected private prompt",
+            "original-configuration",
+            "saved-artifact",
+        ] {
+            assert!(!public_page.contains(private));
+        }
         assert!(
             store
                 .dispatch_profile_evidence(

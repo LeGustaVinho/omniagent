@@ -11,7 +11,7 @@ export type ConversationMenuProps = {
   pinned?: boolean;
   unread?: boolean;
   archived?: boolean;
-  sections?: readonly string[];
+  sections?: readonly { id: string; name: string }[];
   onAction: (action: ConversationAction, section?: string) => void;
   available?: (action: ConversationAction) => boolean;
 };
@@ -31,7 +31,7 @@ function readActions(props: ConversationMenuProps) {
   ];
   const section: ItemDescription[] = [
     { action: "move", label: "No section" },
-    ...(props.sections ?? []).map((section) => ({ action: "move" as const, label: section, section })),
+    ...(props.sections ?? []).map(({ id, name }) => ({ action: "move" as const, label: name, section: id })),
     { action: "new-section", label: "New section…", icon: <ListPlus /> },
   ];
   const fork: ItemDescription = { action: "fork", label: "Create fork…", icon: <GitFork /> };

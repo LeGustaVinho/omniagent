@@ -5,10 +5,96 @@ use crate::{
     tasks::TaskPlacement,
     workflows::{
         ArtifactKind, Endpoint, NodeConfiguration, NodeInputs, NodeInstance, Wire, WorkflowGraph,
-        WorkflowHostSubmission, tests::approved_delivery_repository,
+        WorkflowHostSubmission,
+        tests::{approved_delivery_repository, link_reviewed_delivery_fixture},
     },
 };
 use serde_json::json;
+
+#[tokio::test]
+async fn a_note_plan_reopens_the_exact_delivery_and_only_its_current_linked_task() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let database = dir.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, dir.path()).await?;
+    let project = repo.project_id.clone();
+    let path = Path::new(&repo.checkout_root).join("brief.md");
+    let revision = store
+        .capture_repository_markdown(repo.checkout_id.clone(), path.clone())
+        .await?
+        .revision;
+    let source = WorkflowLaunchSource {
+        checkout_id: repo.checkout_id.clone(),
+        revision_id: revision.id,
+    };
+    let request = "plan-the-saved-note".to_owned();
+    let run = store
+        .launch_builtin_repository_delivery_request(
+            project.clone(),
+            source.clone(),
+            request.clone(),
+        )
+        .await?;
+    assert_eq!(
+        store
+            .launch_builtin_repository_delivery_request(project.clone(), source.clone(), request)
+            .await?,
+        run
+    );
+    assert_eq!(
+        store
+            .repository_note_planning(project.clone(), source.clone())
+            .await?,
+        [RepositoryNotePlanning {
+            run_id: run.id.clone(),
+            task: None
+        }]
+    );
+    let (linked, _, _) = link_reviewed_delivery_fixture(&store, &repo, None, &run).await?;
+    let ArtifactValue::Task(linked) = linked.value else {
+        anyhow::bail!("Expected a linked Task")
+    };
+    assert_eq!(
+        store
+            .repository_note_planning(project.clone(), source.clone())
+            .await?[0]
+            .task
+            .as_ref()
+            .map(|task| &task.id),
+        Some(&linked.task_id)
+    );
+
+    std::fs::write(&path, "A different saved revision")?;
+    let new_revision = store
+        .capture_repository_markdown(repo.checkout_id.clone(), path)
+        .await?
+        .revision;
+    let new_source = WorkflowLaunchSource {
+        checkout_id: repo.checkout_id,
+        revision_id: new_revision.id,
+    };
+    let reopened = Store::open(database)?;
+    assert!(
+        reopened
+            .repository_note_planning(project.clone(), new_source)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .repository_note_planning("another-project".into(), source.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reopened.repository_note_planning(project, source).await?[0]
+            .task
+            .as_ref()
+            .map(|task| &task.id),
+        Some(&linked.task_id)
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_restart()

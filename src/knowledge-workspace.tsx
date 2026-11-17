@@ -20,9 +20,11 @@ import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
 import { RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
+import { ResizablePanel } from "@/panel-resize";
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
+import { RepositoryNotePlanning, useRepositoryNotePlans } from "@/repository-note-planning";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { asNoteLocation, linkPreviewValue, resolveRepositoryLink, suggestRepositoryLinks, useRepositoryLinkPreviews,
   type IndexedLinkLocation, type IndexedLinkResolution, type IndexedNoteDetails, type IndexedNoteRelationships } from "@/repository-note-links";
@@ -55,6 +57,8 @@ type KnowledgeDialog =
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "launch"; source: NoteRevision }
+  | { kind: "plan"; source: NoteRevision }
+  | { kind: "linkedTasks" }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
   | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number; manual?: boolean }
   | { kind: "repositoryAttachment"; paths: string[]; label: string }
@@ -109,7 +113,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     queryFn: () => invoke<NoteGraphProjection["edges"]>("repository_note_edges", { checkoutId: checkout.checkoutId }),
   });
   const [inspector, setInspector] = useState<Inspector | null>(window.innerWidth >= 1180 ? "outline" : null);
-  const [modes, setModes] = useState<Record<string, NoteMode>>({});
+  const [mode, setMode] = useState<NoteMode>("live");
+  const [editAlongsideReading, setEditAlongsideReading] = useState<ReadonlySet<string>>(() => new Set());
   const [jumps, setJumps] = useState<Record<string, NoteJump>>({});
   const [dialog, setDialog] = useState<KnowledgeDialog>();
   const [destination, setDestination] = useState("");
@@ -124,9 +129,16 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const note = active ? notes[active] : undefined;
   const savedNote = active ? repository.notes[active] : undefined;
   const canLaunchFromNote = Boolean(savedNote && !savedNote.sourceProblem && !isDirty(savedNote));
+  const notePlans = useRepositoryNotePlans(checkout.projectId, savedNote && !savedNote.sourceProblem ? savedNote.base : undefined);
+  const linkedTasks = [...new Map(notePlans.data?.flatMap(({ task }) => task ? [[task.id, task] as const] : [])).values()];
+  const sampleDeliveryNote = simulation && active === deliveryNote;
+  const showPlanAction = savedNote || sampleDeliveryNote && simulation.delivery === "note";
+  const showLinkedTask = linkedTasks.length > 0 || sampleDeliveryNote && simulation.delivery !== "note";
+  const canPlan = savedNote ? canLaunchFromNote : !isDirty(note);
   const conflictRecovery = dialog?.kind === "conflict" ? repository.notes[dialog.path]?.recovery : undefined;
   const source = note?.content ?? "";
-  const activeMode = active ? modes[active] ?? "live" : "live";
+  const editorMode = (path: string) => mode === "reading" && editAlongsideReading.has(path) ? "live" : mode;
+  const activeMode = dock.view === "reading" ? "reading" : active ? editorMode(active) : mode;
   const showIndexed = !simulated && Boolean(active) && noteIndex.index.isSuccess;
   const outlineIndex = useQuery({
     queryKey: ["repository-indexed-note", checkout.checkoutId, active, noteIndex.index.dataUpdatedAt],
@@ -248,7 +260,6 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     const next = location && normalizeRepositoryPath(location.path);
     if (!next || !location) return;
     lastTarget.current = target;
-    if (location.line) setModes((before) => before[next] === "reading" ? { ...before, [next]: "live" } : before);
     open(next, location.line);
   }, [dock.ready, open, target]);
 
@@ -290,6 +301,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     setNotes((before) => ({ ...before, [path]: { content, saved: content, revision: entry.revision + Number(entry.external !== undefined) } }));
   };
   const closePanel = (path: string, api: FilePanelApi) => {
+    if (api.id === `reading:${path}` && editAlongsideReading.has(path)) {
+      const remaining = new Set(editAlongsideReading);
+      remaining.delete(path);
+      setEditAlongsideReading(remaining);
+    }
     api.close();
     if (!simulated && !dock.api?.panels.some((panel) => (panel.params as { path?: string } | undefined)?.path === path)) {
       repository.stopWatching(path);
@@ -391,7 +407,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     delete changed[proposal.path];
     changed[proposal.destination] = updated;
     setNotes(changed);
-    for (const id of [`editor:${proposal.path}`, `reading:${proposal.path}`, `split:${proposal.path}`]) dock.api?.getPanel(id)?.api.close();
+    for (const panel of [...dock.api?.panels ?? []]) {
+      if (panel.params?.path === proposal.path) closePanel(proposal.path, panel.api);
+    }
     open(proposal.destination);
     setStatus(skipped.length ? `Renamed ${proposal.destination}. ${skipped.length} link rewrites skipped after an external change.`
       : `Renamed ${proposal.destination} and rewrote links in ${proposal.edits.length} notes.`);
@@ -418,7 +436,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           {display === "search" ? <KnowledgeSearch query={query} onQueryChange={setQuery} results={matches}
             pending={!simulated && noteIndex.searching} error={!simulated && noteIndex.error ? String(noteIndex.error) : undefined}
             focusRequest={focusSearch} onOpen={openLocation} />
-            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />}
+            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open}
+              checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} />}
         </div>
       </FileSidebar>}
       <div className="file-workspace-main">
@@ -438,11 +457,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         {status && <p role="status" className="file-status">{status}</p>}
         {!graph && <div className="note-mode-bar">
           <div className="note-modes" aria-label="Note display modes">
-            {([["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const).map(([mode, label]) => (
-              <button key={mode} type="button" className="fw-btn" disabled={!note} aria-pressed={activeMode === mode} onClick={() => {
+            {([["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const).map(([choice, label]) => (
+              <button key={choice} type="button" className="fw-btn" disabled={!note} aria-pressed={activeMode === choice} onClick={() => {
                 if (active) {
                   dock.open(active);
-                  setModes((before) => ({ ...before, [active]: mode }));
+                  setMode(choice);
+                  setEditAlongsideReading(new Set());
                 }
               }}>{label}</button>
             ))}
@@ -451,7 +471,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             <button type="button" className="fw-icon" title="Save note (Ctrl+S)" aria-label="Save note" disabled={!isDirty(note)}
               onClick={() => { if (active) save(active); }}><Save size={15} /></button>
             <button type="button" className="fw-icon" title="Split Reading view" aria-label="Split Reading view" disabled={!note}
-              onClick={() => { if (active) { setModes((before) => before[active] === "reading" ? { ...before, [active]: "live" } : before); dock.split(active, "reading"); } }}><SplitSquareHorizontal size={15} /></button>
+              onClick={() => {
+                if (!active) return;
+                if (mode === "reading") setEditAlongsideReading((before) => new Set(before).add(active));
+                dock.split(active, "reading");
+              }}><SplitSquareHorizontal size={15} /></button>
             <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note"
               disabled={!note || (!simulated && (isDirty(note) || Boolean(active && repository.notes[active]?.sourceProblem)))}
               onClick={() => {
@@ -477,7 +501,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                     ? <FileUnavailable title="Note unavailable" path={path} detail={failure} />
                     : <p role="status" className="file-help">Loading {path}…</p>;
                 }
-                const selectedMode = view === "reading" ? "reading" : modes[path] ?? "live";
+                const selectedMode = view === "reading" ? "reading" : editorMode(path);
                 const onLink = (link: NoteTarget) => { void navigateLink(path, link); };
                 const sourceProblem = repository.notes[path]?.sourceProblem;
                 return (
@@ -517,7 +541,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                     : <p role="status" className="file-help">Loading note graph…</p>}
               </Suspense>}
           </div>}
-          {inspector && !graph && <aside className="note-inspector" aria-label="Note details">
+          {inspector && !graph && <ResizablePanel as="aside" className="note-inspector" aria-label="Note details"
+            edge="left" resizeKey="note-details" resizeLabel="note details">
             <div className="note-inspector-views">
               {([[ListTree, "outline", "Outline"], [Link2, "links", "Links"], [FileText, "properties", "Properties"], [Paperclip, "attachments", "Attachments"]] as const)
                 .map(([Icon, view, label]) => <button type="button" key={view} className="fw-icon" aria-label={label} aria-pressed={view === inspector} title={label}
@@ -559,7 +584,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                 </section>}
               </>}
             </div>
-          </aside>}
+          </ResizablePanel>}
         </div>
 
         {active && note && !graph && <footer className="ide-statusbar note-statusbar" aria-label="Note status and actions">
@@ -575,17 +600,31 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               setStatus(`External changes need review in ${active}`);
               reviewExternalChange(active, external);
             }}>Simulate external change</button>}
-            {simulation && active === deliveryNote && (simulation.delivery === "note" ? <button type="button" className="fw-btn fw-primary" disabled={isDirty(note)}
-              title={isDirty(note) ? "Save this note before planning from its revision" : "Start Plan Mode from the saved note"}
-              onClick={() => { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }}><Wand2 size={14} />Plan from note</button>
-              : <button type="button" className="fw-btn" onClick={() => openWorkspace("tasks", "release")}><GitFork size={14} />Open linked task</button>)}
-            {savedNote && <button type="button" className="fw-btn fw-primary" disabled={!canLaunchFromNote}
+            {showPlanAction && <button type="button" className="fw-btn fw-primary" disabled={!canPlan}
+              title={canPlan ? "Start Plan Mode from the saved note" : "Save this note without conflicts before starting Plan Mode"}
+              onClick={() => {
+                if (savedNote) setDialog({ kind: "plan", source: savedNote.base });
+                else if (simulation) { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }
+              }}><Wand2 size={14} />Plan from note</button>}
+            {showLinkedTask && <button type="button" className="fw-btn" onClick={() => {
+                if (simulation) openWorkspace("tasks", "release");
+                else if (linkedTasks.length === 1) openWorkspace("tasks", linkedTasks[0]?.id);
+                else setDialog({ kind: "linkedTasks" });
+              }}><GitFork size={14} />{linkedTasks.length > 1 ? "Open linked tasks" : "Open linked task"}</button>}
+            {savedNote && <button type="button" className="fw-btn" disabled={!canLaunchFromNote}
               title={canLaunchFromNote ? "Choose a published workflow and review this revision" : "A saved note without conflicts is required"}
               onClick={() => setDialog({ kind: "launch", source: savedNote.base })}><Wand2 size={14} />Run workflow from note</button>}
           </div>
         </footer>}
       </div>
 
+      {dialog?.kind === "plan" && <RepositoryNotePlanning projectId={checkout.projectId} source={dialog.source}
+        openWorkspace={openWorkspace} onClose={closeDialog} />}
+      {dialog?.kind === "linkedTasks" && <FileDialog title="Linked tasks" description="Choose a Task linked to this saved note revision." onClose={closeDialog}>
+        <ul className="pipeline-stack">{linkedTasks.map(({ id, title }) => <li key={id}>
+          <button type="button" className="fw-btn" onClick={() => { closeDialog(); openWorkspace("tasks", id); }}>{title}</button>
+        </li>)}</ul>
+      </FileDialog>}
       {dialog?.kind === "launch" && <FileDialog title="Run workflow from note" description={dialog.source.relativePath} onClose={closeDialog}>
         <WorkflowLaunchPicker projectId={checkout.projectId} checkoutId={dialog.source.checkoutId}
           pinnedDocumentRevisionId={dialog.source.id} openWorkspace={(workspace, target) => {
@@ -694,7 +733,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           <button type="button" className="fw-btn fw-outlined" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}
             onClick={() => { navigateLocation({ path: selection, anchor: selectedAnchor.trim() || undefined }); closeDialog(); }}>Open note</button>
           {dialog.manual ? <button type="button" className="fw-btn fw-primary" onClick={() => {
-            setModes((before) => ({ ...before, [dialog.from]: "source" }));
+            setMode("source");
             open(dialog.from, dialog.sourceLine);
             closeDialog();
           }}>Edit source link</button> : <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}

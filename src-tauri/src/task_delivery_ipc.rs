@@ -7,10 +7,9 @@ use omniagent::{
     store::Store,
     tasks::{
         ChecklistItem, ProjectWorkHierarchy, TaskChecklist, TaskDelivery, TaskDeliveryState,
-        TaskWorkflowState,
+        TaskWorkflowState, WorkspaceDraft, WorkspacePlacement, WorkspaceWorkEditor,
     },
 };
-use serde::Deserialize;
 use tauri::State;
 
 fn report(error: anyhow::Error) -> String {
@@ -28,46 +27,46 @@ pub async fn project_work_hierarchy(
         .map_err(report)
 }
 
-#[derive(Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum WorkspaceWork {
-    Epic,
-    Task { epic_id: Option<String> },
-    Subtask { parent_task_id: String },
-}
-
 #[tauri::command]
 pub async fn create_workspace_work(
     store: State<'_, Store>,
     project_id: String,
     title: String,
-    placement: WorkspaceWork,
+    placement: WorkspacePlacement,
+    draft: Option<WorkspaceDraft>,
 ) -> Result<String, String> {
-    let result = match placement {
-        WorkspaceWork::Epic => store
-            .create_project_epic(project_id, title)
-            .await
-            .map(|work| work.id),
-        WorkspaceWork::Task {
-            epic_id: Some(epic),
-        } => store
-            .create_project_task_in_epic(project_id, epic, title)
-            .await
-            .map(|work| work.id),
-        WorkspaceWork::Task { epic_id: None } => store
-            .create_project_task(project_id, title)
-            .await
-            .map(|work| work.id),
-        WorkspaceWork::Subtask { parent_task_id } => store
-            .create_project_subtask(project_id, parent_task_id, title)
-            .await
-            .map(|work| work.id),
-    };
-    result.map_err(report)
+    store
+        .create_workspace_work(project_id, title, placement, draft)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn workspace_work_editor(
+    store: State<'_, Store>,
+    project_id: String,
+    work_id: String,
+) -> Result<WorkspaceWorkEditor, String> {
+    store
+        .workspace_work_editor(project_id, work_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn update_workspace_work(
+    store: State<'_, Store>,
+    project_id: String,
+    work_id: String,
+    expected: String,
+    title: String,
+    placement: WorkspacePlacement,
+    draft: WorkspaceDraft,
+) -> Result<(), String> {
+    store
+        .update_workspace_work(project_id, work_id, expected, title, placement, draft)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]

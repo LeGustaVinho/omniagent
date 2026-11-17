@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::configuration::{open_locked_local_file, plain_metadata};
 
-use super::super::documents::lock_directories;
+use super::super::{documents::lock_directories, isolated_git::IsolatedGit};
 use super::{GitPathStatus, LiveReview, validate_oid};
 
 const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
@@ -96,7 +96,7 @@ fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
         let parts: Vec<_> = metadata.split_ascii_whitespace().collect();
         ensure!(parts.len() == 3, "Git returned invalid index metadata");
         if parts[2] == "0" {
-            return read_blob(review, parts[0], parts[1]);
+            return read_blob(&review.view, parts[0], parts[1]);
         }
     }
     Ok(GitFileSide::unavailable(
@@ -108,9 +108,11 @@ fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     let Some(head) = review.revision.head.as_deref() else {
         return Ok(GitFileSide::Missing);
     };
-    let bytes = review
-        .view
-        .read(&["--literal-pathspecs", "ls-tree", "-z", head, "--", path])?;
+    read_tree(&review.view, head, path)
+}
+
+pub(super) fn read_tree(view: &IsolatedGit, revision: &str, path: &str) -> Result<GitFileSide> {
+    let bytes = view.read(&["--literal-pathspecs", "ls-tree", "-z", revision, "--", path])?;
     let entries = String::from_utf8(bytes)?;
     for row in entries.split_terminator('\0') {
         let (metadata, candidate) = row
@@ -121,19 +123,19 @@ fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
         }
         let parts: Vec<_> = metadata.split_ascii_whitespace().collect();
         ensure!(parts.len() == 3, "Git returned invalid tree metadata");
-        return read_blob(review, parts[0], parts[2]);
+        return read_blob(view, parts[0], parts[2]);
     }
     Ok(GitFileSide::Missing)
 }
 
-fn read_blob(review: &LiveReview, mode: &str, oid: &str) -> Result<GitFileSide> {
+fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
     if !matches!(mode, "100644" | "100755") {
         return Ok(GitFileSide::unavailable(
             "This Git entry is not an ordinary text file.",
         ));
     }
     validate_oid(oid)?;
-    let size = String::from_utf8(review.view.read(&["cat-file", "-s", oid])?)?
+    let size = String::from_utf8(view.read(&["cat-file", "-s", oid])?)?
         .trim()
         .parse::<u64>()?;
     if size > MAX_DIFF_SIDE_BYTES {
@@ -141,7 +143,7 @@ fn read_blob(review: &LiveReview, mode: &str, oid: &str) -> Result<GitFileSide> 
             "This Git file exceeds the text preview limit.",
         ));
     }
-    Ok(classify(review.view.read(&["cat-file", "blob", oid])?))
+    Ok(classify(view.read(&["cat-file", "blob", oid])?))
 }
 
 fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {

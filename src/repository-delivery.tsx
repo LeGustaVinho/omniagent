@@ -14,6 +14,7 @@ import { RepositoryDeliveryMerge } from "@/repository-delivery-merge";
 import { pinnedDeliveryGitNodes, RepositoryDeliveryGitGraph } from "@/repository-delivery-git-graph";
 import { SavedDeliveryMerge, SavedDeliverySource } from "@/repository-delivery-history";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
+import { repositoryNotePlanningKey } from "@/repository-note-planning";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowCommandRun } from "@/workflow-command";
 import { workflowRunTarget } from "@/workflow-execution-model";
@@ -22,9 +23,10 @@ import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
-function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorkspace }: {
+function DeliveryRunView({ delivery, projectId, checkoutId, actions, openActivity, openWorkspace }: {
   delivery: DeliverySnapshot;
   projectId: string;
+  checkoutId: string;
   actions: DeliveryActions;
   openActivity: WorkspaceProps["openActivity"];
   openWorkspace: WorkspaceProps["openWorkspace"];
@@ -40,6 +42,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const plan = delivery.artifacts.find(({ id }) => id === delivery.run.planRevision);
   const planner = context ? matchingJob(delivery, "plan", { context: context.id }) : undefined;
   const planAttempt = planner?.latestAttempt;
+  const planningConversation = planner?.checkoutId === checkoutId ? planAttempt?.conversationId : undefined;
   const proposals = useQuery({
     queryKey: ["repository-delivery", projectId, scope.runId, "proposals", planAttempt?.runId],
     queryFn: () => invoke<Proposal[]>("repository_delivery_plan_proposals", { ...scope, attemptId: planAttempt?.runId }),
@@ -124,6 +127,8 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
         expectedPlanRevision: delivery.run.planRevision,
       } : undefined}
       label="Planning" actions={actions} openActivity={openActivity} />}
+    {planningConversation && <Button type="button" variant="outline" className="justify-self-start"
+      onClick={() => openWorkspace("conversations", planningConversation)}>Open planning conversation</Button>}
     {selectedPlanAttempt && selectedPlanAttempt !== planAttempt?.runId && <Button type="button" variant="outline"
       onClick={() => openActivity(selectedPlanAttempt)}>Open selected plan attempt</Button>}
     {currentProposal && <>
@@ -242,7 +247,7 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
     queryKey: ["repository-delivery", projectId, "list"],
     queryFn: () => invoke<DeliveryRun[]>("list_repository_deliveries", { projectId }),
   });
-  const runId = runs.data?.some(({ id }) => id === selected) ? selected : runs.data?.[0]?.id;
+  const runId = selected && selected !== "delivery" ? selected : runs.data?.[0]?.id;
   const delivery = useQuery({
     queryKey: ["repository-delivery", projectId, runId],
     queryFn: () => invoke<DeliverySnapshot | null>("inspect_repository_delivery", { projectId, runId }),
@@ -257,6 +262,7 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
     client.invalidateQueries({ queryKey: ["delivery-merge", projectId] }),
     client.invalidateQueries({ queryKey: ["project-job-queue"] }),
     client.invalidateQueries({ queryKey: ["project-tasks", projectId] }),
+    client.invalidateQueries({ queryKey: repositoryNotePlanningKey(projectId) }),
   ]);
   const start = useMutation({
     mutationFn: (revisionId: string) => invoke<DeliveryRun>("start_repository_delivery", { projectId, checkoutId, revisionId }),
@@ -276,10 +282,12 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
     <RepositoryMarkdownPicker key={checkoutId} checkoutId={checkoutId} onDeliver={(id) => start.mutate(id)} delivering={busy} />
     {runs.data?.length ? <label className="pipeline-form pipeline-stack">Saved delivery
       <select value={runId} onChange={(event) => setSelected(event.currentTarget.value)}>
+        {runId && !runs.data.some(({ id }) => id === runId) && <option value={runId}>{runId}</option>}
         {runs.data.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}
       </select>
     </label> : null}
-    {delivery.data && <DeliveryRunView key={delivery.data.run.id} delivery={delivery.data} projectId={projectId}
+    {delivery.data === null && <p role="status">This delivery is unavailable in this project.</p>}
+    {delivery.data && <DeliveryRunView key={delivery.data.run.id} delivery={delivery.data} projectId={projectId} checkoutId={checkoutId}
       openActivity={openActivity} openWorkspace={openWorkspace} actions={{ busy, execute: (operation) => action.mutate(operation) }} />}
     {error && <p role="alert" className="pipeline-note">{String(error)}</p>}
   </div>;

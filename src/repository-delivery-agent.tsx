@@ -17,7 +17,7 @@ import { WorkflowGoalRequalification } from "@/workflow-goal-requalification";
 type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
 
 export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, inputs, unitId = null, taskId, job, label, actions,
-  openActivity, planRevision, pinnedModel, pinnedEffort = null, goalEnabled = false }: {
+  openActivity, planRevision, pinnedModel, pinnedEffort = null, goalEnabled = false, initialComparison }: {
   scope: DeliveryTarget;
   nodeId: string;
   stage?: DeliveryNode;
@@ -32,11 +32,12 @@ export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, i
   pinnedModel?: DeliveryModelChoice;
   pinnedEffort?: string | null;
   goalEnabled?: boolean;
+  initialComparison?: ComparisonSelection;
 }) {
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
   const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
   const [feedback, setFeedback] = useState("");
-  const [comparison, setComparison] = useState<ComparisonSelection>();
+  const [comparison, setComparison] = useState(initialComparison);
   const attempt = job?.latestAttempt;
   const active = Boolean(job && (
     (!attempt && job.queueState === "queued") ||

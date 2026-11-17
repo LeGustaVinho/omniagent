@@ -8,7 +8,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
 import { EffortSelect } from "@/components/effort-select";
-import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
+import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationSidePanel, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { exampleModelEfforts } from "@/model-effort-examples";
 import { ConversationMarkdown } from "@/conversation-markdown";
@@ -429,7 +429,7 @@ export function PreviewConversationPanel(props: PanelProps) {
             </form>
           </div>
         </div>
-        {showSideQuestion && sideQuestion && <aside className="conv-activity" aria-label="Side question" onKeyDown={(event) => {
+        {showSideQuestion && sideQuestion && <ConversationSidePanel label="Side question" onKeyDown={(event) => {
           if (event.key === "Escape") closeSideQuestion();
         }}>
           <header className="conv-activity-heading"><h2>Side question</h2>
@@ -443,7 +443,7 @@ export function PreviewConversationPanel(props: PanelProps) {
               setShowSideQuestion(false);
             }}>Delete side question</button>
           </div>
-        </aside>}
+        </ConversationSidePanel>}
       </div>
       {dialog && <Dialog.Root open onOpenChange={(open) => { if (!open) setDialog(undefined); }}>
         <Dialog.Portal><Dialog.Overlay className="conv-dialog-scrim" /><Dialog.Content className="conv-dialog">

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -58,7 +58,9 @@ function emptyDraft(): TemplateDraft {
   };
 }
 
-export function ConversationTemplateEditor({ checkout, openWorkspace }: { checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"] }) {
+export function ConversationTemplateEditor({ checkout, openWorkspace, savedWorkflows }: {
+  checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"]; savedWorkflows?: ReactNode;
+}) {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState<Selection>();
@@ -104,6 +106,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: { checko
 
   return <div className="pipeline-view pipeline-view-content">
     <PipelineRolesTemplatesHeading />
+    {savedWorkflows}
     <div className="pipeline-two-columns">
       <section className="pipeline-box pipeline-stack">
         <h3>Conversation templates</h3>
