@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useRef, useState } from "react";
 import { FileDialog, type FilePanelApi } from "@/ide-file-workspace";
-import type { MergeRevision, SavedNoteMerge } from "@/repository-note-buffers";
+import type { ReviewedNoteRevision, ReviewedNotesResult } from "@/repository-note-buffers";
 
 type MergePreview = {
   id: string;
@@ -9,7 +9,7 @@ type MergePreview = {
   destination: string;
   mergedMarkdown: string;
   sourceRedirect: string;
-  files: MergeRevision[];
+  files: ReviewedNoteRevision[];
   references: { path: string; edits: { line: number; before: string; after: string }[] }[];
   warnings: { path: string; line: number | null; message: string }[];
 };
@@ -21,13 +21,13 @@ export function RepositoryNoteMerge({ checkoutId, source, suggestedDestination, 
   suggestedDestination?: string;
   destinations: readonly string[];
   onClose: () => void;
-  onApply: (previewId: string, files: readonly MergeRevision[], saveNow: boolean) => Promise<SavedNoteMerge>;
+  onApply: (previewId: string, files: readonly ReviewedNoteRevision[], saveNow: boolean) => Promise<ReviewedNotesResult>;
   onOpen: (path: string) => void;
   onSaved: () => void;
 }) {
   const [destination, setDestination] = useState(suggestedDestination ?? "");
   const [preview, setPreview] = useState<MergePreview>();
-  const [result, setResult] = useState<SavedNoteMerge>();
+  const [result, setResult] = useState<ReviewedNotesResult>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const submitting = useRef(false);

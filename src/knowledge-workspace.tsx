@@ -27,6 +27,7 @@ import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowl
 import { noteWikilink, type NoteContextHit, type NoteSelection } from "@/knowledge-context";
 import { ExtractNoteDialog } from "@/knowledge-note-extraction";
 import { RepositoryNoteMerge } from "@/repository-note-merge";
+import { RepositoryTagRename } from "@/repository-tag-rename";
 import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
 import { RepositoryNoteMedia } from "@/repository-note-media";
@@ -66,6 +67,7 @@ type KnowledgeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
   | { kind: "extract"; path: string; selection: NoteSelection; ownerPanel?: FilePanelApi }
   | { kind: "merge"; source: string; destination?: string; ownerPanel?: FilePanelApi }
+  | { kind: "tagRename"; tag: string; ownerPanel?: FilePanelApi }
   | { kind: "conflict"; path: string; external: string }
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
@@ -573,6 +575,16 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         : [[{ label: "Copy candidate paths", run: () => menu.copy(paths.join("\n"), "Copied attachment paths") }]])];
   };
 
+  const searchForTag = (tag: string) => {
+    setQuery("#" + tag); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
+  };
+  const tagActions = (tag: string, ownerPanel?: FilePanelApi): MenuGroups[number] => [
+    { label: "Copy tag", run: () => menu.copy("#" + tag, "Copied tag") },
+    { label: "Search notes for tag", run: () => searchForTag(tag) },
+    ...(!simulated ? [{
+      label: "Rename tag in checkout…", run: () => setDialog({ kind: "tagRename", tag, ownerPanel }),
+    }] : []),
+  ];
   const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
     const groups: MenuGroups[number][] = [];
     if (attachment && !simulated) groups.push(...attachmentActions(attachment.paths, attachment.label));
@@ -616,12 +628,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       { label: "Copy property value", run: () => menu.copy(property.value, "Copied property value") },
     ]);
     if (mermaid) groups.push([{ label: "Copy Mermaid source", run: () => menu.copy(mermaid, "Copied Mermaid source") }]);
-    if (tag) groups.push([
-      { label: "Copy tag", run: () => menu.copy(`#${tag}`, "Copied tag") },
-      { label: "Search notes for tag", run: () => {
-        setQuery(`#${tag}`); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
-      } },
-    ]);
+    if (tag) groups.push(tagActions(tag, ownerPanel));
     const selectionSource = repository.notes[path];
     if (excerpt) groups.push([
       { label: "Copy selection", run: () => menu.copy(excerpt.text, "Copied note selection") },
@@ -876,6 +883,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                         { label: "Copy property value", run: () => menu.copy(value, "Copied property value") },
                       ]} />)}
                   {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
+                  {!isDirty(note) && previewNote(active)?.tags?.length ? <ul aria-label="Tags in this note" className="flex flex-wrap gap-1 pt-2">
+                    {previewNote(active)?.tags.map((tag) => <li key={tag}>
+                      <ContextActions label={"#" + tag} groups={[tagActions(tag)]}>
+                        <button type="button" className="fw-btn" onClick={() => searchForTag(tag)}>#{tag}</button>
+                      </ContextActions>
+                    </li>)}
+                  </ul> : null}
                 </section>}
                 {inspector === "attachments" && <section aria-label="Attachments"><h3>Attachments</h3>
                   {simulated && noteAttachments.map((attachment) => <button type="button" className="note-attachment-row" key={attachment.name} onClick={() => setDialog({ kind: "attachment", attachment })}>
@@ -946,6 +960,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         suggestedDestination={dialog.destination} destinations={catalog.map((note) => note.path).filter((path) => path !== dialog.source)}
         onClose={closeDialog} onApply={repository.mergeReviewed} onOpen={(path) => { closeDialog(); open(path, undefined, undefined, "source"); }}
         onSaved={() => { void treeActions.refreshTree().catch((failure: unknown) => setProblem(String(failure))); }} />}
+      {dialog?.kind === "tagRename" && <RepositoryTagRename checkoutId={checkout.checkoutId} source={dialog.tag} ownerPanel={dialog.ownerPanel}
+        onClose={closeDialog} onApply={repository.renameReviewedTags} onOpen={(path) => { closeDialog(); open(path, undefined, undefined, "source"); }}
+        onSaved={(tag) => {
+          if (query === "#" + dialog.tag) setQuery("#" + tag);
+          void treeActions.refreshTree().catch((failure: unknown) => setProblem(String(failure)));
+        }} />}
       {fileOperations.dialog}
       {comparison.dialog}
       {dialog?.kind === "launch" && <FileDialog title="Run workflow from note" description={dialog.source.relativePath} onClose={closeDialog}>

@@ -291,6 +291,7 @@ fn main() {
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
             app.manage(note_runtime::NoteMergePreviews::default());
+            app.manage(note_runtime::NoteTagRenamePreviews::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
@@ -547,6 +548,8 @@ fn main() {
             note_runtime::extract_repository_note_selection,
             note_runtime::preview_markdown_merge,
             note_runtime::stage_markdown_merge,
+            note_runtime::preview_markdown_tag_rename,
+            note_runtime::stage_markdown_tag_rename,
             note_runtime::watch_repository_note,
             note_runtime::unwatch_repository_note,
             ipc::active_checkout,

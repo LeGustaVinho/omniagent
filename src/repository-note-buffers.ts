@@ -17,8 +17,8 @@ type Recovery = { message: string; editedPath: string | null; displacedPath: str
 type DocumentSave = { status: "saved"; document: RepositoryDocument }
   | { status: "conflict" | "recovery_required"; recovery: Recovery };
 type SavedDraft = { revision: string; base: NoteRevision; markdown: string };
-export type MergeRevision = { path: string; revisionId: string };
-export type SavedNoteMerge = { saved: string[]; pending: string[]; failure?: string };
+export type ReviewedNoteRevision = { path: string; revisionId: string };
+export type ReviewedNotesResult = { saved: string[]; pending: string[]; failure?: string };
 export type NoteExtractionDestination = { relativeDirectory: string; name: string; replaceWithLink: boolean };
 type NoteExtraction = {
   path: string;
@@ -92,7 +92,7 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
 }
 
 export function useRepositorySourceBuffers(checkoutId: string, enabled: boolean) {
-  const { notes: files, getNote: getFile, extractSelection: _extractSelection, mergeReviewed: _mergeReviewed, ...buffers } =
+  const { notes: files, getNote: getFile, extractSelection: _extractSelection, mergeReviewed: _mergeReviewed, renameReviewedTags: _renameReviewedTags, ...buffers } =
     useRepositoryFileBuffers<string>(checkoutId, enabled, sourceCommands, "file");
   return { ...buffers, files, getFile };
 }
@@ -387,15 +387,16 @@ function useRepositoryFileBuffers<CatalogEntry>(
       return result.path;
     }), [change, checkoutId, persist, serialize]);
 
-  const mergeReviewed = useCallback(async (previewId: string, files: readonly MergeRevision[], saveNow: boolean): Promise<SavedNoteMerge> => {
+  const applyReviewed = useCallback(async (command: "stage_markdown_merge" | "stage_markdown_tag_rename",
+    previewId: string, files: readonly ReviewedNoteRevision[], saveNow: boolean): Promise<ReviewedNotesResult> => {
     const drafts = await serializePaths(files.map(({ path }) => path), async () => {
       for (const { path, revisionId } of files) {
         const note = current.current.notes[path];
         if (note && (note.base.id !== revisionId || note.content !== note.saved || note.incoming || note.sourceProblem || note.draftRevision)) {
-          throw new Error(path + " changed. Save or resolve it and review a new merge.");
+          throw new Error(path + " changed. Save or resolve it and review the changes again.");
         }
       }
-      const staged = await invoke<SavedDraft[]>("stage_markdown_merge", { checkoutId, previewId });
+      const staged = await invoke<SavedDraft[]>(command, { checkoutId, previewId });
       const { notes, failures } = current.current;
       const updated = { ...notes };
       for (const draft of staged) {
@@ -428,6 +429,11 @@ function useRepositoryFileBuffers<CatalogEntry>(
     return { saved, pending: drafts.slice(saved.length).map(({ base }) => base.relativePath), failure };
   }, [checkoutId, load, publish, save, serializePaths]);
 
+  const mergeReviewed = useCallback((id: string, files: readonly ReviewedNoteRevision[], saveNow: boolean) =>
+    applyReviewed("stage_markdown_merge", id, files, saveNow), [applyReviewed]);
+  const renameReviewedTags = useCallback((id: string, files: readonly ReviewedNoteRevision[], saveNow: boolean) =>
+    applyReviewed("stage_markdown_tag_rename", id, files, saveNow), [applyReviewed]);
+
   const getNote = useCallback((path: string) => current.current.notes[path], []);
   const forget = useCallback((path: string) => {
     stopWatching(path);
@@ -437,5 +443,5 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed, renameReviewedTags };
 }

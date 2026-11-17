@@ -15,6 +15,7 @@ use omniagent::{
         RepositoryDocumentOpen, RepositoryDocumentSave,
     },
     repository::markdown_merge::{MarkdownMergePlan, MarkdownMergePreview},
+    repository::markdown_tags::{MarkdownTagRenamePlan, MarkdownTagRenamePreview},
     store::Store,
     workflows::{RepositoryNotePlanning, WorkflowLaunchSource},
 };
@@ -27,11 +28,45 @@ fn report(error: impl std::fmt::Display) -> String {
 #[derive(Default)]
 pub struct NoteWatches(Mutex<HashMap<String, RepositoryMarkdownWatch>>);
 
-#[derive(Default)]
-pub struct NoteMergePreviews(Mutex<HashMap<String, (Instant, MarkdownMergePlan)>>);
+pub struct ReviewedNotePreviews<T>(Mutex<HashMap<String, (Instant, T)>>);
+pub type NoteMergePreviews = ReviewedNotePreviews<MarkdownMergePlan>;
+pub type NoteTagRenamePreviews = ReviewedNotePreviews<MarkdownTagRenamePlan>;
 
-const MERGE_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
-const MAX_MERGE_PREVIEWS: usize = 8;
+const REVIEW_TTL: Duration = Duration::from_secs(15 * 60);
+const MAX_REVIEWS: usize = 8;
+
+impl<T> Default for ReviewedNotePreviews<T> {
+    fn default() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+}
+
+impl<T> ReviewedNotePreviews<T> {
+    fn remember(&self, id: String, plan: T) -> Result<(), String> {
+        let mut previews = self.0.lock().map_err(report)?;
+        previews.retain(|_, (created, _)| created.elapsed() < REVIEW_TTL);
+        if previews.len() >= MAX_REVIEWS
+            && let Some(oldest) = previews
+                .iter()
+                .min_by_key(|(_, (created, _))| *created)
+                .map(|(id, _)| id.clone())
+        {
+            previews.remove(&oldest);
+        }
+        previews.insert(id, (Instant::now(), plan));
+        Ok(())
+    }
+
+    fn take(&self, id: &str) -> Result<T, String> {
+        self.0
+            .lock()
+            .map_err(report)?
+            .remove(id)
+            .filter(|(created, _)| created.elapsed() < REVIEW_TTL)
+            .map(|(_, plan)| plan)
+            .ok_or_else(|| "The preview expired. Review the changes again.".to_string())
+    }
+}
 
 #[tauri::command]
 pub async fn preview_markdown_merge(
@@ -46,17 +81,7 @@ pub async fn preview_markdown_merge(
         .await
         .map_err(report)?;
     let preview = plan.preview.clone();
-    let mut previews = previews.0.lock().map_err(report)?;
-    previews.retain(|_, (created, _)| created.elapsed() < MERGE_PREVIEW_TTL);
-    if previews.len() >= MAX_MERGE_PREVIEWS
-        && let Some(oldest) = previews
-            .iter()
-            .min_by_key(|(_, (created, _))| *created)
-            .map(|(id, _)| id.clone())
-    {
-        previews.remove(&oldest);
-    }
-    previews.insert(preview.id.clone(), (Instant::now(), plan));
+    previews.remember(preview.id.clone(), plan)?;
     Ok(preview)
 }
 
@@ -67,16 +92,41 @@ pub async fn stage_markdown_merge(
     checkout_id: String,
     preview_id: String,
 ) -> Result<Vec<RepositoryMarkdownDraft>, String> {
-    let plan = previews
-        .0
-        .lock()
-        .map_err(report)?
-        .remove(&preview_id)
-        .filter(|(created, _)| created.elapsed() < MERGE_PREVIEW_TTL)
-        .map(|(_, plan)| plan)
-        .ok_or_else(|| "The merge preview expired. Review a new preview.".to_string())?;
+    let plan = previews.take(&preview_id)?;
     store
         .stage_markdown_merge(checkout_id, plan)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn preview_markdown_tag_rename(
+    store: State<'_, Store>,
+    previews: State<'_, NoteTagRenamePreviews>,
+    checkout_id: String,
+    source: String,
+    destination: String,
+    include_nested: bool,
+) -> Result<MarkdownTagRenamePreview, String> {
+    let plan = store
+        .preview_markdown_tag_rename(checkout_id, source, destination, include_nested)
+        .await
+        .map_err(report)?;
+    let preview = plan.preview.clone();
+    previews.remember(preview.id.clone(), plan)?;
+    Ok(preview)
+}
+
+#[tauri::command]
+pub async fn stage_markdown_tag_rename(
+    store: State<'_, Store>,
+    previews: State<'_, NoteTagRenamePreviews>,
+    checkout_id: String,
+    preview_id: String,
+) -> Result<Vec<RepositoryMarkdownDraft>, String> {
+    let plan = previews.take(&preview_id)?;
+    store
+        .stage_markdown_tag_rename(checkout_id, plan)
         .await
         .map_err(report)
 }
