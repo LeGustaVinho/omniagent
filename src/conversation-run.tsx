@@ -286,7 +286,8 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
       <ConversationActivityAgents {...scope} projection={projection} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       <ConversationActivityTimeline {...scope} projection={projection} />
-      <ConversationResponseEvidence conversationId={conversationId} runId={run.id} live={live} evidence={projection} />
+      <ConversationResponseEvidence {...scope} evidence={projection}
+        draftSource={draftDestination && { conversationId, run, destination: draftDestination }} />
       <ConversationActivityContext {...scope} projectId={run.projectId} projection={projection} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
       {showInput && <ConversationExactInput {...scope} checkoutId={run.checkoutId} draftDestination={draftDestination} />}

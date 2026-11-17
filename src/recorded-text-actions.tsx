@@ -23,9 +23,11 @@ export function RecordedTextActions({ label, text, groups, className, bodyClassN
   children: (body: ReactNode) => ReactNode;
 }) {
   const body = useRef<HTMLPreElement>(null);
-  const [selected, select] = useState<RecordedTextSelection>();
+  const [selection, select] = useState<{ excerpt: RecordedTextSelection; source: string }>();
+  const selected = selection?.source === text ? selection.excerpt : undefined;
   function capture(eligible = true) {
-    select(eligible && body.current && onExcerpt ? readRecordedTextSelection(body.current) : undefined);
+    const excerpt = eligible && body.current && onExcerpt ? readRecordedTextSelection(body.current) : undefined;
+    select(excerpt && { excerpt, source: text });
   }
   return <div onContextMenuCapture={(event) => capture(body.current?.contains(event.target as Node) === true)}
     onKeyDownCapture={(event) => { if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") capture(); }}

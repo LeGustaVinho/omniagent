@@ -253,7 +253,8 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
         } }}>
           <RunArtifactEvidence scope={attempt} live={live} navigation={navigation} />
         </RunInspectorNavigation.Provider>
-        {projection && <ObservedConversationResponse evidence={projection} />}
+        {projection && <ObservedConversationResponse evidence={projection} draftSource={{ conversationId: owner, run,
+          destination: { checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } } }} />}
         {projection && !projection.responses.items.length && <p>No response text recorded.</p>}
         {comparedRun === runId && <SavedRunOutputComparison projectId={projectId} conversationId={owner} runId={runId}
           close={() => setComparedRun(undefined)} openActivity={openActivity} />}
