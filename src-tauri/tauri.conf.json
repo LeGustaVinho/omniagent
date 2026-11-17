@@ -24,6 +24,7 @@
     }
   },
   "plugins": {
+    "deep-link": { "desktop": { "schemes": ["omniagent"] } },
     "updater": { "pubkey": "", "requireSignedVersion": true }
   },
   "bundle": {

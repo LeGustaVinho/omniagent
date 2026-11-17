@@ -1,9 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Blocks, FolderGit2, Settings } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { CheckoutSelector } from "@/checkout-selector";
+import { fileLinkEvent, type FileLinkTarget } from "@/file-links";
 import "@/launch-workspace.css";
 import { useAppAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
@@ -20,6 +22,7 @@ export function App() {
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryTarget, setLibraryTarget] = useState<{ checkoutId: string; conversationId: string }>();
+  const [fileTarget, setFileTarget] = useState<FileLinkTarget>();
 
   useEffect(() => {
     let disposed = false;
@@ -30,8 +33,46 @@ export function App() {
     return () => { disposed = true; };
   }, [selectCheckout]);
 
+  useEffect(() => {
+    if (restoring || !isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let draining = false;
+    let available = false;
+    const drain = async () => {
+      available = true;
+      if (draining || disposed) return;
+      draining = true;
+      while (available && !disposed) {
+        available = false;
+        try {
+          const target = await invoke<FileLinkTarget | null>("take_pending_file_link");
+          if (target && !disposed) {
+            setLibraryTarget(undefined);
+            setFileTarget(target);
+            selectCheckout(target.checkout);
+            setError("");
+          }
+        } catch (error) {
+          if (!disposed) setError(String(error));
+        }
+      }
+      draining = false;
+    };
+    void listen(fileLinkEvent, () => void drain()).then((remove) => {
+      if (disposed) { remove(); return; }
+      unlisten = remove;
+      return drain();
+    }, () => drain());
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [restoring, selectCheckout]);
+
   async function activateCheckout(selected: ProjectCheckout, conversationId?: string) {
     await invoke("select_active_checkout", { checkoutId: selected.checkoutId });
+    setFileTarget(undefined);
     setLibraryTarget(conversationId ? { checkoutId: selected.checkoutId, conversationId } : undefined);
     selectCheckout(selected);
     setError("");
@@ -70,7 +111,8 @@ export function App() {
       ) : checkout ? (
         <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">Loading workspace…</p>}>
           <Workbench key={checkout.checkoutId} checkout={checkout} openRepository={openRepository} onSelectCheckout={activateCheckout}
-            initialConversationId={libraryTarget?.checkoutId === checkout.checkoutId ? libraryTarget.conversationId : undefined} />
+            initialConversationId={libraryTarget?.checkoutId === checkout.checkoutId ? libraryTarget.conversationId : undefined}
+            fileTarget={fileTarget?.checkout.checkoutId === checkout.checkoutId ? fileTarget : undefined} />
         </Suspense>
       ) : (
         <section className="launch-workspace" aria-labelledby="launch-title">

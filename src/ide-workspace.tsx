@@ -176,7 +176,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     const request = location ? target : next;
     if (next && request !== lastTarget.current) {
       lastTarget.current = request;
-      openFile(next, location?.line);
+      openFile(next, location?.line, false, location?.column);
     }
   }, [dock.ready, openFile, openTerminal, requestedFolder, requestedTerminal, setSidebar, target]);
 
@@ -377,6 +377,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       { label: "Reveal in Explorer tree", run: () => revealFile(path) },
     ], [
       { label: "Copy match reference", run: () => menu.copy(reference, "Copied match reference") },
+      ...(!simulated ? [{ label: "Copy OmniAgent link to match", run: () => menu.copyOmniAgentLink(path, line, columns[0]) }] : []),
       ...(lineText != null ? [{ label: "Copy matching line", run: () => menu.copy(lineText, "Copied matching line") }]
         : [{ label: "Copy match preview", run: () => menu.copy(excerpt, "Copied match preview") }]),
       ...(columns.length > 1 ? [{ label: "Copy visible occurrence references", run: () => menu.copy(columns.map((column) => matchReference(match, column)).join("\n"), "Copied occurrence references") }] : []),
@@ -496,6 +497,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                       quickFix={quickFix?.panelId === panelId && dock.api?.activePanel?.id === panelId ? quickFix : undefined}
                       onQuickFixShown={finishQuickFix} onSettings={reportEditorSettings}
                       onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
+                      onOmniAgentLink={simulated ? undefined : menu.copyOmniAgentLink}
                       onPermalink={simulated ? undefined : menu.copyPermalink} />
                   </Suspense>
                 </div>

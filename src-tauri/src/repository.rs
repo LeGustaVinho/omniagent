@@ -21,6 +21,7 @@ pub(crate) mod comparison;
 pub mod delivery_history;
 pub mod destination_drift;
 pub mod documents;
+pub mod file_links;
 pub mod git_review;
 mod isolated_git;
 mod markdown;

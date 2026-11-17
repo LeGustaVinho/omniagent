@@ -507,6 +507,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       { label: "Copy wikilink", run: () => menu.copy(`[[${path}${anchor ? `#${anchor}` : ""}]]`, "Copied wikilink") },
     ] : []),
     { label: "Copy location", run: () => menu.copy(`${path}${anchor ? `#${anchor}` : ""}${line ? `:${line}` : ""}`, "Copied note location") },
+    ...(!simulated ? [{ label: "Copy OmniAgent link", run: () => menu.copyOmniAgentLink(path, line ?? undefined) }] : []),
   ];
   const offerLinkRepair = (from: string, link: NoteTarget, matches: NoteLocation[], anchor = "", sourceLine?: number, manual?: boolean) => {
     setSelection(matches.length === 1 ? matches[0]!.path : "");
@@ -630,11 +631,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     const endLine = excerpt?.path === path ? excerpt.endLine : startLine;
     if (!simulated && startLine && endLine && notes[path]) {
       const lines = notes[path].content.replace(/\r\n?/g, "\n").split("\n");
-      if (endLine >= startLine && endLine <= lines.length) groups.push([{
-        label: "Copy committed line permalink", run: () => menu.copyPermalink(path, {
+      if (endLine >= startLine && endLine <= lines.length) groups.push([
+        { label: "Copy OmniAgent link to line", run: () => menu.copyOmniAgentLink(path, startLine) },
+        { label: "Copy committed line permalink", run: () => menu.copyPermalink(path, {
           startLine, endLine, text: lines.slice(startLine - 1, endLine).join("\n"),
-        }),
-      }]);
+        }) },
+      ]);
     }
     return groups;
   };

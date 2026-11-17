@@ -15,6 +15,7 @@ mod delivery_merge_ipc;
 mod desktop;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
+mod file_link_runtime;
 mod fixture;
 mod fixture_runtime;
 mod git_review_runtime;
@@ -220,8 +221,17 @@ fn main() {
         context
     };
 
+    let file_links = file_link_runtime::PendingFileLink::default();
+    file_links.enqueue(
+        std::env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    let forwarded_file_links = file_links.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .manage(file_links)
+        .plugin(tauri_plugin_single_instance::init(move |app, args, _| {
+            forwarded_file_links.forward(app, args);
             desktop::show(app)
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -287,6 +297,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
+            file_link_runtime::take_pending_file_link,
             backup_ipc::create_application_backup,
             backup_ipc::preview_application_restore,
             backup_ipc::stage_application_restore,

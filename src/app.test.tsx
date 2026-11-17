@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
@@ -7,9 +7,13 @@ import { App } from "@/app";
 import { useWorkspace } from "@/workspace-state";
 
 const invoke = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+const isTauri = vi.hoisted(() => vi.fn());
+const listen = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke, isTauri }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@/settings-appearance", () => ({ useAppAppearance: () => undefined }));
-vi.mock("@/workbench", () => ({ default: () => <p>Repository workspace</p> }));
+vi.mock("@/workbench", () => ({ default: ({ fileTarget }: { fileTarget?: { path: string; line: number | null } }) =>
+  <><p>Repository workspace</p>{fileTarget && <p>{fileTarget.path}:{fileTarget.line}</p>}</> }));
 
 function renderApp() {
   const query = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -20,6 +24,8 @@ afterEach(() => {
   cleanup();
   useWorkspace.getState().selectCheckout(null);
   invoke.mockReset();
+  isTauri.mockReset();
+  listen.mockReset();
 });
 
 it("requires a registered checkout and surfaces a Git validation error", async () => {
@@ -65,4 +71,23 @@ it("reopens a registered checkout from startup without registering it again", as
   expect(invoke.mock.calls).toEqual([
     ["active_checkout"], ["registered_checkouts"], ["select_active_checkout", { checkoutId: "checkout" }],
   ]);
+});
+
+it("opens startup and forwarded file links in their registered checkout without writing the selection", async () => {
+  const root = "D:/Projects/Example";
+  const previous = { projectId: "project", repositoryRoot: root, checkoutId: "checkout", checkoutRoot: root };
+  const linked = { ...previous, checkoutId: "linked", checkoutRoot: `${root}-linked` };
+  let notify: (() => void) | undefined;
+  isTauri.mockReturnValue(true);
+  listen.mockImplementation(async (_name, callback) => { notify = callback; return () => {}; });
+  invoke.mockResolvedValueOnce(previous)
+    .mockResolvedValueOnce({ checkout: linked, path: "docs/note.md", line: 4, column: null })
+    .mockResolvedValueOnce({ checkout: previous, path: "src/index.ts", line: 7, column: 3 });
+  renderApp();
+  expect(await screen.findByText("docs/note.md:4")).toBeTruthy();
+  expect(useWorkspace.getState().checkout).toEqual(linked);
+  await act(async () => notify?.());
+  expect(await screen.findByText("src/index.ts:7")).toBeTruthy();
+  expect(useWorkspace.getState().checkout).toEqual(previous);
+  expect(invoke.mock.calls).toEqual([["active_checkout"], ["take_pending_file_link"], ["take_pending_file_link"]]);
 });

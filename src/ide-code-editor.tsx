@@ -33,7 +33,7 @@ export interface CodeModel {
 
 const quickFixId = "editor.action.quickFix";
 
-export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink }: {
+export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink }: {
   scope: string;
   path: string;
   content: string;
@@ -47,15 +47,16 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   onCopy?: (text: string, status: string) => void;
   onExcerpt?: (selection: EditorExcerpt, instruction?: string) => void;
   onPermalink?: (path: string, lines: GitPermalinkLines) => void;
+  onOmniAgentLink?: (path: string, line: number, column: number) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
-  const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink });
+  const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    fresh.current = { content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink };
-  }, [content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink]);
+    fresh.current = { content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink };
+  }, [content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink]);
 
   useEffect(() => {
     if (!mount.current) return;
@@ -133,9 +134,17 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
           run: () => { const range = excerpt(false); if (range) fresh.current.onCopy?.(markdownExcerpt(range), "Copied Markdown code block"); },
         });
       }
+      if (fresh.current.onOmniAgentLink) codeEditor.addAction({
+        id: "omniagent.copy-file-link", label: "Copy OmniAgent link to line",
+        contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 3,
+        run: () => {
+          const location = codeEditor.getPosition();
+          if (location) fresh.current.onOmniAgentLink?.(path, location.lineNumber, location.column);
+        },
+      });
       if (fresh.current.onPermalink) codeEditor.addAction({
         id: "omniagent.copy-committed-line-link", label: "Copy committed line permalink",
-        contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 3,
+        contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 4,
         run: () => {
           const range = excerpt(true);
           const model = codeEditor.getModel();

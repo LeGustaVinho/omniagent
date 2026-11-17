@@ -160,8 +160,8 @@ async function waitForFixtureResult(browser, projectId, conversationId, label, t
   throw new Error(`${label} did not succeed (${JSON.stringify(state)})`, { cause: pollFailure });
 }
 
-async function showTestApplication(browser, application) {
-  const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true, env: fixtureEnvironment(application) });
+async function showTestApplication(browser, application, args = []) {
+  const reopen = spawn(application, args, { stdio: "ignore", windowsHide: true, env: fixtureEnvironment(application) });
   const stopped = new Promise((resolve, reject) => {
     reopen.once("error", reject);
     reopen.once("exit", resolve);
@@ -2101,6 +2101,101 @@ test("filters actual Windows hidden attributes independently from dotfiles in Ex
     await row(dotfile).waitForDisplayed();
   } finally {
     await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("opens OmniAgent file links in a running desktop and on cold launch", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "File link repository");
+  const linked = join(scratch, "Exact linked worktree");
+  const file = "Revisão #2.ts";
+  const original = "first\nsecond\nthird\n";
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, file), "Wrong worktree\n");
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Base file link checkout");
+  git(repo, "worktree", "add", "-q", "--detach", linked);
+  git(linked, "config", "core.autocrlf", "false");
+  await writeFile(join(linked, file), original);
+
+  const driver = startTestDriver(application);
+  let browser;
+  let cold;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const primary = await invoke(browser, "register_project", { directory: repo });
+    const target = await invoke(browser, "register_project", { directory: linked });
+    await selectCheckout(browser, primary);
+    const query = new URLSearchParams({ checkout: target.checkoutId, path: file, line: "2", column: "3" });
+    const link = `omniagent://open-file?${query}`;
+
+    await showTestApplication(browser, application, [link]);
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const editor = ide.$(".code-editor .view-lines");
+    await editor.waitForDisplayed();
+    assert.match(await editor.getText(), /second/);
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, primary.checkoutId);
+    await browser.waitUntil(() => browser.execute(() => {
+      const input = document.querySelector('.code-editor .monaco-editor [role="textbox"]');
+      if (!(input instanceof HTMLElement)) return false;
+      input.focus();
+      return input === document.activeElement;
+    }));
+    await browser.keys("X");
+    let draft;
+    await browser.waitUntil(async () => {
+      draft = await invoke(browser, "read_repository_source_draft", { checkoutId: target.checkoutId, path: file });
+      return draft?.markdown === "first\nseXcond\nthird\n";
+    }).catch(async (cause) => {
+      throw new Error(`The linked cursor did not apply the test edit (${JSON.stringify({
+        draft: draft?.markdown, editor: await editor.getText(),
+      })})`, { cause });
+    });
+    assert.equal(await readFile(join(linked, file), "utf8"), original);
+
+    killTestApplication(application);
+    await browser.deleteSession().catch(() => undefined);
+    browser = undefined;
+    // EdgeDriver treats launch arguments as switches. Start the fixture with a bare URI
+    // like the installed protocol handler does, then attach to its isolated WebView2.
+    const debuggerAddress = `127.0.0.1:${port + 2}`;
+    cold = spawn(application, [link], { stdio: "ignore", windowsHide: true,
+      env: { ...fixtureEnvironment(application), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port + 2}` } });
+    await new Promise((resolve, reject) => { cold.once("spawn", resolve); cold.once("error", reject); });
+    let debuggerReady = false;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      assert.equal(cold.exitCode, null, "Cold link fixture exited before we could attach");
+      try {
+        const response = await fetch(`http://${debuggerAddress}/json/list`, { signal: AbortSignal.timeout(500) });
+        debuggerReady = (await response.json()).some(({ url }) => new URL(url).origin === packagedOrigin);
+        if (debuggerReady) break;
+      } catch {
+        // The disposable WebView2 process can take time to expose its debug port.
+      }
+      await delay(200);
+    }
+    assert.ok(debuggerReady, "Cold link fixture never exposed its WebView2 debug port");
+    browser = await remote({ hostname: "127.0.0.1", port: port + 1, path: "/", logLevel: "warn",
+      connectionRetryCount: 0, connectionRetryTimeout: 15_000,
+      capabilities: { browserName: "webview2", "wdio:enforceWebDriverClassic": true,
+        "ms:edgeChromium": true, "ms:edgeOptions": { debuggerAddress } },
+    });
+    await waitForRuntime(browser, { startup: true });
+    assert.equal(await invoke(browser, "plugin:app|identifier"), testIdentifier(application));
+    const restored = browser.$('[aria-label="IDE workspace"] .code-editor .view-lines');
+    await restored.waitForDisplayed();
+    assert.match(await restored.getText(), /seXcond/);
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, primary.checkoutId);
+    assert.equal(await readFile(join(linked, file), "utf8"), original);
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    if (cold?.exitCode === null && cold.signalCode === null && cold.pid) {
+      const closed = new Promise((resolve) => cold.once("close", resolve));
+      cold.kill();
+      await closed;
+    }
     driver.kill();
   }
 });

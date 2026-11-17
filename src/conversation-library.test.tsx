@@ -17,6 +17,7 @@ import { useWorkspace } from "@/workspace-state";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+  isTauri: () => false,
   Channel: class { onmessage = () => {}; },
 }));
 

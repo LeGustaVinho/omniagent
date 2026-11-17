@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { MenuGroups } from "@/components/ui/context-actions";
+import { omniAgentFileLink } from "@/file-links";
 import { gitFilePermalink, type GitPermalinkLines } from "@/git-file-versions";
 import { fileName } from "@/ide-knowledge-data";
 import type { FileTreeTarget } from "@/ide-file-workspace";
@@ -32,21 +33,25 @@ export function readFileHistoryTarget(target?: string) {
   if (target?.startsWith(fileHistoryPrefix)) return target.slice(fileHistoryPrefix.length) || undefined;
 }
 
-export function sourceLineTarget(path: string, line: number) {
-  return sourceLinePrefix + JSON.stringify([path, line, ++sourceNavigationRequest]);
+export function sourceLineTarget(path: string, line?: number, column?: number) {
+  return sourceLinePrefix + JSON.stringify([path, line, ++sourceNavigationRequest, column]);
 }
 
 export function readSourceLineTarget(target?: string) {
   if (!target?.startsWith(sourceLinePrefix)) return;
   try {
-    const [path, line] = JSON.parse(target.slice(sourceLinePrefix.length)) as [unknown, unknown];
-    if (typeof path === "string" && typeof line === "number" && Number.isSafeInteger(line) && line >= 1) return { path, line };
+    const [path, line, , column] = JSON.parse(target.slice(sourceLinePrefix.length)) as [unknown, unknown, unknown, unknown];
+    if (typeof path === "string" && (line === null || typeof line === "number" && Number.isSafeInteger(line) && line >= 1)
+      && (column == null || typeof column === "number" && Number.isSafeInteger(column) && column >= 1)) {
+      return { path, line: line ?? undefined, column: column ?? undefined };
+    }
   } catch { return; }
 }
 
-export function openWorkspaceFile(openWorkspace: WorkspaceProps["openWorkspace"], path: string, line?: number) {
-  if (/\.(md|markdown)$/i.test(path)) openWorkspace("knowledge", line ? noteSearchTarget(path, line, ++sourceNavigationRequest) : path);
-  else openWorkspace("ide", line ? sourceLineTarget(path, line) : path);
+export function openWorkspaceFile(openWorkspace: WorkspaceProps["openWorkspace"], path: string, line?: number,
+  { column, repeat }: { column?: number; repeat?: boolean } = {}) {
+  if (/\.(md|markdown)$/i.test(path)) openWorkspace("knowledge", line || repeat ? noteSearchTarget(path, line, ++sourceNavigationRequest) : path);
+  else openWorkspace("ide", line || repeat ? sourceLineTarget(path, line, column) : path);
 }
 
 export function noteRenameTarget(path: string) {
@@ -106,6 +111,9 @@ export function fileContextActions({ checkout, simulated, status, report }: {
       (url) => copy(url, "Copied committed permalink"), (error: unknown) => report(String(error)),
     );
   };
+  const copyOmniAgentLink = (path: string, line?: number, column?: number) => {
+    copy(omniAgentFileLink(checkout.checkoutId, path, line, column), "Copied OmniAgent link");
+  };
   function location(target: FileTreeTarget): MenuGroups {
     const { path } = target;
     const absolute = (path ? `${checkout.checkoutRoot.replace(/[\\/]+$/, "")}/${path}` : checkout.checkoutRoot).replaceAll("/", "\\");
@@ -123,8 +131,11 @@ export function fileContextActions({ checkout, simulated, status, report }: {
         { label: "Name", run: () => copy(fileName(path), "Copied name") },
       ] : []),
       ...(!simulated ? [{ label: "Absolute path", run: () => copy(absolute, "Copied absolute path") }] : []),
-      ...(!simulated && target.kind === "file" ? [{ label: "Committed file permalink", run: () => copyPermalink(path) }] : []),
+      ...(!simulated && target.kind === "file" ? [
+        ...(checkout.checkoutId ? [{ label: "OmniAgent link", run: () => copyOmniAgentLink(path) }] : []),
+        { label: "Committed file permalink", run: () => copyPermalink(path) },
+      ] : []),
     ], disabled: !path && simulated }]];
   }
-  return { copy, copyPermalink, location, reveal: (path: string) => shell(path, "reveal") };
+  return { copy, copyOmniAgentLink, copyPermalink, location, reveal: (path: string) => shell(path, "reveal") };
 }
