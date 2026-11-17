@@ -2188,7 +2188,7 @@ test("discards only the reviewed Git hunk and preserves the staged file", { time
     await click(browser, '.work-rail button[aria-label="Git"]');
     const gitView = browser.$('[aria-label="Git workspace"]');
     await click(gitView, "button=Review hunks");
-    const firstHunkActions = '[aria-label="Git hunks"] section[aria-label^="@@ -1,"] button[aria-label^="Actions for "]';
+    const firstHunkActions = '[aria-label="Git hunks"] section[aria-label^="@@ -1,"] > .diff-hunk-menu > .context-actions-more';
     await click(gitView, firstHunkActions);
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Mark hunk as reviewed"]');
     const reviewed = '//*[@aria-label="Git hunks"]//span[normalize-space(.)="Reviewed"]';
