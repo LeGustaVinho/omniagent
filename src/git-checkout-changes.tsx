@@ -56,6 +56,12 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const [conflict, setConflict] = useState<string>();
   const [discard, setDiscard] = useState<{ path: string; hunkId?: string }>();
   const changeStage = useChangeStage(review);
+  const client = useQueryClient();
+  const reviewHunk = useMutation({
+    mutationFn: (request: { path: string; source: Source; snapshot: string; hunkId: string; reviewed: boolean }) =>
+      invoke<void>("set_git_hunk_reviewed", { checkoutId: review.checkoutId, request }),
+    onSettled: () => client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),
+  });
   const conversationActions = useCheckoutConversationActions(review.checkoutId, !openConversation, (id) => openConversation?.(id));
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
@@ -77,6 +83,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     enabled: source !== "branch",
   });
   const diffRevision = diff.data?.revision;
+  const snapshot = diff.data?.commentScope?.snapshot;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
   const addDiffExcerpt = openConversation && diffRevision ? (selection: EditorExcerpt, side: string, instruction?: string) => {
@@ -94,7 +101,10 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
           files={files} selectedPath={path} select={setSelection} comparison={comparison}
-          notice={selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
+          notice={<>
+            {selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
+            {reviewHunk.error && <div className="p-3"><InlineIssue>{String(reviewHunk.error)}</InlineIssue></div>}
+          </>}
           preview={path && (unmerged ? <div className="grid justify-items-start gap-2 p-3">
             <p className="text-sm">This file has unmerged Git index stages.</p>
             <Button type="button" variant="outline" onClick={() => setConflict(path)}>Review conflict</Button>
@@ -105,6 +115,8 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
           openLine={canOpen ? (line) => openFile(comparison.path, line) : undefined} addExcerpt={addDiffExcerpt}
           reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
+          hunkReview={comparison && snapshot ? { pending: reviewHunk.isPending, change: (hunkId, reviewed) =>
+            reviewHunk.mutate({ path: comparison.path, source, snapshot, hunkId, reviewed }) } : undefined}
           hunkActions={(hunk) => [[
             ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
               disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),

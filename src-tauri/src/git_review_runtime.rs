@@ -271,6 +271,18 @@ pub async fn set_git_path_staged(
 }
 
 #[tauri::command]
+pub async fn set_git_hunk_reviewed(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHunkReviewRequest,
+) -> Result<(), String> {
+    store
+        .set_git_hunk_reviewed(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn set_git_hunk_staged(
     store: State<'_, Store>,
     checkout_id: String,

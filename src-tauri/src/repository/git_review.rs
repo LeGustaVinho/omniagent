@@ -31,6 +31,7 @@ mod conflicts;
 mod content;
 mod discard;
 mod history;
+mod hunk_review;
 mod hunks;
 mod permalink;
 pub use blame::GitLineBlame;
@@ -40,6 +41,7 @@ pub use conflicts::{GitConflictProposal, GitConflictReview};
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
 pub use discard::GitDiscardPreview;
 pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
+pub use hunk_review::GitHunkReviewRequest;
 pub use hunks::GitReviewHunk;
 pub use permalink::GitPermalinkLines;
 
@@ -249,8 +251,8 @@ impl Store {
         path: String,
         source: GitDiffSource,
     ) -> Result<GitReviewDiff> {
-        let scope = self.git_review_scope(checkout).await?;
-        tokio::task::spawn_blocking(move || {
+        let scope = self.git_review_scope(checkout.clone()).await?;
+        let mut diff = tokio::task::spawn_blocking(move || -> Result<GitReviewDiff> {
             let review = LiveReview::open(&scope)?;
             validate_path(&path)?;
             let entry = review
@@ -272,7 +274,9 @@ impl Store {
             )?;
             Ok(diff)
         })
-        .await?
+        .await??;
+        hunk_review::load(self, checkout, &mut diff).await?;
+        Ok(diff)
     }
 
     pub async fn set_git_path_staged(

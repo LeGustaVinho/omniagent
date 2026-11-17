@@ -455,6 +455,47 @@ it("stages the exact hunk selected in the live comparison", async () => {
   expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
 });
 
+it("marks and unmarks the clicked hunk on its exact Git diff without staging it", async () => {
+  const path = "example.txt";
+  const hunk = { id: "picked-hunk", header: "@@ -12 +12 @@", originalLine: 12, modifiedLine: 12,
+    patch: "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -12 +12 @@\n-old\n+changed\n" };
+  const base = { path, sha256: "original-text", lineCount: 12 };
+  const snapshot = "selected-checkout-diff";
+  let reviewed = false;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_checkout_review") return { checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: originalRevision, changes: [{ path, working: "M", staged: null }] };
+    if (command === "git_checkout_diff") return { path, source: "working", revision: originalRevision, hunks: [{ ...hunk, reviewed }],
+      original: { status: "text", content: "old" }, modified: { status: "text", content: "changed" },
+      commentScope: { snapshot, source: { kind: "checkout", source: "working", revision: originalRevision },
+        original: base, modified: { ...base, sha256: "changed-text" } } };
+    if (command === "git_review_comments") return [];
+    if (command === "set_git_hunk_reviewed") {
+      reviewed = (args as { request: { reviewed: boolean } }).request.reviewed;
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit();
+  await user.click(await screen.findByRole("button", { name: "Review hunks" }));
+  const region = within(screen.getByRole("region", { name: hunk.header }));
+  fireEvent.contextMenu(region.getByRole("button", { name: hunk.header }));
+  await user.click(within(await screen.findByRole("menu", { name: hunk.header })).getByRole("menuitem", { name: "Mark hunk as reviewed" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_hunk_reviewed", { checkoutId: checkout.checkoutId,
+    request: { path, source: "working", snapshot, hunkId: hunk.id, reviewed: true } });
+  await region.findByText("Reviewed");
+  expect(screen.getByText("1/1 hunks reviewed")).toBeTruthy();
+
+  fireEvent.contextMenu(region.getByText("+changed"));
+  const lineMenu = await screen.findByRole("menu", { name: "Revised line 12" });
+  await user.click(within(lineMenu).getByRole("menuitem", { name: "Mark hunk as unreviewed" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_hunk_reviewed", { checkoutId: checkout.checkoutId,
+    request: { path, source: "working", snapshot, hunkId: hunk.id, reviewed: false } });
+  await waitFor(() => expect(region.queryByText("Reviewed")).toBeNull());
+  expect(invoke).not.toHaveBeenCalledWith("set_git_hunk_staged", expect.anything());
+});
+
 it("reports unavailable saved evidence in the side panel for the exact requested attempt", async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "git_saved_attempts") return [{ runId: "newer-run", checkoutId: checkout.checkoutId, label: "Later attempt" }];
