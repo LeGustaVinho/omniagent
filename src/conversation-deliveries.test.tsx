@@ -80,3 +80,72 @@ it("shows the retained attachments and requests native bytes by original ordinal
   await user.click(screen.getByRole("menuitem", { name: "Download saved bytes" }));
   expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 3 });
 });
+
+it.each(["native", "excerpt", "reference"] as const)("reuses a saved %s from the clicked attempt in the chosen conversation draft", async (method) => {
+  const checkoutId = "destination-worktree";
+  const conversationId = "source-conversation";
+  const runId = "run-id";
+  const destinationConversationId = "destination-conversation";
+  const attachment = {
+    ordinal: 4, name: "release.txt", mimeType: "text/plain", source: { kind: "checkout", relativePath: "obsolete/release.txt" },
+    sourceSha256: "a".repeat(64), sourceSize: 90, messageRevisionId: "source-revision", reportedReads: [],
+    transport: method === "native" ? { method, encoding: "acp_resource", runnerPath: null, resourceUri: null }
+      : method === "excerpt" ? { method, start: 27, end: 48, text: "exact saved paragraph" }
+        : { method, runnerPath: "D:/old-runner/release.txt", uri: "file:///D:/old-runner/release.txt" },
+  } satisfies ConversationInput["attachments"][number];
+  const input: ConversationInput = { removedAttachmentCount: 2, delivery: "submitted", turnId: "turn", frames: [], instructions: [], attachments: [attachment] };
+  const open = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let retained = true;
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "list_conversations") return [{ id: destinationConversationId, title: "Release follow-up" }];
+    if (command === "conversation_input") return retained ? input : { ...input, attachments: [] };
+    if (command === "conversation_attachment_content") return btoa("bytes that reached the original provider\r\n");
+    if (command === "reuse_saved_conversation_attachment" || command === "append_checkout_context_to_conversation") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={client}>
+    <ConversationDeliveries input={input} conversationId={conversationId} runId={runId} live={false} checkoutId="origin-worktree"
+      draftDestination={{ checkoutId, open }} />
+  </QueryClientProvider>);
+  await user.click(screen.getByText("Saved attachments", { selector: "summary" }));
+  if (method === "native") {
+    fireEvent.contextMenu(screen.getByText(/^release\.txt ·/));
+    await user.click(screen.getByRole("menuitem", { name: "Preview saved attachment" }));
+    const preview = within(await screen.findByRole("dialog", { name: "Saved attachment preview" }));
+    await preview.findByText("bytes that reached the original provider");
+    expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId, runId, index: 4 });
+    await user.click(preview.getByRole("button", { name: "Close dialog" }));
+  }
+  fireEvent.contextMenu(screen.getByText(/^release\.txt ·/));
+  await user.click(screen.getByRole("menuitem", { name: method === "native" ? "Reuse saved attachment…"
+    : method === "excerpt" ? "Add saved excerpt to draft…" : "Add saved reference to draft…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: method === "native" ? "Reuse saved attachment" : "Add checkout context" }));
+  expect(dialog.getByText(/Run run-id · Attachment 5 · Message revision source-revision/)).toBeTruthy();
+  await dialog.findByRole("option", { name: "Release follow-up" });
+  expect(invoke).toHaveBeenCalledWith("list_conversations", { checkoutId });
+  expect(open).not.toHaveBeenCalled();
+  await user.selectOptions(dialog.getByLabelText("Conversation"), destinationConversationId);
+  if (method === "reference") {
+    retained = false;
+    await user.click(dialog.getByRole("button", { name: "Add to draft" }));
+    expect((await dialog.findByRole("alert")).textContent).toContain("This saved attachment changed or was removed");
+    expect(invoke).not.toHaveBeenCalledWith("append_checkout_context_to_conversation", expect.anything());
+    retained = true;
+  }
+  await user.click(dialog.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith(destinationConversationId));
+  if (method === "native") {
+    expect(invoke).toHaveBeenCalledWith("reuse_saved_conversation_attachment", { request: { sourceConversationId: conversationId, runId,
+      ordinal: 4, messageRevisionId: attachment.messageRevisionId, sourceSha256: attachment.sourceSha256, destinationConversationId } });
+  } else {
+    expect(invoke).toHaveBeenCalledWith("conversation_input", { conversationId, runId });
+    expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+      checkoutId, conversationId: destinationConversationId, context: expect.stringContaining(method === "excerpt" ? "exact saved paragraph"
+        : "Recorded runner path: D:/old-runner/release.txt\nRecorded URI: file:///D:/old-runner/release.txt"),
+    });
+  }
+  expect(invoke).not.toHaveBeenCalledWith("add_checkout_files_to_conversation", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});

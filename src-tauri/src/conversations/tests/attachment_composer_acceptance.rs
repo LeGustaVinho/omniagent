@@ -3,9 +3,13 @@ use super::*;
 #[tokio::test]
 async fn attachment_composer_review_matches_saved_dispatch_after_profile_change() -> Result<()> {
     use crate::attachments::{
-        AttachmentDelivery, AttachmentFormat, AttachmentInput, NativeAttachmentEncoding,
+        AttachmentDelivery, AttachmentFormat, AttachmentInput, AttachmentLimits, AttachmentSource,
+        NativeAttachmentEncoding,
     };
-    use crate::conversations::draft_files::DraftAttachmentEdit;
+    use crate::conversations::draft_files::{
+        DraftAttachmentEdit, ReuseSavedConversationAttachment,
+    };
+    use crate::dispatch::{AttachmentHistoryRemoval, AttachmentHistoryTarget};
     use crate::jobs::AdmissionEnvironment;
     use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -172,7 +176,7 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         RunStatus::Succeeded
     );
     let dispatch = store
-        .agent_dispatch(chat.id.clone(), run)
+        .agent_dispatch(chat.id.clone(), run.clone())
         .await?
         .context("Native dispatch missing")?;
     let [sent] = dispatch.snapshot.attachments.as_slice() else {
@@ -184,6 +188,8 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         Some(qualification.as_str())
     );
     assert_eq!(sent.input.native().unwrap().content, PNG);
+    let source_run = run;
+    let origin = dispatch.attachments[0].clone();
 
     let draft = store
         .add_conversation_attachment_paths(chat.id.clone(), vec![image.clone(), external.clone()])
@@ -320,6 +326,226 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
     assert_eq!(
         std::fs::read_to_string(sibling)?,
         "Unselected external file"
+    );
+
+    std::fs::remove_file(&image)?;
+    let destination = store
+        .create_conversation(chat.checkout_id.clone(), "Reuse the recorded image".into())
+        .await?;
+    let reuse = |destination: &str, sha256: String| ReuseSavedConversationAttachment {
+        source_conversation_id: chat.id.clone(),
+        run_id: source_run.clone(),
+        ordinal: origin.ordinal,
+        message_revision_id: origin.message_revision_id.clone(),
+        source_sha256: sha256,
+        destination_conversation_id: destination.into(),
+    };
+    assert!(
+        store
+            .reuse_saved_conversation_attachment(reuse(&destination.id, "wrong".into()))
+            .await
+            .is_err()
+    );
+    let unrelated_root = tempfile::tempdir()?;
+    let unrelated_root = dunce::canonicalize(unrelated_root.path())?;
+    assert!(
+        Command::new("git.exe")
+            .current_dir(&unrelated_root)
+            .args(["init", "--quiet"])
+            .status()?
+            .success()
+    );
+    let unrelated = crate::repository::register(&store, unrelated_root).await?;
+    let unrelated = store
+        .create_conversation(unrelated.checkout_id, "Unrelated project".into())
+        .await?;
+    assert!(
+        store
+            .reuse_saved_conversation_attachment(reuse(&unrelated.id, origin.source_sha256.clone()))
+            .await
+            .is_err()
+    );
+    let draft = store
+        .reuse_saved_conversation_attachment(reuse(&destination.id, origin.source_sha256.clone()))
+        .await?;
+    assert_eq!(
+        draft,
+        store
+            .reuse_saved_conversation_attachment(reuse(
+                &destination.id,
+                origin.source_sha256.clone()
+            ))
+            .await?
+    );
+    assert!(
+        matches!(&draft.files[0].source, AttachmentSource::SavedNative { conversation_id, run_id, name, .. }
+        if conversation_id == &chat.id && run_id == &source_run && name == "image.png")
+    );
+    let revision = draft
+        .revision
+        .context("Missing reused attachment draft revision")?;
+    let reuse_prompt = "Identify these archived bytes.";
+    store
+        .save_conversation_draft(destination.id.clone(), reuse_prompt.into())
+        .await?;
+    let review = || {
+        store.review_conversation_attachment_draft(
+            destination.id.clone(),
+            revision.clone(),
+            native_scope.clone(),
+            reuse_prompt.into(),
+        )
+    };
+    let source_checkout = chat.checkout_id.clone();
+    let project_id = store
+        .execute(move |db| {
+            Ok(db.query_row(
+                "SELECT project_id FROM checkouts WHERE id = ?1",
+                [source_checkout],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await?;
+    let project_limits = store.project_attachment_limits(project_id.clone()).await?;
+    store
+        .set_project_attachment_limits(
+            project_id.clone(),
+            AttachmentLimits {
+                bytes_per_file: 1,
+                ..project_limits
+            },
+        )
+        .await?;
+    let blocked = review().await?;
+    assert!(blocked.preview_id.is_none());
+    assert!(
+        blocked.files[0]
+            .native_unavailable
+            .as_deref()
+            .unwrap_or("")
+            .contains("file limit")
+    );
+    store
+        .set_project_attachment_limits(project_id, project_limits)
+        .await?;
+    let reviewed = review().await?;
+    assert_eq!(reviewed.files[0].alternatives, [AttachmentDelivery::Native]);
+    assert_eq!(reviewed.files[0].media.as_deref(), Some(PNG));
+    let reusable = reviewed
+        .preview_id
+        .context("Expected reviewed archived bytes")?;
+    assert!(!image.exists());
+    assert!(matches!(
+        store
+            .submit_conversation_with_files(
+                destination.id.clone(),
+                destination.context_id.clone(),
+                native_scope.clone(),
+                reuse_prompt.into(),
+                Vec::new(),
+                Some(reusable)
+            )
+            .await?,
+        ContinuationInspection::Queued { .. }
+    ));
+    let plan = admit(&native_scope)
+        .await?
+        .context("The archived bytes were not admitted")?;
+    let reused_run = plan.run.id.clone();
+    assert_eq!(
+        start_managed_turn(store.clone(), runner_for(&destination.id), plan, None)
+            .wait()
+            .await?,
+        RunStatus::Succeeded
+    );
+    let reused = store
+        .agent_dispatch(destination.id.clone(), reused_run.clone())
+        .await?
+        .context("The reuse dispatch is missing")?;
+    let [reused_evidence] = reused.attachments.as_slice() else {
+        anyhow::bail!("Expected one reused attachment")
+    };
+    assert_eq!(reused_evidence.source_sha256, origin.source_sha256);
+    assert_eq!(
+        reused.snapshot.attachments[0]
+            .input
+            .native()
+            .unwrap()
+            .content,
+        PNG
+    );
+    assert_eq!(
+        reused.snapshot.attachments[0].qualification_id.as_deref(),
+        Some(qualification.as_str())
+    );
+    assert!(!image.exists());
+
+    let deferred = store
+        .create_conversation(
+            chat.checkout_id.clone(),
+            "Reviewed re-use before retirement".into(),
+        )
+        .await?;
+    let reusing_derived = || ReuseSavedConversationAttachment {
+        source_conversation_id: destination.id.clone(),
+        run_id: reused_run.clone(),
+        ordinal: reused_evidence.ordinal,
+        message_revision_id: reused_evidence.message_revision_id.clone(),
+        source_sha256: reused_evidence.source_sha256.clone(),
+        destination_conversation_id: deferred.id.clone(),
+    };
+    let draft = store
+        .reuse_saved_conversation_attachment(reusing_derived())
+        .await?;
+    let review = || {
+        store.review_conversation_attachment_draft(
+            deferred.id.clone(),
+            draft.revision.clone().unwrap(),
+            native_scope.clone(),
+            reuse_prompt.into(),
+        )
+    };
+    let preview = review()
+        .await?
+        .preview_id
+        .context("Expected a reviewed derived attachment")?;
+    let target = AttachmentHistoryTarget {
+        conversation_id: chat.id.clone(),
+        message_revision_id: origin.message_revision_id,
+        attachment_ordinal: origin.ordinal,
+    };
+    let removal = AttachmentHistoryRemoval::Selected;
+    let confirmed = store
+        .preview_attachment_history_removal(target.clone(), removal)
+        .await?;
+    store
+        .confirm_attachment_history_removal(target, removal, confirmed.revision)
+        .await?;
+    let stale = store
+        .submit_conversation_with_files(
+            deferred.id.clone(),
+            deferred.context_id,
+            native_scope.clone(),
+            reuse_prompt.into(),
+            Vec::new(),
+            Some(preview),
+        )
+        .await;
+    assert!(matches!(stale, Err(error) if error.to_string().contains("removed")));
+    let retired = review().await?;
+    assert!(retired.preview_id.is_none());
+    assert!(
+        retired.files[0]
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("removed")
+    );
+    assert!(
+        store
+            .reuse_saved_conversation_attachment(reusing_derived())
+            .await
+            .is_err()
     );
     Ok(())
 }

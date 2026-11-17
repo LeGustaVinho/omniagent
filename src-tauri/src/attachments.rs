@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Cursor, Read, Seek, SeekFrom},
     os::windows::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
 };
@@ -115,8 +115,19 @@ impl AttachmentFormat {
     rename_all_fields = "camelCase"
 )]
 pub enum AttachmentSource {
-    Checkout { relative_path: PathBuf },
-    SelectedFile { path: PathBuf },
+    Checkout {
+        relative_path: PathBuf,
+    },
+    SelectedFile {
+        path: PathBuf,
+    },
+    SavedNative {
+        conversation_id: String,
+        run_id: String,
+        ordinal: usize,
+        message_revision_id: String,
+        name: String,
+    },
 }
 
 impl AttachmentSource {
@@ -124,6 +135,7 @@ impl AttachmentSource {
         match self {
             Self::Checkout { relative_path } => relative_path,
             Self::SelectedFile { path } => path,
+            Self::SavedNative { name, .. } => return Some(name),
         }
         .file_name()?
         .to_str()
@@ -165,10 +177,20 @@ pub enum ReferencePreview<'a> {
 
 pub struct AttachmentPreview {
     metadata: AttachmentMetadata,
-    canonical: PathBuf,
+    origin: PreviewOrigin,
     checkout: PathBuf,
     delivery: AttachmentDelivery,
     excerpt: Option<TextExcerpt>,
+}
+
+enum PreviewOrigin {
+    Local(PathBuf),
+    Saved(Vec<u8>),
+}
+
+pub(crate) struct SavedNativeAttachment {
+    pub metadata: AttachmentMetadata,
+    pub bytes: Vec<u8>,
 }
 
 impl AttachmentPreview {
@@ -203,13 +225,38 @@ impl AttachmentPreview {
             let excerpt = read_excerpt(&mut file, &metadata, delivery)?;
             Ok(Self {
                 metadata,
-                canonical,
+                origin: PreviewOrigin::Local(canonical),
                 checkout: checkout.into(),
                 delivery,
                 excerpt,
             })
         })();
         with_file_reason(result, source.file_name().unwrap_or("attachment"))
+    }
+
+    pub(crate) fn prepare_saved_file(
+        checkout: &Path,
+        saved: SavedNativeAttachment,
+        delivery: AttachmentDelivery,
+        limits: AttachmentLimits,
+    ) -> Result<Self> {
+        ensure!(
+            delivery != AttachmentDelivery::Reference,
+            "A saved attachment has no current file path to reference."
+        );
+        AttachmentBudget::new(limits).check(
+            &saved.metadata.source,
+            delivery,
+            saved.metadata.size,
+        )?;
+        let excerpt = read_excerpt(&mut Cursor::new(&saved.bytes), &saved.metadata, delivery)?;
+        Ok(Self {
+            metadata: saved.metadata,
+            origin: PreviewOrigin::Saved(saved.bytes),
+            checkout: checkout.into(),
+            delivery,
+            excerpt,
+        })
     }
 
     pub fn delivery(&self) -> AttachmentDelivery {
@@ -224,12 +271,14 @@ impl AttachmentPreview {
         if self.delivery != AttachmentDelivery::Reference {
             return None;
         }
-        Some(match self.metadata.source {
-            AttachmentSource::Checkout { .. } => ReferencePreview::CheckoutPath(&self.canonical),
-            AttachmentSource::SelectedFile { .. } => {
-                ReferencePreview::ReadOnlyCopyOf(&self.canonical)
-            }
-        })
+        let PreviewOrigin::Local(path) = &self.origin else {
+            return None;
+        };
+        match self.metadata.source {
+            AttachmentSource::Checkout { .. } => Some(ReferencePreview::CheckoutPath(path)),
+            AttachmentSource::SelectedFile { .. } => Some(ReferencePreview::ReadOnlyCopyOf(path)),
+            AttachmentSource::SavedNative { .. } => None,
+        }
     }
 
     fn capture(self, checkout: &Path, limits: AttachmentLimits) -> Result<CapturedAttachment> {
@@ -237,11 +286,29 @@ impl AttachmentPreview {
             self.checkout == checkout,
             "attachment preview belongs to another checkout"
         );
+        let canonical = match self.origin {
+            PreviewOrigin::Local(path) => path,
+            PreviewOrigin::Saved(bytes) => {
+                limits.check_file(&self.metadata.source, self.delivery, bytes.len() as u64)?;
+                let payload = match self.delivery {
+                    AttachmentDelivery::Native => CapturedPayload::Native {
+                        content: STANDARD.encode(bytes),
+                    },
+                    AttachmentDelivery::Excerpt { .. } => CapturedPayload::Excerpt {
+                        excerpt: self.excerpt.context("missing previewed excerpt")?,
+                    },
+                    AttachmentDelivery::Reference => {
+                        anyhow::bail!("A saved attachment has no current file path to reference.")
+                    }
+                };
+                return Ok(CapturedAttachment {
+                    metadata: self.metadata,
+                    payload,
+                });
+            }
+        };
         let path = authorized_path(checkout, &self.metadata.source)?;
-        ensure!(
-            path == self.canonical,
-            "attachment path changed after preview"
-        );
+        ensure!(path == canonical, "attachment path changed after preview");
         let mut file = open_locked_local_file(&path)?;
         limits.check_file(&self.metadata.source, self.delivery, file.metadata()?.len())?;
         let observed = inspect(&mut file, &self.metadata.source)?;
@@ -287,6 +354,9 @@ fn authorized_path(checkout: &Path, source: &AttachmentSource) -> Result<PathBuf
             checkout.join(relative_path)
         }
         AttachmentSource::SelectedFile { path } => path.clone(),
+        AttachmentSource::SavedNative { .. } => {
+            anyhow::bail!("A saved attachment can only be read from its recorded dispatch.")
+        }
     };
     ensure!(
         plain_metadata(&path)?.is_some_and(|entry| entry.is_file()),
@@ -359,7 +429,7 @@ fn inspect(file: &mut File, source: &AttachmentSource) -> Result<AttachmentMetad
 }
 
 fn read_excerpt(
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     metadata: &AttachmentMetadata,
     delivery: AttachmentDelivery,
 ) -> Result<Option<TextExcerpt>> {
@@ -792,6 +862,9 @@ impl StagedAttachments {
                     );
                 }
                 path
+            }
+            AttachmentSource::SavedNative { .. } => {
+                anyhow::bail!("A saved attachment has no current file path to reference.")
             }
         };
         let uri = if provider == Provider::Antigravity {

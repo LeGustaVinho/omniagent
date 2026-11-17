@@ -219,7 +219,8 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
       </> },
       { id: "agents", name: "Agents", content: <ConversationActivityAgents {...scope} projection={projection} openActivity={openActivity} /> },
       { id: "context", name: "Context", content: <ConversationActivityContext {...scope} projectId={projectId} projection={projection} /> },
-      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId} /> },
+      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId}
+        draftDestination={{ checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } }} /> },
       { id: "approvals", name: "Approvals", content: <><h3>Approval history</h3><ConversationApprovalEvidence {...scope} /></> },
       { id: "artifacts", name: "Artifacts", content: <>
         <ContextActions label="Recorded output" groups={!live && Boolean(projection?.responses.items.length)

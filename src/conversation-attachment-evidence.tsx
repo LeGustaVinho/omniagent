@@ -1,15 +1,20 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { Button } from "@/components/ui/button";
 import { ContextActions } from "@/components/ui/context-actions";
 import { useAttachmentActions } from "@/conversation-attachment-actions";
+import type { AttachmentSource } from "@/conversation-attachments";
 import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
+import { FileDialog } from "@/ide-file-workspace";
+import { isNoteMediaType, SafeAttachmentMedia } from "@/repository-note-media";
 
 export type AttachmentEvidence = {
   ordinal: number;
   name: string;
   mimeType: string;
-  source: { kind: "checkout"; relativePath: string } | { kind: "selected_file"; path: string };
+  source: AttachmentSource;
   sourceSha256: string;
   sourceSize: number;
   messageRevisionId: string;
@@ -19,16 +24,25 @@ export type AttachmentEvidence = {
     | { method: "reference"; runnerPath: string; uri: string | null };
 };
 
-function SavedAttachment({ attachment, conversationId, runId, checkoutId }: {
+export type AttachmentDraftDestination = { checkoutId: string; open: (conversationId: string) => void };
+
+async function readSavedBytes(conversationId: string, runId: string, index: number) {
+  const encoded = await invoke<string | null>("conversation_attachment_content", { conversationId, runId, index });
+  if (encoded === null) throw new Error("Saved attachment bytes are unavailable.");
+  return encoded;
+}
+
+function SavedAttachment({ attachment, conversationId, runId, checkoutId, reuse }: {
   attachment: AttachmentEvidence;
   conversationId: string;
   runId: string;
   checkoutId?: string;
+  reuse?: (attachment: AttachmentEvidence) => void;
 }) {
+  const [preview, setPreview] = useState(false);
   const save = useMutation({
     mutationFn: async () => {
-      const encoded = await invoke<string | null>("conversation_attachment_content", { conversationId, runId, index: attachment.ordinal });
-      if (encoded === null) throw new Error("Saved attachment bytes are unavailable.");
+      const encoded = await readSavedBytes(conversationId, runId, attachment.ordinal);
       downloadArtifact(attachment.name, new Blob([decodeArtifactBytes(encoded)], { type: attachment.mimeType }));
     },
   });
@@ -37,8 +51,13 @@ function SavedAttachment({ attachment, conversationId, runId, checkoutId }: {
   const runnerPath = transport.method === "excerpt" ? null : transport.runnerPath;
   const uri = transport.method === "native" ? transport.resourceUri : transport.method === "reference" ? transport.uri : null;
   const title = `${attachment.name} · ${transport.method === "native" ? "Native content" : transport.method === "excerpt" ? "Excerpt" : "File reference"}`;
+  const reuseLabel = transport.method === "native" ? "Reuse saved attachment…"
+    : transport.method === "excerpt" ? "Add saved excerpt to draft…" : "Add saved reference to draft…";
+  const previewable = transport.method === "native" && attachment.sourceSize <= 16 * 1024 * 1024
+    && (attachment.mimeType === "text/plain" || isNoteMediaType(attachment.mimeType));
   return <li className="grid gap-1 border-t border-border pt-2 text-xs">
-    <ContextActions label={title} groups={[checkout, transport.method === "native" ? [
+    <ContextActions label={title} groups={[reuse ? [{ label: reuseLabel, run: () => reuse(attachment) }] : [], checkout, transport.method === "native" ? [
+      ...(previewable ? [{ label: "Preview saved attachment", run: () => setPreview(true) }] : []),
       { label: "Download saved bytes", disabled: save.isPending, run: () => save.mutate() },
     ] : [], [...clipboard,
       { label: "Copy saved SHA-256", run: () => copy(attachment.sourceSha256) },
@@ -71,21 +90,58 @@ function SavedAttachment({ attachment, conversationId, runId, checkoutId }: {
     </ol>}
     {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     {save.error && <p role="alert">{String(save.error)}</p>}
+    {preview && <SavedAttachmentPreview attachment={attachment} conversationId={conversationId} runId={runId} close={() => setPreview(false)} />}
   </li>;
 }
 
-export function SavedAttachments({ attachments, conversationId, runId, checkoutId }: {
+function SavedAttachmentPreview({ attachment, conversationId, runId, close }: {
+  attachment: AttachmentEvidence; conversationId: string; runId: string; close: () => void;
+}) {
+  const content = useQuery({ queryKey: ["saved-attachment-preview", conversationId, runId, attachment.ordinal, attachment.messageRevisionId],
+    queryFn: () => readSavedBytes(conversationId, runId, attachment.ordinal), retry: false, gcTime: 0 });
+  return <FileDialog title="Saved attachment preview" description={`${attachment.name} · Message revision ${attachment.messageRevisionId}`} onClose={close}>
+    {content.isPending && <p role="status">Loading saved bytes…</p>}
+    {content.error && <p role="alert">{String(content.error)}</p>}
+    {content.data !== undefined && <SafeAttachmentMedia base64={content.data} mimeType={attachment.mimeType} title={attachment.name} />}
+  </FileDialog>;
+}
+
+export function SavedAttachments({ attachments, conversationId, runId, checkoutId, draftDestination }: {
   attachments: AttachmentEvidence[];
   conversationId: string;
   runId: string;
   checkoutId?: string;
+  draftDestination?: AttachmentDraftDestination;
 }) {
+  const draft = useCheckoutConversationActions(draftDestination?.checkoutId ?? "", !draftDestination, (id) => draftDestination?.open(id));
+  function reuse(attachment: AttachmentEvidence) {
+    const { name, ordinal, sourceSha256, messageRevisionId, transport } = attachment;
+    const reference = `${name} · Conversation ${conversationId} · Run ${runId} · Attachment ${ordinal + 1} · Message revision ${messageRevisionId} · SHA-256 ${sourceSha256}`;
+    if (transport.method === "native") {
+      draft.startRecordedFile({ title: name, reference, sourceConversationId: conversationId, runId, ordinal, messageRevisionId, sourceSha256 });
+      return;
+    }
+    const details = transport.method === "excerpt" ? `UTF-8 bytes ${transport.start}–${transport.end}` : "Recorded file reference";
+    const text = transport.method === "excerpt" ? transport.text
+      : [`Recorded runner path: ${transport.runnerPath}`, transport.uri && `Recorded URI: ${transport.uri}`].filter(Boolean).join("\n");
+    draft.startContextText({ title: name, reference: `${reference} · ${details}`, text, confirmSource: async () => {
+      const current = await invoke<{ attachments: AttachmentEvidence[] } | null>("conversation_input", { conversationId, runId });
+      const saved = current?.attachments.find((item) => item.ordinal === ordinal && item.messageRevisionId === messageRevisionId
+        && item.sourceSha256 === sourceSha256);
+      if (!saved || JSON.stringify(saved.transport) !== JSON.stringify(transport)) {
+        throw new Error("This saved attachment changed or was removed. Open its recorded input again.");
+      }
+    } });
+  }
   if (!attachments.length) return null;
-  return <details className="mt-2">
-    <summary>Saved attachments</summary>
-    <ol className="mt-2 grid gap-2" aria-label="Saved attachments">
-      {attachments.map((attachment) => <SavedAttachment key={attachment.ordinal} attachment={attachment}
-        conversationId={conversationId} runId={runId} checkoutId={checkoutId} />)}
-    </ol>
-  </details>;
+  return <>
+    <details className="mt-2">
+      <summary>Saved attachments</summary>
+      <ol className="mt-2 grid gap-2" aria-label="Saved attachments">
+        {attachments.map((attachment) => <SavedAttachment key={attachment.ordinal} attachment={attachment}
+          conversationId={conversationId} runId={runId} checkoutId={checkoutId} reuse={draftDestination ? reuse : undefined} />)}
+      </ol>
+    </details>
+    {draft.dialog}
+  </>;
 }

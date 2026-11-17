@@ -621,6 +621,7 @@ fn main() {
             conversation_continuation_runtime::edit_conversation_reference_draft,
             conversation_attachment_ipc::conversation_attachment_draft,
             conversation_attachment_ipc::add_checkout_files_to_conversation,
+            conversation_attachment_ipc::reuse_saved_conversation_attachment,
             conversation_attachment_ipc::append_checkout_context_to_conversation,
             conversation_attachment_ipc::pick_conversation_attachments,
             conversation_attachment_ipc::accept_conversation_attachment_drop,

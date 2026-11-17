@@ -39,6 +39,9 @@ mod lineage;
 mod profile;
 mod qualification;
 pub use attachment_evidence::{AttachmentEvidence, AttachmentRead, AttachmentTransport};
+pub(crate) use attachment_evidence::{
+    load_saved_native_attachment, saved_native_from_source, verify_saved_native_metadata,
+};
 pub(crate) use attachment_retention::revoked_history_run;
 pub use attachment_retention::{
     AttachmentHistoryRemoval, AttachmentHistoryTarget, AttachmentRemovalPreview,
@@ -218,11 +221,13 @@ impl Store {
                 tx.commit()?;
                 return Ok(None);
             }
-            let (context, turn, session, scope): (String, String, String, String) = tx.query_row(
-                "SELECT a.context_id, a.turn_id, a.agent_session_id, s.scope
+            let (context, turn, session, scope, project_id): (String, String, String, String, String) = tx.query_row(
+                "SELECT a.context_id, a.turn_id, a.agent_session_id, s.scope, c.project_id
                  FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id
-                 JOIN agent_sessions s ON s.id = a.agent_session_id WHERE a.run_id = ?1",
-                [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                 JOIN agent_sessions s ON s.id = a.agent_session_id
+                 JOIN runs r ON r.id = a.run_id JOIN checkouts c ON c.id = r.checkout_id
+                 WHERE a.run_id = ?1",
+                [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).context("dispatch requires an active attempt")?;
             ensure!(context == snapshot.context_id, "snapshot does not cover the admitted context");
             ensure!(serde_json::from_str::<SessionScope>(&scope)? == snapshot.scope,
@@ -231,6 +236,9 @@ impl Store {
             let message_revisions = snapshot.submitted_messages.iter().map(|message| message.revision_id.clone()).collect::<Vec<_>>();
             ensure!(reference_delivery::submitted_references(&tx, &run_id, &message_revisions)? == snapshot.conversation_references,
                 "The attached conversation references changed before dispatch");
+            for attachment in &snapshot.attachments {
+                verify_saved_native_metadata(&tx, &project_id, &attachment.metadata)?;
+            }
             snapshot.session_id = Some(session.clone());
             snapshot.job_policy_revision = tx.query_row(
                 "SELECT policy_key FROM job_attempt_policies WHERE run_id = ?1",

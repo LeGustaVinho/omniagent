@@ -302,6 +302,15 @@ fn retired_identities(
     Ok(retired)
 }
 
+pub(super) fn archived_attachment_was_removed(
+    db: &Connection,
+    attachment: &AttachmentDispatch,
+) -> Result<bool> {
+    Ok(retired_identities(db, &attachment.message_revision_id)?
+        .values()
+        .any(|identity| identity.matches(attachment)))
+}
+
 fn saved_identities(
     db: &Connection,
     revision: &str,

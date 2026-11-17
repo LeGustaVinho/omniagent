@@ -10,7 +10,8 @@ import { useAttachmentActions } from "@/conversation-attachment-actions";
 import { SafeAttachmentMedia } from "@/repository-note-media";
 
 export type AttachmentDelivery = { kind: "native" | "reference" } | { kind: "excerpt"; start: number; end: number };
-export type AttachmentSource = { kind: "checkout"; relativePath: string } | { kind: "selected_file"; path: string };
+export type AttachmentSource = { kind: "checkout"; relativePath: string } | { kind: "selected_file"; path: string }
+  | { kind: "saved_native"; conversationId: string; runId: string; ordinal: number; messageRevisionId: string; name: string };
 type Attachment = { id: string; source: AttachmentSource; delivery: AttachmentDelivery | null };
 type AttachmentDraft = { revision: string | null; files: Attachment[] };
 type DropReceipt = { id: string; x: number; y: number };
@@ -54,7 +55,7 @@ const mime: Record<Format, string> = { png: "image/png", jpeg: "image/jpeg", gif
 const empty: AttachmentDraft = { revision: null, files: [] };
 
 function pathOf(source: AttachmentSource) {
-  return source.kind === "checkout" ? source.relativePath : source.path;
+  return source.kind === "checkout" ? source.relativePath : source.kind === "selected_file" ? source.path : source.name;
 }
 
 function containsPoint(element: HTMLElement | null, x: number, y: number) {
@@ -203,7 +204,8 @@ function DraftAttachmentRow({ file, checkoutId, review, disabled, change }: {
       ...(sha ? [{ label: "Copy reviewed SHA-256", run: () => copy(sha) }] : []),
       ...(excerpt !== undefined ? [{ label: "Copy reviewed excerpt", run: () => copy(excerpt) }] : []),
     ], [{ label: "Remove from draft", disabled, run: remove }]]}>
-      <span title={path} className="min-w-0 flex-1 truncate">{name} · {file.source.kind === "checkout" ? "Checkout" : "Selected external file"}</span>
+      <span title={path} className="min-w-0 flex-1 truncate">{name} · {file.source.kind === "checkout" ? "Checkout"
+        : file.source.kind === "selected_file" ? "Selected external file" : "Saved attachment"}</span>
       <button type="button" className="conv-icon-button" aria-label={`Remove file ${name}`} disabled={disabled}
         onClick={remove}><X size={14} aria-hidden /></button>
     </ContextActions>
@@ -229,6 +231,7 @@ function ReviewedAttachment({ name, path, file, review, disabled, onDelivery, de
       {review.metadata && ` · ${review.metadata.size.toLocaleString()} bytes`}</summary>
     <div className="grid gap-2 py-1">
       <p className="break-all">{path}{review.metadata && ` · ${mime[review.metadata.format]}`}</p>
+      {file.source.kind === "saved_native" && <p className="break-all">Recorded run {file.source.runId} · Message revision {file.source.messageRevisionId}</p>}
       <label>Delivery for {name} <select disabled={disabled} value={file.delivery?.kind ?? "auto"}
         onChange={(event) => onDelivery(alternatives.find(({ kind }) => kind === event.currentTarget.value) ?? null)}>
         <option value="auto">Automatic</option>
