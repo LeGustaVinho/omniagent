@@ -21,21 +21,24 @@ type Views = {
   openActivity: WorkspaceProps["openActivity"];
   openQueueJob?: WorkspaceProps["openQueueJob"];
   workMenu: (row: AgileRow) => MenuGroups;
-  copyWorkText: (text: string) => void;
+  dependencyMenu: (taskId: string, blockerId: string) => MenuGroups;
 };
 
 function ChecklistProgress({ items }: { items: Item[] }) {
   return items.length > 0 ? <span className="tabular-nums">{items.filter(({ checked }) => checked).length}/{items.length} checked</span> : null;
 }
 
-export function WorkBlockers({ row, openQuestion, openWork }: Pick<Views, "openQuestion" | "openWork"> & { row: AgileRow }) {
+export function WorkBlockers({ row, openQuestion, openWork, dependencyMenu }: Pick<Views, "openQuestion" | "openWork" | "dependencyMenu"> & { row: AgileRow }) {
   const work = row.workflow;
   const question = work?.questionBlocker;
   return <>{question && <p>{questionBlockerLabel(question)} · <button type="button" className="text-primary hover:underline" onClick={() => openQuestion(question)}>
     {question.answerRecorded || question.state === "needs_review" ? "Open question" : "Answer question"}
   </button></p>}
-    {work?.prerequisiteBlockers?.map((dependency) => <p key={dependency.taskId}>Waiting for <button type="button"
-      className="text-primary hover:underline" onClick={() => openWork(dependency.taskId)}>{dependency.title}</button></p>)}
+    {work?.prerequisiteBlockers?.map((dependency) => <ContextActions key={dependency.taskId}
+      label={dependency.title} groups={dependencyMenu(row.id, dependency.taskId)}>
+      <p>Waiting for <button type="button" className="text-primary hover:underline"
+        onClick={() => openWork(dependency.taskId)}>{dependency.title}</button></p>
+    </ContextActions>)}
     {work?.waitingForCommit && <p>Waiting for commit</p>}
     {work?.waitingForMerge && <p>Waiting for merge</p>}
     {work?.pendingRepositoryChanges && !work.waitingForCommit && !work.waitingForMerge && <p>Unreviewed repository changes</p>}</>;
@@ -95,7 +98,8 @@ function EvidenceLink({ row, reference, merge, openEvidence }: {
   </button>;
 }
 
-function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, workMenu }: Omit<Views, "rows"> & { row: AgileRow }) {
+function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, workMenu,
+  dependencyMenu }: Omit<Views, "rows"> & { row: AgileRow }) {
   const allowed = !busy && workflowStates.some(({ value }) => canMove(row, value));
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: row.id, disabled: !allowed });
   return <AgileWorkCard nodeRef={setNodeRef} title={row.title} identity={workLabel(row.kind)} dragging={isDragging}
@@ -104,7 +108,7 @@ function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, 
     handle={allowed && <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${row.title}`}
       className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:text-foreground"><GripVertical size={16} aria-hidden /></button>}>
       <ChecklistProgress items={row.checklist} />
-      <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
+      <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} dependencyMenu={dependencyMenu} />
       <TaskJobLinks row={row} openQueueJob={openQueueJob} />
       <WorkParticipation row={row} openHistory={openHistory} openActivity={openActivity} />
       {row.commit && <div className="flex flex-wrap gap-x-2 gap-y-1">
@@ -139,9 +143,10 @@ export function ProjectKanban({ move, rows, columnMenu, ...views }: Views & {
 }
 
 export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, check,
-  workMenu, copyWorkText }: Views & {
+  workMenu, dependencyMenu, checklistMenu }: Views & {
   matches: ReadonlySet<string>;
   check: (taskId: string, item: Item, checked: boolean) => void;
+  checklistMenu: (taskId: string, item: Item) => MenuGroups;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const children = new Map<string | undefined, AgileRow[]>();
@@ -179,7 +184,7 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
           </td>
           <td>{row.status ? <DeliveryStatus>{statusLabel(row.status)}</DeliveryStatus> : <span>Loading state…</span>}
             <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
-              <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
+              <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} dependencyMenu={dependencyMenu} />
               <TaskJobLinks row={row} openQueueJob={openQueueJob} />
               <WorkParticipation row={row} openHistory={openHistory} openActivity={openActivity} />
             </div></td>
@@ -195,11 +200,7 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
         </tr>
         {open && items.map((item) => <tr key={item.id} className="agile-checklist-row">
           <td style={{ paddingInlineStart: `${1 + (depth + 1) * 1.25}rem` }}>
-            <ContextActions label={item.body} groups={[[
-              { label: item.checked ? "Reopen checklist item" : "Check checklist item", disabled: busy, run: () => check(row.id, item, !item.checked) },
-              { label: "Copy checklist text", run: () => copyWorkText(item.body) },
-              { label: "Open parent work", run: () => openWork(row.id) },
-            ]]}>
+            <ContextActions label={item.body} groups={checklistMenu(row.id, item)}>
               <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
                 onChange={(event) => check(row.id, item, event.currentTarget.checked)} />{item.body}</label>
             </ContextActions>

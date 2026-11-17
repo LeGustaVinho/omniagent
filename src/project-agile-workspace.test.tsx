@@ -57,7 +57,9 @@ type ActivityFixture = {
   assignment?: ModelSelection;
 };
 
-function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: ActivityFixture) {
+function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: ActivityFixture,
+  options?: { additionalItem?: Item; checklistMode?: "run_by_item" | "track_progress" }) {
+  const checklistRun = { mode: options?.checklistMode ?? "run_by_item", rejectEdit: false };
   const states: Record<string, WorkflowStatus> = { [parent.id]: "ready", [child.id]: "blocked", [standalone.id]: "completed",
     [blocked.id]: "blocked", [gitWaiting.id]: "in_review" };
   const hierarchy: Hierarchy = seed ? { epics: [epic], work: [
@@ -69,6 +71,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
   ] } : { epics: [], work: [] };
   const checklists: Record<string, Item[]> = seed ? { [parent.id]: [
     { id: "editorial-review", revision: 5, position: 0, body: "Editorial review", checked: false },
+    ...(options?.additionalItem ? [options.additionalItem] : []),
   ] } : {};
   const evidence: Delivery = { id: "delivery", recordedAt: "2026-11-16T12:00:00Z", evidence: {
     kind: "verified_commit", completionSha: commit.sha, workflowRunId: "workflow", unitEvidenceIds: [commit.id],
@@ -118,6 +121,13 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
         completion: scope.taskId === standalone.id ? evidence : null,
       };
       case "project_task_checklist": return { items: checklist };
+      case "task_checklist_mode_settings": return { effectiveMode: checklistRun.mode, overrideMode: null };
+      case "task_branch_strategy": return { effectiveStrategy: "independent", overrideStrategy: null, locked: false };
+      case "project_work_fields": return { title: parent.title, priority: 0, acceptanceCriteria: [], prerequisites: [], blockers: [] };
+      case "project_checklist_dispatch": return { workflowRunId: "item-workflow", checkoutId: exampleCheckout.checkoutId,
+        planRevision: "item-plan", releaseId: "item-release", unitId: "item-unit" };
+      case "project_model_defaults": return { conversation: null, planning: null, implementation: activity?.models?.[0]?.selection ?? null };
+      case "queue_project_checklist_work": return { id: "checklist-job" };
       case "project_task_deliveries": return scope.taskId === standalone.id ? [{ ...evidence, merge: savedMerge }] : [];
       case "verified_work_delivery_units": return [];
       case "verified_delivery_merge": return null;
@@ -137,11 +147,12 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
       case "verified_delivery_patch": expect(args).toEqual({ projectId, taskId: standalone.id, evidenceId: "unit-commit" }); return { patchBase64: btoa(acceptedDiff) };
       case "revise_project_checklist_item": {
         expect(scope.taskId).toBe(parent.id);
+        if (checklistRun.rejectEdit) throw new Error("Checklist revision changed");
         const previous = checklist.find(({ id }) => id === scope.next?.id);
         if (!previous || !scope.next) throw new Error("Checklist item missing");
         expect(scope.next.revision).toBe(previous.revision);
         const updated = { ...scope.next, revision: previous.revision + 1 };
-        checklists[scope.taskId] = [updated];
+        checklists[scope.taskId] = checklist.map((item) => item.id === updated.id ? updated : item);
         return updated;
       }
       case "append_project_checklist_item": {
@@ -165,7 +176,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
     startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()}
     openQueueJob={activity?.jobs ? openQueueJob : undefined} /></QueryClientProvider>);
   const user = userEvent.setup();
-  return { ...app, states, openActivity, openWorkspace, openQueueJob, user };
+  return { ...app, states, checklistRun, openActivity, openWorkspace, openQueueJob, user };
 }
 
 function dropWork(taskId: string, next: WorkflowStatus) {
@@ -501,5 +512,105 @@ it("opens the shared work editor and persists priority, criteria, dependencies a
     projectId, workId: parent.id, expected: "work-Documentation", title: "Updated documentation", placement: { kind: "task", epicId: epic.id },
     draft: { description: "", state: "ready", settings: { priority: 1, acceptanceCriteria: ["Keep the guide current"],
       prerequisites: [standalone.id], blockers: [], checklistMode: "run_by_item", branchStrategy: "shared_branch_per_task", assignment: null } },
+  });
+});
+
+it("uses contextual priority, assignment and context actions for the clicked work", async () => {
+  const { user } = testWorkspace();
+  const ready = within(screen.getByRole("region", { name: "Ready" }));
+  const card = await ready.findByRole("button", { name: parent.title });
+  fireEvent.contextMenu(card);
+  await user.click(await screen.findByRole("menuitem", { name: "Change priority…" }));
+  const editor = within(screen.getByRole("dialog", { name: "Edit task" }));
+  const priority = await editor.findByRole("combobox", { name: "Priority" });
+  await waitFor(() => expect(document.activeElement).toBe(priority));
+  await user.selectOptions(priority, "2");
+  await user.click(editor.getByRole("button", { name: "Save work" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(invoke).toHaveBeenCalledWith("update_workspace_work", expect.objectContaining({ workId: parent.id,
+    expected: "work-Documentation", draft: expect.objectContaining({ settings: expect.objectContaining({ priority: 2 }) }) }));
+
+  fireEvent.contextMenu(card);
+  await user.click(await screen.findByRole("menuitem", { name: "Manage model assignments…" }));
+  const detail = within(screen.getByRole("region", { name: parent.title }));
+  expect(detail.getByRole("button", { name: "Workflow", pressed: true })).toBeTruthy();
+  await detail.findByRole("combobox", { name: "Workflow role" });
+  expect(invoke).toHaveBeenCalledWith("project_task_assignments", { projectId, taskId: parent.id });
+
+  fireEvent.contextMenu(card);
+  await user.click(await screen.findByRole("menuitem", { name: "Open work context" }));
+  expect(detail.getByRole("button", { name: "Context", pressed: true })).toBeTruthy();
+  expect(detail.getByRole("button", { name: "Open description" })).toBeTruthy();
+});
+
+it("opens the blocked task's dependency editor from the blocking work link", async () => {
+  const { user } = testWorkspace();
+  const column = within(screen.getByRole("region", { name: "Blocked" }));
+  await column.findByRole("button", { name: blocked.title });
+  fireEvent.contextMenu(await column.findByRole("button", { name: parent.title }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit dependencies…" }));
+  const editor = within(screen.getByRole("dialog", { name: "Edit task" }));
+  expect(await editor.findByRole("textbox", { name: "Title" })).toHaveProperty("value", blocked.title);
+  const dependencies = editor.getByRole("listbox", { name: "Dependencies" });
+  await waitFor(() => expect(document.activeElement).toBe(dependencies));
+  expect(within(dependencies).getByRole("option", { name: parent.title })).toHaveProperty("value", parent.id);
+  expect(invoke).toHaveBeenCalledWith("workspace_work_editor", { projectId, workId: blocked.id });
+});
+
+it("edits the exact checklist revision from the table and keeps typed text if it changes on disk", async () => {
+  const item = { id: "second-review", revision: 8, position: 1, body: "Editorial review", checked: true };
+  const { user, checklistRun } = testWorkspace(true, undefined, undefined, { additionalItem: item });
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  await user.click(await table.findByRole("button", { name: `Expand ${epic.title}` }));
+  await user.click(table.getByRole("button", { name: `Expand ${parent.title}` }));
+  fireEvent.contextMenu(table.getByRole("checkbox", { name: item.body, checked: true }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit checklist item…" }));
+  const editor = within(screen.getByRole("dialog", { name: "Edit checklist item" }));
+  const body = editor.getByRole("textbox", { name: "Checklist text" });
+  expect(body).toHaveProperty("value", item.body);
+  await user.clear(body);
+  await user.type(body, "Updated second review");
+  checklistRun.rejectEdit = true;
+  await user.click(editor.getByRole("button", { name: "Save checklist item" }));
+  expect(await editor.findByRole("alert")).toHaveProperty("textContent", "Error: Checklist revision changed");
+  expect(body).toHaveProperty("value", "Updated second review");
+  expect(invoke).toHaveBeenCalledWith("revise_project_checklist_item", {
+    projectId, taskId: parent.id, next: { ...item, body: "Updated second review" },
+  });
+
+  checklistRun.rejectEdit = false;
+  await user.click(editor.getByRole("button", { name: "Save checklist item" }));
+  await table.findByRole("checkbox", { name: "Updated second review", checked: true });
+  expect(table.getByRole("checkbox", { name: item.body, checked: false })).toBeTruthy();
+});
+
+it.each(["run_by_item", "track_progress"] as const)("opens checklist work for the clicked item in %s mode", async (mode) => {
+  const item = { id: "follow-up", revision: 2, position: 1, body: "Editorial review", checked: true };
+  const model: ModelOption = {
+    selection: { provider: "codex", profileId: "run-profile", modelId: "run-model" },
+    name: "Run model", selectable: true, unavailableReason: null, catalogVersion: 1, rating: null,
+  };
+  const { user } = testWorkspace(true, undefined, { attempts: {}, models: [model] }, { additionalItem: item, checklistMode: mode });
+  const ready = within(screen.getByRole("region", { name: "Ready" }));
+  await user.click(await ready.findByRole("button", { name: parent.title }));
+  const detail = within(screen.getByRole("region", { name: parent.title }));
+  fireEvent.contextMenu(await detail.findByRole("checkbox", { name: item.body, checked: true }));
+  await user.click(await screen.findByRole("menuitem", { name: "Run checklist item…" }));
+  expect(detail.getByRole("button", { name: "Workflow", pressed: true })).toBeTruthy();
+  const queue = within(await detail.findByRole("region", { name: "Queue checklist work" }));
+  const submit = queue.getByRole("button", { name: "Queue selected checklist item" });
+  expect(invoke).not.toHaveBeenCalledWith("queue_project_checklist_work", expect.anything());
+  if (mode === "track_progress") {
+    expect(queue.getByText(/Run by item mode is required/)).toBeTruthy();
+    expect(submit).toHaveProperty("disabled", true);
+    return;
+  }
+  expect(queue.getByRole("combobox", { name: "Checklist item to run" })).toHaveProperty("value", item.id);
+  await waitFor(() => expect(submit).toHaveProperty("disabled", false));
+  await user.click(submit);
+  await queue.findByText(/Checklist work queued/);
+  expect(invoke).toHaveBeenCalledWith("queue_project_checklist_work", {
+    projectId, taskId: parent.id, expectedReleaseId: "item-release", expectedUnitId: "item-unit", itemId: item.id, selection: model.selection,
   });
 });

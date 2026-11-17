@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker } from "@/components/model-picker";
@@ -39,11 +39,11 @@ export type AgileFormValues = {
   blockers: string;
 };
 
-function ChoiceField({ label, value, options, onChange, disabled, required, children }: {
+function ChoiceField({ label, value, options, onChange, disabled, required, children, selectRef }: {
   label: string; value: string; options: readonly Choice[]; onChange: (value: string) => void;
-  disabled?: boolean; required?: boolean; children?: ReactNode;
+  disabled?: boolean; required?: boolean; children?: ReactNode; selectRef?: Ref<HTMLSelectElement>;
 }) {
-  return <label className="delivery-field">{label}<select className="delivery-filter" value={value} disabled={disabled} required={required}
+  return <label className="delivery-field">{label}<select ref={selectRef} className="delivery-filter" value={value} disabled={disabled} required={required}
     onChange={(event) => onChange(event.currentTarget.value)}>
     {options.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
   </select>{children}</label>;
@@ -82,19 +82,30 @@ export function AgileNotePreview({ path, children }: { path: string; children: R
 }
 
 export function AgileWorkEditor({ kind, setKind, values, change, parents, states, dependencies, notes, path, openNote,
-  descriptionPreview, assignment, branchLocked, parentLocked, busy, error, notices, saveLabel, cancel, save }: {
+  descriptionPreview, assignment, branchLocked, parentLocked, busy, error, notices, saveLabel, cancel, save, focusField }: {
   kind: WorkKind; setKind?: (kind: WorkKind) => void; values: AgileFormValues; change: (patch: Partial<AgileFormValues>) => void;
   parents: readonly Choice[]; states: readonly Choice[]; dependencies: readonly Choice[]; notes: Note[]; path: string;
   openNote?: (link: NoteTarget) => void; descriptionPreview?: ReactNode;
   assignment?: { selected: ModelSelection | null; options: ModelOption[]; loading?: boolean; change: (selection: ModelSelection | null) => void; retained?: string };
   branchLocked?: boolean; parentLocked?: boolean; busy?: boolean; error?: ReactNode; notices?: ReactNode;
-  saveLabel: string; cancel: () => void; save: () => void;
+  saveLabel: string; cancel: () => void; save: () => void; focusField?: "priority" | "dependencies";
 }) {
   const epic = kind === "epic";
   const child = kind === "subtask";
   const valid = Boolean(values.title.trim() && (!child || values.parentId));
   const priorities = priorityChoices.some(({ value }) => value === values.priority)
     ? priorityChoices : [...priorityChoices, { value: values.priority, label: `Priority ${values.priority}` }];
+  const field = useRef<HTMLSelectElement>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focusField || busy || focused.current || !field.current) return;
+    const input = field.current;
+    const frame = requestAnimationFrame(() => {
+      input.focus();
+      focused.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusField, busy]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -113,7 +124,8 @@ export function AgileWorkEditor({ kind, setKind, values, change, parents, states
       {parentLocked && <span className="text-xs text-muted-foreground">Parent is locked after worktree provisioning.</span>}
     </ChoiceField>}
     <div className="agile-editor-fields">
-      {!epic && <ChoiceField label="Priority" value={values.priority} disabled={busy} options={priorities} onChange={(priority) => change({ priority })} />}
+      {!epic && <ChoiceField label="Priority" value={values.priority} disabled={busy} options={priorities}
+        selectRef={focusField === "priority" ? field : undefined} onChange={(priority) => change({ priority })} />}
       {states.length > 0 && <ChoiceField label="State" value={values.state} disabled={busy || states.length === 1} options={states} onChange={(state) => change({ state })} />}
     </div>
     {!epic && <>
@@ -134,7 +146,8 @@ export function AgileWorkEditor({ kind, setKind, values, change, parents, states
       </section>}
       <label className="delivery-field">Acceptance criteria<textarea className="delivery-filter" rows={3} disabled={busy}
         value={values.acceptanceCriteria} onChange={(event) => change({ acceptanceCriteria: event.currentTarget.value })} /></label>
-      <label className="delivery-field">Dependencies<select className="delivery-filter" multiple size={Math.min(5, Math.max(2, dependencies.length))}
+      <label className="delivery-field">Dependencies<select ref={focusField === "dependencies" ? field : undefined}
+        className="delivery-filter" multiple size={Math.min(5, Math.max(2, dependencies.length))}
         disabled={busy || !dependencies.length} value={values.dependencies} onChange={(event) => change({
           dependencies: Array.from(event.currentTarget.selectedOptions, ({ value }) => value),
         })}>
