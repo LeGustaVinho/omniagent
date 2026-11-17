@@ -3,8 +3,9 @@ use omniagent::{
     installation::InstallationIdentity,
     jobs::JobScheduler,
     maintenance_update::{
-        SignedUpdatePreview, TrustedUpdateFeed, UpdateActivationReceipt, UpdateJournal,
-        VerifiedMaintenanceUpdate,
+        AutomaticUpdateMonitor, AutomaticUpdatePolicy, AutomaticUpdateStatus,
+        AutomaticUpdateTarget, SignedUpdatePreview, TrustedUpdateFeed, UpdateActivationReceipt,
+        UpdateJournal, VerifiedMaintenanceUpdate,
     },
     restore::InstallationLayout,
     store::Store,
@@ -130,6 +131,52 @@ pub async fn signed_update_status(
     .context("Read the installed update history")
     .map_err(report)?
     .map_err(report)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomaticUpdateSettings {
+    pub policy: AutomaticUpdatePolicy,
+    pub status: AutomaticUpdateStatus,
+    pub feed_configured: bool,
+}
+
+#[tauri::command]
+pub async fn automatic_update_settings(
+    store: State<'_, Store>,
+    identity: State<'_, InstallationIdentity>,
+    monitor: State<'_, AutomaticUpdateMonitor>,
+) -> Result<AutomaticUpdateSettings, String> {
+    let policy = store
+        .automatic_update_policy(identity.inner().clone())
+        .await
+        .map_err(report)?;
+    Ok(AutomaticUpdateSettings {
+        policy,
+        status: monitor.status(),
+        feed_configured: TrustedUpdateFeed::application().map_err(report)?.is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn set_automatic_update_policy(
+    store: State<'_, Store>,
+    identity: State<'_, InstallationIdentity>,
+    monitor: State<'_, AutomaticUpdateMonitor>,
+    expected_revision: Option<String>,
+    target: Option<AutomaticUpdateTarget>,
+) -> Result<AutomaticUpdatePolicy, String> {
+    if target.is_some() {
+        TrustedUpdateFeed::application()
+            .and_then(|trust| trust.context("This installer has no trusted update feed configured"))
+            .map_err(report)?;
+    }
+    let next = store
+        .set_automatic_update_policy(identity.inner().clone(), expected_revision, target)
+        .await
+        .map_err(report)?;
+    monitor.wake();
+    Ok(next)
 }
 
 async fn prepare_update(

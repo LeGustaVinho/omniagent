@@ -43,10 +43,12 @@ use omniagent::repository::verification::ipc as candidate;
 use omniagent::{
     installation::InstallationIdentity,
     jobs::JobScheduler,
+    maintenance_update::AutomaticUpdateMonitor,
     repository::{
         self, AttemptWorktreeEvidence, BranchStrategy, LiveWorktree, ManagedWorktree,
         ProjectCheckout, TaskBranchStrategy, WorktreeStart,
     },
+    restore::InstallationLayout,
     runner::DirectWindowsRunner,
     store::Store,
 };
@@ -262,7 +264,15 @@ fn main() {
                     std::env::current_exe().ok(),
                 )
             });
+            let monitor = AutomaticUpdateMonitor::start(
+                app.handle().clone(),
+                store.clone(),
+                app.state::<InstallationIdentity>().inner().clone(),
+                scheduler.clone(),
+                app.state::<InstallationLayout>().inner().clone(),
+            );
             app.manage(store);
+            app.manage(monitor);
             app.manage(conversation_attachment_ipc::AttachmentDropReceipts::default());
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
@@ -362,6 +372,8 @@ fn main() {
             workflow_ipc::maintenance::preview_signed_update,
             workflow_ipc::maintenance::activate_signed_update,
             workflow_ipc::maintenance::signed_update_status,
+            workflow_ipc::maintenance::automatic_update_settings,
+            workflow_ipc::maintenance::set_automatic_update_policy,
             workflow_ipc::list_repository_deliveries,
             workflow_ipc::inspect_repository_delivery,
             workflow_ipc::execute_repository_delivery_host,

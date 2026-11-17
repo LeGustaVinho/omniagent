@@ -377,7 +377,7 @@ pub(crate) fn validate_signed_update_handoff(
     Ok(handoff)
 }
 
-fn load_settings(db: &Connection, project: &str) -> Result<Option<MaintenanceSettings>> {
+pub(crate) fn load_settings(db: &Connection, project: &str) -> Result<Option<MaintenanceSettings>> {
     db.query_row(
         "SELECT configuration FROM workflow_maintenance_settings WHERE project_id = ?1",
         [project],

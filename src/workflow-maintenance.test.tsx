@@ -31,6 +31,7 @@ it("configures the exact registered checkout, workflow, build gate and activatio
       case "workflow_maintenance": return { runningBuild, settings: saved, handoffs: [] };
       case "workflow_authoring_bases": return [{ version: { id: "maintenance-workflow" }, name: "Maintenance delivery" }];
       case "registered_checkouts": return [exampleCheckout, { ...exampleCheckout, projectId: "foreign", checkoutRoot: "D:/Foreign" }];
+      case "automatic_update_settings": return { policy: { revision: null, target: null }, status: { state: "disabled" }, feedConfigured: false };
       case "set_workflow_maintenance": saved = settings; return settings;
       default: throw new Error(command);
     }
@@ -129,4 +130,32 @@ it("verifies the signed handoff before confirmation and reports a failed install
   await user.click(screen.getByRole("button", { name: "Install verified update" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Windows installer did not start");
   expect(invoke).toHaveBeenCalledWith("activate_signed_update", { request });
+});
+
+it("opts in to the reviewed signed workflow and revokes that exact grant", async () => {
+  const target = { projectId, maintenanceSettingsRevision: settings.revision };
+  let policy: { revision: string | null; target: typeof target | null } = { revision: null, target: null };
+  invoke.mockImplementation(async (command, args) => {
+    switch (command) {
+      case "workflow_maintenance": return {
+        runningBuild, settings: { ...settings, configuration: { ...configuration, activation: "signed_updater" } }, handoffs: [],
+      };
+      case "workflow_authoring_bases": return [{ version: { id: "maintenance-workflow" }, name: "Maintenance delivery" }];
+      case "registered_checkouts": return [exampleCheckout];
+      case "automatic_update_settings": return { policy, status: { state: "waiting_for_candidate" }, feedConfigured: true };
+      case "set_automatic_update_policy":
+        policy = { revision: args.target ? "saved-grant" : "revoked-grant", target: args.target };
+        return policy;
+      default: throw new Error(command);
+    }
+  });
+  mount(<WorkflowMaintenanceSettings checkout={exampleCheckout} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Maintenance workflow"));
+  const enable = await screen.findByRole<HTMLButtonElement>("button", { name: "Enable automatic updates for this workflow" });
+  await waitFor(() => expect(enable.disabled).toBe(false));
+  await user.click(enable);
+  expect(invoke).toHaveBeenCalledWith("set_automatic_update_policy", { expectedRevision: null, target });
+  await user.click(await screen.findByRole("button", { name: "Disable automatic updates" }));
+  expect(invoke).toHaveBeenCalledWith("set_automatic_update_policy", { expectedRevision: "saved-grant", target: null });
 });

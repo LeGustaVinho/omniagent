@@ -128,6 +128,7 @@ fn verified_fixture(
         handoff,
         updater: update,
         bytes: PAYLOAD.to_vec(),
+        automatic_policy_revision: None,
     })
 }
 
@@ -212,6 +213,16 @@ fn failures_and_verified_startup_survive_journal_reopen() -> Result<()> {
         ActivationOutcome::InstallFailed { .. }
     ));
     assert_eq!(UpdateJournal::open(&identity)?.latest()?, Some(failed));
+    let mut automatic_retry = verified_fixture(&keys, "0.1.0", handoff())?;
+    automatic_retry.automatic_policy_revision = Some(uuid::Uuid::new_v4().to_string());
+    assert_ne!(automatic_retry.handoff.id, update.handoff.id);
+    assert!(
+        journal
+            .start_install(&automatic_retry, backup.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("already recorded")
+    );
     let started = journal.start_install(&update, backup.clone())?;
     assert!(journal.start_install(&update, backup).is_err());
     assert_eq!(
@@ -431,6 +442,7 @@ pub(crate) async fn exercise_signed_handoff_activation(
             handoff: handoff.clone(),
             updater: installer,
             bytes: bytes.clone(),
+            automatic_policy_revision: None,
         })
     };
     let scheduler = JobScheduler::start(

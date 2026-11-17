@@ -23,8 +23,12 @@ const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 const FEED_TIMEOUT: Duration = Duration::from_secs(30);
 
 mod activation;
+mod automatic;
+mod automatic_policy;
 mod journal;
 mod recovery;
+pub use automatic::{AutomaticUpdateMonitor, AutomaticUpdateStatus};
+pub use automatic_policy::{AutomaticUpdatePolicy, AutomaticUpdateTarget};
 pub use journal::{ActivationOutcome, UpdateActivationReceipt, UpdateBackup, UpdateJournal};
 pub use recovery::{PreviousMaintenanceUpdate, restore_previous_for_startup};
 
@@ -67,6 +71,22 @@ impl TrustedUpdateFeed {
         Ok(self.builder(app)?.build()?)
     }
 
+    async fn fetch_advertised_update<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+    ) -> Result<Option<Update>> {
+        let updater = self.build(app)?;
+        let Some(advertised) = updater
+            .check()
+            .await
+            .context("Cannot check the configured signed update feed")?
+        else {
+            return Ok(None);
+        };
+        // Reparse with the cached-update verifier to require a signed version.
+        Ok(updater.restore_update(advertised.raw_json)?)
+    }
+
     fn builder<R: Runtime>(&self, app: &AppHandle<R>) -> Result<UpdaterBuilder> {
         Ok(app
             .updater_builder()
@@ -96,6 +116,7 @@ pub struct VerifiedMaintenanceUpdate {
     request: MaintenanceActivationRequest,
     updater: Update,
     bytes: Vec<u8>,
+    automatic_policy_revision: Option<String>,
 }
 
 impl VerifiedMaintenanceUpdate {
@@ -122,18 +143,30 @@ impl VerifiedMaintenanceUpdate {
         package_root: PathBuf,
     ) -> Result<Self> {
         let handoff = store.require_signed_update_handoff(request.clone()).await?;
-        let updater = trust.build(app)?;
-        let advertised = updater
-            .check()
-            .await
-            .context("Cannot check the configured signed update feed")?
+        let update = trust
+            .fetch_advertised_update(app)
+            .await?
             .context("The trusted feed reports no newer version")?;
+        Self::verify_handoff(store, request, package_root, handoff, update).await
+    }
 
-        // Reparse the selected feed response with Tauri's stricter cached-update
-        // verifier so the Minisign signature must authenticate the version.
-        let update = updater
-            .restore_update(advertised.raw_json)?
-            .context("The trusted feed no longer describes a newer version")?;
+    async fn prepare_advertised(
+        store: &Store,
+        request: MaintenanceActivationRequest,
+        package_root: PathBuf,
+        update: Update,
+    ) -> Result<Self> {
+        let handoff = store.require_signed_update_handoff(request.clone()).await?;
+        Self::verify_handoff(store, request, package_root, handoff, update).await
+    }
+
+    async fn verify_handoff(
+        store: &Store,
+        request: MaintenanceActivationRequest,
+        package_root: PathBuf,
+        handoff: MaintenanceHandoff,
+        update: Update,
+    ) -> Result<Self> {
         let (bytes, handoff, update) = tokio::task::spawn_blocking(move || {
             let bytes = read_handoff_package(&package_root, &handoff)?;
             verify_package(&update, &handoff, &bytes)?;
@@ -149,6 +182,7 @@ impl VerifiedMaintenanceUpdate {
             request,
             updater: update,
             bytes,
+            automatic_policy_revision: None,
         })
     }
 }

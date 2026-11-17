@@ -61,6 +61,13 @@ type SignedUpdateReceipt = {
 };
 export type SignedUpdateStatus = { configured: boolean; latest: SignedUpdateReceipt | null };
 export const signedUpdateStatusKey = ["signed-update-status"];
+const automaticUpdateSettingsKey = ["automatic-update-settings"];
+type AutomaticUpdateTarget = { projectId: string; maintenanceSettingsRevision: string };
+type AutomaticUpdateSettings = {
+  policy: { revision: string | null; target: AutomaticUpdateTarget | null };
+  status: { state: string; version?: string; handoffId?: string; receiptId?: string; reason?: string };
+  feedConfigured: boolean;
+};
 
 const maintenanceKey = (projectId: string) => ["workflow-maintenance", projectId];
 const readMaintenance = (projectId: string) => invoke<Maintenance>("workflow_maintenance", { projectId });
@@ -106,7 +113,46 @@ function MaintenanceSettingsForm({ checkout }: { checkout: ProjectCheckout }) {
       <MaintenanceConfigurationForm key={maintenance.data.settings?.revision ?? "initial"} projectId={projectId}
         checkoutId={checkout.checkoutId} settings={maintenance.data.settings} workflows={available}
         checkouts={(checkouts.data ?? []).filter((row) => row.projectId === projectId)} />
+      <AutomaticMaintenanceSettings projectId={projectId} settings={maintenance.data.settings} />
     </>}
+  </section>;
+}
+
+function AutomaticMaintenanceSettings({ projectId, settings }: { projectId: string; settings: MaintenanceSettings | null }) {
+  const client = useQueryClient();
+  const automatic = useQuery({
+    queryKey: automaticUpdateSettingsKey,
+    queryFn: () => invoke<AutomaticUpdateSettings>("automatic_update_settings"),
+    refetchInterval: 5_000,
+  });
+  const current = automatic.data?.policy;
+  const save = useMutation({
+    mutationFn: (target: AutomaticUpdateTarget | null) => invoke("set_automatic_update_policy", {
+      expectedRevision: current?.revision ?? null, target,
+    }),
+    onSuccess: () => client.invalidateQueries({ queryKey: automaticUpdateSettingsKey }),
+  });
+  const target = settings?.configuration.activation === "signed_updater"
+    ? { projectId, maintenanceSettingsRevision: settings.revision }
+    : null;
+  const enabled = Boolean(current?.target && target && current.target.projectId === target.projectId
+    && current.target.maintenanceSettingsRevision === target.maintenanceSettingsRevision);
+  const observed = automatic.data?.status;
+  const error = automatic.error ?? save.error;
+  return <section className="pipeline-stack" aria-label="Automatic signed updates">
+    <p>Opt in to installing signed packages accepted by this saved workflow.</p>
+    {automatic.data?.feedConfigured === false && <p>This build has no trusted update feed configured.</p>}
+    {current?.target && !enabled && <p>Automatic updates are assigned to another workflow or settings revision.</p>}
+    {enabled && observed && <p role="status">
+      {observed.version && `${observed.version} · `}{observed.state.replaceAll("_", " ")}{observed.reason && `. ${observed.reason}`}
+    </p>}
+    <div className="settings-actions">
+      {!enabled && <Button type="button" variant="outline" disabled={!automatic.data?.feedConfigured || !target || save.isPending}
+        onClick={() => save.mutate(target)}>Enable automatic updates for this workflow</Button>}
+      {current?.target && <Button type="button" variant="outline" disabled={save.isPending}
+        onClick={() => save.mutate(null)}>Disable automatic updates</Button>}
+    </div>
+    {error && <p role="alert">{String(error)}</p>}
   </section>;
 }
 

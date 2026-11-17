@@ -69,6 +69,13 @@ pub struct UpdateActivationReceipt {
     pub backup: UpdateBackup,
     pub recorded_at_ms: u64,
     pub outcome: ActivationOutcome,
+    #[serde(default)]
+    pub automatic_policy_revision: Option<String>,
+}
+
+pub(super) struct AutomaticJournalState {
+    pub pending: bool,
+    pub attempted_handoffs: std::collections::HashSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,6 +111,20 @@ impl UpdateJournal {
             .into_iter()
             .max_by_key(|entry| (entry.receipt.recorded_at_ms, entry.receipt.id.clone()))
             .map(|entry| entry.receipt))
+    }
+
+    pub(super) fn automatic_state(&self) -> Result<AutomaticJournalState> {
+        let _lock = self.lock()?;
+        let entries = self.entries()?;
+        Ok(AutomaticJournalState {
+            pending: entries
+                .iter()
+                .any(|entry| entry.receipt.outcome.blocks_install()),
+            attempted_handoffs: entries
+                .into_iter()
+                .map(|entry| entry.receipt.update.handoff_id)
+                .collect(),
+        })
     }
 
     /// Publish the verified activation to its pinned workflow after startup.
@@ -183,6 +204,19 @@ impl UpdateJournal {
         let _lock = self.lock()?;
         let prior = self.entries()?;
         Self::check_no_pending_install(&prior, &update.handoff.id)?;
+        if update.automatic_policy_revision.is_some() {
+            ensure!(
+                prior.iter().all(|entry| {
+                    let receipt = &entry.receipt;
+                    receipt.update.handoff_id != update.handoff.id
+                        && !(receipt.project_id == update.handoff.project_id
+                            && receipt.update.version == update.updater.version
+                            && receipt.update.source_revision == update.handoff.source_revision
+                            && receipt.update.sha256 == update.handoff.sha256)
+                }),
+                "An installation attempt for this handoff is already recorded"
+            );
+        }
         let id = Uuid::new_v4();
         let clock: u64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -194,6 +228,7 @@ impl UpdateJournal {
             project_id: update.handoff.project_id.clone(),
             update: update.preview(),
             source_before_install: source_before_install.map(str::to_owned),
+            automatic_policy_revision: update.automatic_policy_revision.clone(),
             backup,
             recorded_at_ms: prior
                 .iter()
