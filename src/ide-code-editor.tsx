@@ -225,9 +225,12 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
         const agentActions = [
           { id: "quote", label: "Add selection to conversation…" },
           { id: "explain", label: "Explain selection…", instruction: "Explain how this code works and what it depends on." },
+          { id: "usages", label: "Find usages of selection…", instruction: "Find callers or references to the code in this selection. Cite the relevant file paths and lines." },
           { id: "review", label: "Review selection…", instruction: "Review this code for correctness and regressions." },
           { id: "fix", label: "Fix selection…", instruction: "Find and fix the issue in this code. Ask for the expected behavior if it is unclear." },
           { id: "test", label: "Write tests for selection…", instruction: "Write tests that cover the behavior and edge cases of this code." },
+          { id: "document", label: "Document selection…", instruction: "Draft documentation for the behavior and usage of the selected code." },
+          { id: "refactor", label: "Propose a refactor for selection…", instruction: "Propose a behavior-preserving refactor of the selected code and explain how to verify it." },
         ];
         agentActions.forEach(({ id, label, instruction }, order) => codeEditor.addAction({
           id: `omniagent.${id}-source-selection`, label, precondition: "editorHasSelection",
