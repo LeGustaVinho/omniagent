@@ -545,6 +545,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 {simulated ? <Terminal clearRevision={clearRevisions[""] ?? 0} />
                   : terminalFolders.map((folder) => <div key={folder} className="h-full min-h-0" hidden={folder !== terminalFolder}>
                     <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal" && folder === terminalFolder}
+                      onOpenFile={(path, line, column) => openFile(path, line, false, column)}
                       clearRevision={clearRevisions[folder] ?? 0} onContextText={(text) => conversationActions.startContextText({
                         title: "PowerShell output", reference: `PowerShell · ${folder || "Checkout root"}`, text,
                       })} {...(folder ? { relativeDirectory: folder, autoStart: true } : autoStartRoot ? { autoStart: true } : {})} />

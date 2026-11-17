@@ -413,6 +413,20 @@ pub async fn write_manual_terminal(
 }
 
 #[tauri::command]
+pub async fn resolve_manual_terminal_file(
+    store: State<'_, Store>,
+    checkout_id: String,
+    relative_directory: Option<String>,
+    path: String,
+) -> Result<String, String> {
+    omniagent::repository::terminal_file_links::resolve_terminal_file(
+        &store, checkout_id, relative_directory, path,
+    )
+    .await
+    .map_err(|_| "This terminal reference does not resolve to a file in the current checkout.".into())
+}
+
+#[tauri::command]
 pub async fn resize_manual_terminal(
     terminals: State<'_, ManualTerminals>,
     checkout_id: String,

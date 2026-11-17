@@ -31,6 +31,7 @@ pub mod markdown_links;
 pub mod markdown_renames;
 pub mod project_search;
 pub mod source_documents;
+pub mod terminal_file_links;
 pub mod verification;
 pub mod verified_git;
 pub mod verified_merge;

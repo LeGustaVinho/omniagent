@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { ContextActions } from "@/components/ui/context-actions";
+import { ContextActions, PositionedContextActions } from "@/components/ui/context-actions";
 import { markdownExcerpt } from "@/editor-context";
+import { parseTerminalFileReference, terminalFileAtPoint, terminalFileLinkProvider, type TerminalFileReference } from "@/terminal-file-links";
 import "@xterm/xterm/css/xterm.css";
 
 const responses: Record<string, string[]> = {
@@ -118,27 +119,44 @@ function terminalOutput(terminal: Terminal) {
   return lines.join("\n");
 }
 
-export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStart, clearRevision = 0, onContextText }: {
+export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStart, clearRevision = 0, onContextText, onOpenFile }: {
   checkoutId: string;
   relativeDirectory?: string;
   active: boolean;
   autoStart?: boolean;
   clearRevision?: number;
   onContextText?: (text: string) => void;
+  onOpenFile?: (path: string, line?: number, column?: number) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const attachment = useRef<TerminalAttachment>(undefined);
   const activeRef = useRef(active);
   const previousClear = useRef(clearRevision);
+  const openFile = useRef(onOpenFile);
+  const navigateSequence = useRef(0);
   const [request, setRequest] = useState<TerminalRequest>();
   const [state, setState] = useState<TerminalState>();
   const [clipboardError, setClipboardError] = useState("");
+  const [fileError, setFileError] = useState("");
+  const [referenceMenu, setReferenceMenu] = useState<{ reference: TerminalFileReference; point: { x: number; y: number }; terminal: Terminal }>();
+  const restoringTerminalFocus = useRef(true);
   const [hasSelection, setHasSelection] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findText, setFindText] = useState("");
   const [found, setFound] = useState<boolean>();
   const findInput = useRef<HTMLInputElement>(null);
   const current = state?.request === request && request?.checkoutId === checkoutId ? state : undefined;
+
+  useEffect(() => { openFile.current = onOpenFile; }, [onOpenFile]);
+  const openReference = useCallback((terminal: Terminal, { path, line, column }: TerminalFileReference) => {
+    if (!openFile.current || attachment.current?.terminal !== terminal || !activeRef.current) return;
+    const sequence = ++navigateSequence.current;
+    setFileError("");
+    const isCurrent = () => sequence === navigateSequence.current && attachment.current?.terminal === terminal && activeRef.current;
+    void invoke<string>("resolve_manual_terminal_file", { checkoutId, path, ...(relativeDirectory ? { relativeDirectory } : {}) })
+      .then((resolved) => { if (isCurrent()) openFile.current?.(resolved, line, column); })
+      .catch((error: unknown) => { if (isCurrent()) setFileError(String(error)); });
+  }, [checkoutId, relativeDirectory]);
 
   useEffect(() => {
     if (!request && autoStart && active) {
@@ -154,6 +172,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
     const { terminal, fit } = openTerminal(element, 1000);
     const search = new SearchAddon();
     terminal.loadAddon(search);
+    const fileLinks = openFile.current && terminal.registerLinkProvider(terminalFileLinkProvider(terminal, (reference) => openReference(terminal, reference)));
     const selection = terminal.onSelectionChange(() => setHasSelection(terminal.hasSelection()));
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown" || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return true;
@@ -245,16 +264,21 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
       disposed = true;
       resize.disconnect();
       selection.dispose();
+      fileLinks?.dispose();
       input.dispose();
       terminal.dispose();
       attachment.current = undefined;
       if (session && !exited && !stopped) void invoke("close_manual_terminal", session).catch(() => undefined);
     };
-  }, [checkoutId, request, relativeDirectory]);
+  }, [checkoutId, openReference, request, relativeDirectory]);
 
   useEffect(() => {
     activeRef.current = active;
     if (active) attachment.current?.layout(true);
+    else {
+      navigateSequence.current++;
+      setReferenceMenu(undefined);
+    }
   }, [active]);
 
   useEffect(() => {
@@ -266,6 +290,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
 
   const start = () => {
     setHasSelection(false);
+    setFileError("");
+    setReferenceMenu(undefined);
     setFindOpen(false);
     setFound(undefined);
     const next = { checkoutId };
@@ -290,6 +316,10 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
     attachment.current?.search.clearDecorations();
     attachment.current?.terminal.focus();
   }
+  function showReferenceMenu(terminal: Terminal, reference: TerminalFileReference, x: number, y: number) {
+    restoringTerminalFocus.current = true;
+    setReferenceMenu({ terminal, reference, point: { x, y } });
+  }
   return <div className="flex h-full min-h-0 flex-col gap-2">
     <div className="flex shrink-0 items-center gap-2">
       {(!current || current.status === "exited" || current.status === "failed") && (
@@ -303,6 +333,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
       {current?.message && <span className="file-help" role={current.status === "exited" ? "status" : "alert"}>{current.message}</span>}
     </div>
     {clipboardError && <p className="file-help" role="alert">{clipboardError}</p>}
+    {fileError && <p className="file-help" role="alert">{fileError}</p>}
     {findOpen && <form className="flex shrink-0 flex-wrap items-center gap-1" aria-label="Terminal search"
       onSubmit={(event) => { event.preventDefault(); find(findText); }}
       onKeyDown={(event) => {
@@ -347,7 +378,35 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
       ...(!current || current.status === "exited" || current.status === "failed" ? [{ label: "Start PowerShell", run: start }] : []),
       ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
     ]]}>
-      <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" />
+      <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" onContextMenu={(event) => {
+        const terminal = attachment.current?.terminal;
+        if (!onOpenFile || !terminal) return;
+        const reference = terminalFileAtPoint(terminal, event);
+        if (!reference) return;
+        event.preventDefault();
+        event.stopPropagation();
+        showReferenceMenu(terminal, reference, event.clientX, event.clientY);
+      }} onKeyDownCapture={(event) => {
+        if (!onOpenFile || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+        const terminal = attachment.current?.terminal;
+        const reference = terminal && parseTerminalFileReference(terminal.getSelection().trim());
+        if (!terminal || !reference) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const bounds = event.currentTarget.getBoundingClientRect();
+        showReferenceMenu(terminal, reference, bounds.left, bounds.top);
+      }} />
     </ContextActions>
+    {referenceMenu && active && <PositionedContextActions label={referenceMenu.reference.text} point={referenceMenu.point}
+      onClose={() => setReferenceMenu(undefined)} restoreFocus={() => {
+        if (restoringTerminalFocus.current && attachment.current?.terminal === referenceMenu.terminal) referenceMenu.terminal.focus();
+      }} groups={[[
+        { label: referenceMenu.reference.line ? "Open file at location" : "Open file", run: () => {
+          restoringTerminalFocus.current = false;
+          openReference(referenceMenu.terminal, referenceMenu.reference);
+        } },
+        { label: "Copy printed file reference", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.text)) },
+        { label: "Copy printed path", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.path)) },
+      ]]} />}
   </div>;
 }

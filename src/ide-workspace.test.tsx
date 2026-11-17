@@ -29,8 +29,8 @@ vi.mock("@/git-diff-view", () => ({
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
-  ManualTerminal: ({ onContextText: _onContextText, ...props }: {
-    checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown;
+  ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, ...props }: {
+    checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown; onOpenFile?: unknown;
   }) => {
     terminalProps(props);
     return null;
