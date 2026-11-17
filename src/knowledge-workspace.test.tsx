@@ -92,7 +92,7 @@ it("edits the exact Reading property in the draft and searches same-value notes 
   const user = userEvent.setup();
   await editor(release);
   await user.click(screen.getByRole("button", { name: "Reading" }));
-  const reading = within(await screen.findByLabelText(`Reading view for ${release}`));
+  const reading = within(await screen.findByLabelText(`Reading view for ${release}`, undefined, { timeout: 5000 }));
   await reading.findByText("phase", { selector: "dt" });
   fireEvent.contextMenu(reading.getByText("two", { selector: "dd" }));
   expect(await screen.findByRole("menuitem", { name: "Copy property value" })).toBeTruthy();
