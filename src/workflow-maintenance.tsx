@@ -5,7 +5,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 
 type RunningBuild = { version: string; sourceCommit: string | null; sourceModified: boolean | null; target: string; profile: string };
-type MaintenanceMode = "disabled" | "manual_fixture";
+type MaintenanceMode = "disabled" | "manual_fixture" | "signed_updater";
 type MaintenanceConfiguration = {
   sourceCheckoutId: string;
   workflowId: string;
@@ -38,9 +38,29 @@ type MaintenanceHandoff = {
   acceptanceArtifactId: string;
   checks: string[];
   activation: { id: string; recordedAt: string; workflowArtifactId: string } | null;
+  signedActivation?: { id: string; version: string; sourceRevision: string; sha256: string; workflowArtifactId: string; recordedAt: string } | null;
 };
 type Maintenance = { runningBuild: RunningBuild; settings: MaintenanceSettings | null; handoffs: MaintenanceHandoff[] };
 type WorkflowChoice = { version: { id: string }; name: string };
+
+type SignedUpdatePreview = {
+  handoffId: string;
+  currentVersion: string;
+  version: string;
+  sourceRevision: string;
+  sha256: string;
+  checks: string[];
+  verificationId: string;
+  approvalArtifactId: string;
+};
+type SignedUpdateReceipt = {
+  id: string;
+  update: SignedUpdatePreview;
+  backup: { checkpointId: string; root: string };
+  outcome: { status: string; reason?: string };
+};
+export type SignedUpdateStatus = { configured: boolean; latest: SignedUpdateReceipt | null };
+export const signedUpdateStatusKey = ["signed-update-status"];
 
 const maintenanceKey = (projectId: string) => ["workflow-maintenance", projectId];
 const readMaintenance = (projectId: string) => invoke<Maintenance>("workflow_maintenance", { projectId });
@@ -138,9 +158,10 @@ function MaintenanceConfigurationForm({ projectId, checkoutId, settings, checkou
       <label>Package path relative to source <input value={packagePath} onChange={(event) => setPackagePath(event.currentTarget.value)} /></label>
       <label>Version output path (relative UTF-8 file) <input value={versionPath} onChange={(event) => setVersionPath(event.currentTarget.value)} /></label>
       <label>Required check names, one per line <textarea value={checks} onChange={(event) => setChecks(event.currentTarget.value)} /></label>
-      <label>Activation after handoff <select value={mode} onChange={(event) => setMode(event.currentTarget.value === "manual_fixture" ? "manual_fixture" : "disabled")}>
+      <label>Activation after handoff <select value={mode} onChange={(event) => setMode(event.currentTarget.value as MaintenanceMode)}>
         <option value="disabled">Disabled</option>
         <option value="manual_fixture">Record a user-confirmed fixture activation</option>
+        <option value="signed_updater">Verify and install a signed update with confirmation</option>
       </select></label>
       <Button type="submit" disabled={!canSave || save.isPending}>Save maintenance workflow</Button>
     </fieldset>
@@ -195,7 +216,7 @@ function MaintenanceDelivery({ projectId, workflowRunId, workflowId, nodeId, git
     {maintenance.data && <BuildDescription build={maintenance.data.runningBuild} />}
     {maintenance.data && !configured && <p>This delivery has no maintenance build configured in System settings.</p>}
     {configured && commit.data && <p>Accepted source revision <code className="break-all">{commit.data.sha}</code></p>}
-    {configured && settings && !current && !handoffs.some((item) => item.activation) && <Button type="button" disabled={make.isPending || !commit.data}
+    {configured && settings && !current && !handoffs.some((item) => item.activation || item.signedActivation) && <Button type="button" disabled={make.isPending || !commit.data}
       onClick={() => make.mutate(settings.revision)}>{make.isPending ? "Building package…" : "Build accepted package"}</Button>}
     {handoffs.map((item) => <section key={item.id} className="pipeline-evidence pipeline-stack" aria-label={`Candidate handoff ${item.version}`}>
       <p>Candidate build <strong>{item.version}</strong> · {item.packageName}</p>
@@ -211,10 +232,45 @@ function MaintenanceDelivery({ projectId, workflowRunId, workflowId, nodeId, git
       </dl>
       {item.activation && <p role="status">Fixture activation recorded <code>{item.activation.id}</code>
         {" · "}Workflow output <code className="break-all">{item.activation.workflowArtifactId}</code></p>}
+      {item.signedActivation && <p role="status">Signed update {item.signedActivation.version} verified at startup.
+        {" "}Workflow output <code className="break-all">{item.signedActivation.workflowArtifactId}</code></p>}
       {configured && item === current && !item.activation && settings?.configuration.activation === "manual_fixture" &&
         <Button type="button" variant="outline" disabled={activate.isPending} onClick={() => activate.mutate(item)}>
           Record fixture activation
         </Button>}
+      {configured && item === current && !item.activation && !item.signedActivation && settings?.configuration.activation === "signed_updater" &&
+        <SignedHandoffUpdate key={item.id} projectId={projectId} handoff={item} />}
     </section>)}
   </section>;
+}
+
+function SignedHandoffUpdate({ projectId, handoff }: { projectId: string; handoff: MaintenanceHandoff }) {
+  const client = useQueryClient();
+  const request = {
+    projectId, handoffId: handoff.id, expectedSettingsRevision: handoff.settingsRevision, expectedSha256: handoff.sha256,
+  };
+  const preview = useMutation({
+    mutationFn: () => invoke<SignedUpdatePreview>("preview_signed_update", { request }),
+  });
+  const install = useMutation({
+    mutationFn: () => invoke<SignedUpdateReceipt>("activate_signed_update", { request }),
+    onSettled: () => client.invalidateQueries({ queryKey: signedUpdateStatusKey }),
+  });
+  const error = preview.error ?? install.error ?? install.data?.outcome.reason;
+  return <>
+    <Button type="button" variant="outline" disabled={preview.isPending || install.isPending} onClick={() => {
+      install.reset();
+      preview.mutate();
+    }}>
+      {preview.isPending ? "Verifying signed package…" : "Verify signed update"}
+    </Button>
+    {preview.data && <>
+      <p>Signature verified for {preview.data.version}. The installed build is {preview.data.currentVersion}.</p>
+      <p>OmniAgent will wait for active work to finish, create a recovery checkpoint, and restart to apply the update.</p>
+      <Button type="button" disabled={install.isPending} onClick={() => install.mutate()}>
+        {install.isPending ? "Preparing installation…" : "Install verified update"}
+      </Button>
+    </>}
+    {error && <p role="alert">{String(error)}</p>}
+  </>;
 }

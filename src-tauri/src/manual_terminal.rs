@@ -15,6 +15,7 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     diagnostics,
+    jobs::{ExternalWork, JobScheduler},
     process::create_job,
     repository::{checkout_root, verify_checkout},
     store::Store,
@@ -70,6 +71,7 @@ impl Drop for Sessions {
 
 struct ManualSession {
     checkout_id: String,
+    _work: Option<ExternalWork>,
     job: Mutex<Option<OwnedHandle>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
@@ -136,13 +138,14 @@ impl ManualTerminals {
         store: &Store,
         checkout_id: String,
         size: PtySize,
+        work: Option<ExternalWork>,
         send: impl Fn(ManualTerminalEvent) -> bool + Send + Sync + 'static,
     ) -> Result<ManualTerminalInfo> {
         let root = checkout_root(store, checkout_id.clone()).await?;
         let layout = verify_checkout(store, checkout_id.clone(), root).await?;
         let sessions = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            launch(&sessions, checkout_id, &layout.root, size, send)
+            launch(&sessions, checkout_id, &layout.root, size, work, send)
         })
         .await?
     }
@@ -177,6 +180,7 @@ fn launch(
     checkout_id: String,
     root: &Path,
     size: PtySize,
+    work: Option<ExternalWork>,
     send: impl Fn(ManualTerminalEvent) -> bool + Send + Sync + 'static,
 ) -> Result<ManualTerminalInfo> {
     ensure!(
@@ -207,6 +211,7 @@ fn launch(
     let terminal_id = Uuid::new_v4().to_string();
     let session = Arc::new(ManualSession {
         checkout_id: checkout_id.clone(),
+        _work: work,
         job: Mutex::new(Some(job)),
         master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(Some(writer)),
@@ -365,14 +370,16 @@ fn report(error: impl std::fmt::Display) -> String {
 pub async fn start_manual_terminal(
     store: State<'_, Store>,
     terminals: State<'_, ManualTerminals>,
+    scheduler: State<'_, JobScheduler>,
     checkout_id: String,
     cols: u16,
     rows: u16,
     channel: Channel<ManualTerminalEvent>,
 ) -> Result<ManualTerminalInfo, String> {
     let size = terminal_size(cols, rows).map_err(report)?;
+    let work = scheduler.admit_external_work().await.map_err(report)?;
     terminals
-        .start(&store, checkout_id, size, move |event| {
+        .start(&store, checkout_id, size, Some(work), move |event| {
             channel.send(event).is_ok()
         })
         .await

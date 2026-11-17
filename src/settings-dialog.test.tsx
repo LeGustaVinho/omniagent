@@ -89,6 +89,7 @@ it("stages the verified backup only after confirmation and reports the pending r
       case "runtime_status": return "Desktop runtime is ready.";
       case "ripgrep_status": return { configuredExecutable: null, executable: null, version: null };
       case "desktop_cli_prerequisites": return { git: {}, providers: [] };
+      case "signed_update_status": return { configured: false, latest: null };
       case "application_restore_status": return { active: null, pending, rejection: null };
       case "preview_application_restore": return {
         archive, preview: { checkpointId: receipt.checkpointId, schemaVersion: 111, manifestSha256: "a".repeat(64), packageCount: 2 },

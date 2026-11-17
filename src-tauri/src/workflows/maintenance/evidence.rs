@@ -44,6 +44,23 @@ pub(super) struct CandidateEvidence {
 }
 
 impl CandidateEvidence {
+    pub(super) fn matches_handoff(&self, handoff: &MaintenanceHandoff) -> bool {
+        self.workflow == handoff.workflow
+            && self.plan_revision == handoff.plan_revision
+            && self.commit.unit_id == handoff.unit_id
+            && self.commit.sha == handoff.source_revision
+            && self.commit.tree == handoff.source_tree
+            && self.commit.candidate_revision == handoff.candidate_revision
+            && self.commit.verification_id == handoff.verification_id
+            && self.approval_artifact_id == handoff.approval_artifact_id
+            && self.approval_source == handoff.approval_source
+            && self.acceptance_artifact_id == handoff.acceptance_artifact_id
+            && self.review_artifact_id == handoff.review_artifact_id
+            && self.review_run_id == handoff.review_run_id
+            && self.settings.configuration.required_checks == handoff.checks
+            && self.settings.build_executable_revision == handoff.build_executable_revision
+    }
+
     pub(super) fn handoff(
         &self,
         id: String,
@@ -79,6 +96,7 @@ impl CandidateEvidence {
             build_executable_revision: self.settings.build_executable_revision.clone(),
             recorded_at,
             activation: None,
+            signed_activation: None,
         }
     }
 }

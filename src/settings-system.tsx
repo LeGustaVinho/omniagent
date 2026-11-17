@@ -8,6 +8,7 @@ import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { signedUpdateStatusKey, type SignedUpdateStatus } from "@/workflow-maintenance";
 
 const previousBuild = "0.1.0";
 const candidateBuild = "0.2.0";
@@ -168,18 +169,32 @@ export function SystemSettings({
         <ApplicationRestore />
       </SystemGroup>
       <SystemGroup icon={<RefreshCw size={18} />} id="updates" title="Updates and recovery">
-        <p>Review the candidate version, Git revision, signature and approvals before applying an update.</p>
-        <div className="settings-actions">
-          <Button variant="outline" disabled>Check for updates</Button>
-          <Button variant="outline" disabled>Install signed build</Button>
-        </div>
-        <dl className="settings-facts">
-          <dt>Candidate</dt><dd>Awaiting update inventory</dd>
-          <dt>Signature and approval</dt><dd>Unavailable</dd>
-        </dl>
+        <SignedUpdateHistory />
       </SystemGroup>
     </div>
   );
+}
+
+function SignedUpdateHistory() {
+  const status = useQuery({
+    queryKey: signedUpdateStatusKey, queryFn: () => invoke<SignedUpdateStatus>("signed_update_status"),
+  });
+  const receipt = status.data?.latest;
+  return <>
+    {status.isPending && <p role="status">Checking update history…</p>}
+    {status.error && <p role="alert" className="settings-result settings-result-error">{String(status.error)}</p>}
+    {status.data?.configured === false && <p>This build has no trusted update feed configured.</p>}
+    {status.data?.configured && <p>Verify an accepted maintenance package from its workflow delivery to install a signed update.</p>}
+    {receipt && <>
+      <dl className="settings-facts">
+        <dt>Version</dt><dd>{receipt.update.version}</dd>
+        <dt>Source revision</dt><dd><code>{receipt.update.sourceRevision}</code></dd>
+        <dt>Recovery checkpoint</dt><dd><code>{receipt.backup.checkpointId}</code></dd>
+        <dt>Outcome</dt><dd>{receipt.outcome.status.replaceAll("_", " ")}</dd>
+      </dl>
+      {receipt.outcome.reason && <p role="alert" className="settings-result settings-result-error">{receipt.outcome.reason}</p>}
+    </>}
+  </>;
 }
 
 function ApplicationBackup() {

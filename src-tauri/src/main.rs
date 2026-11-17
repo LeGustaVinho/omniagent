@@ -31,6 +31,7 @@ mod project_description_runtime;
 mod project_search_runtime;
 mod queue_runtime;
 mod side_question_ipc;
+mod startup_update;
 mod task_assignment_ipc;
 mod task_delivery_ipc;
 mod task_participants_ipc;
@@ -40,6 +41,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use omniagent::repository::verification::ipc as candidate;
 use omniagent::{
+    installation::InstallationIdentity,
     jobs::JobScheduler,
     repository::{
         self, AttemptWorktreeEvidence, BranchStrategy, LiveWorktree, ManagedWorktree,
@@ -222,22 +224,37 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(desktop::hide_main_on_close)
         .on_webview_event(conversation_attachment_ipc::retain_attachment_drop)
         .setup(|app| {
-            let installation =
-                omniagent::restore::open_installation(&app.path().app_local_data_dir()?)?;
-            let store = Store::open(installation.layout.database_path())?;
-            tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
-            if let Err(error) =
-                tauri::async_runtime::block_on(store.retire_local_attachments_after_restart())
-            {
+            let root = app.path().app_local_data_dir()?;
+            let identity = InstallationIdentity::load_or_create(&root)?;
+            let update = startup_update::StartupUpdate::begin(app.handle(), &identity)?;
+            let store = update.verify(|| {
+                let installation = update.open_installation(&identity, &root)?;
+                let store = Store::open(installation.layout.database_path())?;
+                tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
+                if let Err(error) =
+                    tauri::async_runtime::block_on(store.retire_local_attachments_after_restart())
+                {
+                    eprintln!(
+                        "Could not recover local attachment staging: {}",
+                        omniagent::diagnostics::preview(&error.to_string())
+                    );
+                }
+                desktop::create_tray(app)?;
+                desktop::notify_job_activity(app.handle().clone(), store.job_notices())?;
+                app.manage(installation.identity);
+                app.manage(installation.layout);
+                Ok(store)
+            })?;
+            if let Err(error) = update.publish_workflow_evidence(&store) {
                 eprintln!(
-                    "Could not recover local attachment staging: {}",
-                    omniagent::diagnostics::preview(&error.to_string())
+                    "Could not publish verified update evidence to its workflow: {}",
+                    omniagent::diagnostics::preview(&format!("{error:#}"))
                 );
             }
-            let notices = store.job_notices();
             let scheduler = tauri::async_runtime::block_on(async {
                 JobScheduler::start(
                     store.clone(),
@@ -246,8 +263,6 @@ fn main() {
                 )
             });
             app.manage(store);
-            app.manage(installation.identity);
-            app.manage(installation.layout);
             app.manage(conversation_attachment_ipc::AttachmentDropReceipts::default());
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
@@ -256,8 +271,6 @@ fn main() {
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
             app.manage(fixture_runtime::FixtureRuns::default());
-            desktop::create_tray(app)?;
-            desktop::notify_job_activity(app.handle().clone(), notices)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -346,6 +359,9 @@ fn main() {
             workflow_ipc::maintenance::set_workflow_maintenance,
             workflow_ipc::maintenance::create_maintenance_handoff,
             workflow_ipc::maintenance::activate_maintenance_fixture,
+            workflow_ipc::maintenance::preview_signed_update,
+            workflow_ipc::maintenance::activate_signed_update,
+            workflow_ipc::maintenance::signed_update_status,
             workflow_ipc::list_repository_deliveries,
             workflow_ipc::inspect_repository_delivery,
             workflow_ipc::execute_repository_delivery_host,

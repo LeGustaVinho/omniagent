@@ -1,13 +1,16 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use tokio::{
-    sync::{Mutex as AsyncMutex, MutexGuard, oneshot, watch},
+    sync::{Mutex as AsyncMutex, MutexGuard, OwnedMutexGuard, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -40,6 +43,21 @@ pub struct JobScheduler {
 pub(crate) struct LaunchGate {
     boundary: Arc<AsyncMutex<()>>,
     stopping: watch::Receiver<bool>,
+    maintenance: Arc<MaintenanceGate>,
+}
+
+#[derive(Default)]
+struct MaintenanceGate {
+    draining: AtomicBool,
+    external_work: AtomicUsize,
+}
+
+pub struct ExternalWork(Arc<MaintenanceGate>);
+
+impl Drop for ExternalWork {
+    fn drop(&mut self) {
+        self.0.external_work.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl LaunchGate {
@@ -51,6 +69,55 @@ impl LaunchGate {
         let guard = self.boundary.lock().await;
         (!self.is_closed()).then_some(guard)
     }
+
+    async fn enter_admission(&self) -> Option<MutexGuard<'_, ()>> {
+        let guard = self.enter().await?;
+        (!self.maintenance.draining.load(Ordering::Acquire)).then_some(guard)
+    }
+}
+
+pub(crate) struct UpdateDrain {
+    gate: LaunchGate,
+    signal: watch::Sender<()>,
+}
+
+impl UpdateDrain {
+    pub(crate) async fn lock_launch_boundary(&self) -> Result<OwnedMutexGuard<()>> {
+        let boundary = self.gate.boundary.clone().lock_owned().await;
+        ensure!(!self.gate.is_closed(), "The scheduler is exiting");
+        Ok(boundary)
+    }
+
+    pub(crate) fn confirm(&self, db: &rusqlite::Connection) -> Result<()> {
+        ensure!(!self.gate.is_closed(), "The scheduler is exiting");
+        ensure!(
+            self.gate.maintenance.external_work.load(Ordering::Acquire) == 0
+                && !has_database_work(db)?,
+            "Managed attempts or terminals are still active"
+        );
+        Ok(())
+    }
+}
+
+impl Drop for UpdateDrain {
+    fn drop(&mut self) {
+        self.gate
+            .maintenance
+            .draining
+            .store(false, Ordering::Release);
+        self.signal.send_replace(());
+    }
+}
+
+fn has_database_work(db: &rusqlite::Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM active_agent_attempts)
+          OR EXISTS (SELECT 1 FROM job_writer_reservations)
+          OR EXISTS (SELECT 1 FROM job_attempts a JOIN runs r ON r.id = a.run_id
+                     WHERE r.status IN ('starting', 'running', 'waiting_for_input'))",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 type ActiveTurns = Arc<Mutex<HashMap<String, LiveTurn>>>;
@@ -98,6 +165,7 @@ impl JobScheduler {
         let admission = LaunchGate {
             boundary: Arc::new(AsyncMutex::new(())),
             stopping,
+            maintenance: Arc::new(MaintenanceGate::default()),
         };
         let active = ActiveTurns::default();
         let task = tokio::spawn(drive(
@@ -172,6 +240,70 @@ impl JobScheduler {
         true
     }
 
+    pub async fn admit_external_work(&self) -> Result<ExternalWork> {
+        let _boundary = self
+            .admission
+            .enter_admission()
+            .await
+            .context("The scheduler is exiting or preparing an application update")?;
+        let gate = self.admission.maintenance.clone();
+        gate.external_work.fetch_add(1, Ordering::AcqRel);
+        Ok(ExternalWork(gate))
+    }
+
+    pub(crate) async fn drain_for_update(
+        &self,
+        store: &Store,
+        timeout: Duration,
+    ) -> Result<UpdateDrain> {
+        let drain = {
+            let _boundary = self
+                .admission
+                .enter()
+                .await
+                .context("The scheduler is exiting")?;
+            ensure!(
+                !self
+                    .admission
+                    .maintenance
+                    .draining
+                    .swap(true, Ordering::AcqRel),
+                "Another application update is already preparing to install"
+            );
+            UpdateDrain {
+                gate: self.admission.clone(),
+                signal: store.job_signal.clone(),
+            }
+        };
+        tokio::time::timeout(timeout, async {
+            loop {
+                ensure!(!self.admission.is_closed(), "The scheduler is exiting");
+                let workers_active = !self.active.lock().expect("job scheduler lock").is_empty();
+                let external_active = self
+                    .admission
+                    .maintenance
+                    .external_work
+                    .load(Ordering::Acquire)
+                    > 0;
+                if !workers_active && !external_active {
+                    let mut native = self.native_compactions.lock().await;
+                    while let Some(result) = native.try_join_next() {
+                        result.context("Native compaction worker failed")?;
+                    }
+                    if native.is_empty() && !store.execute(|db| has_database_work(db)).await? {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context(
+            "Application update could not drain active jobs or terminals before the deadline",
+        )??;
+        Ok(drain)
+    }
+
     pub async fn run_native_compaction(
         &self,
         store: Store,
@@ -181,9 +313,9 @@ impl JobScheduler {
     ) -> Result<()> {
         let boundary = self
             .admission
-            .enter()
+            .enter_admission()
             .await
-            .context("The scheduler is exiting")?;
+            .context("The scheduler is exiting or preparing an application update")?;
         let mut workers = self.native_compactions.lock().await;
         while let Some(result) = workers.try_join_next() {
             result.context("Native compaction worker failed")?;
@@ -193,7 +325,10 @@ impl JobScheduler {
         let (settled, result) = oneshot::channel();
         workers.spawn(async move {
             let outcome = async {
-                let boundary = gate.enter().await.context("The scheduler is exiting")?;
+                let boundary = gate
+                    .enter_admission()
+                    .await
+                    .context("The scheduler is exiting or preparing an application update")?;
                 let plan = store
                     .reserve_native_compaction(conversation, expected_context, scope)
                     .await?;
@@ -276,7 +411,7 @@ async fn drive(
                 }
                 Err(error) => report(&error),
             }
-            if let Some(_boundary) = admission.enter().await {
+            if let Some(_boundary) = admission.enter_admission().await {
                 match store
                     .claim_scheduled_attempt(environment(runner.as_ref(), bridge.as_ref()), true)
                     .await

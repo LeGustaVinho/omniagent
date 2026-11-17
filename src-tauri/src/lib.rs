@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod evidence;
 pub mod installation;
 pub mod jobs;
+pub mod maintenance_update;
 pub mod markdown_analysis;
 pub mod markdown_properties;
 pub mod markdown_recovery;

@@ -23,6 +23,9 @@
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; worker-src 'self'; object-src 'none'"
     }
   },
+  "plugins": {
+    "updater": { "pubkey": "", "requireSignedVersion": true }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

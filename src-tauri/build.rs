@@ -60,5 +60,15 @@ fn source_identity() {
 
 fn main() {
     source_identity();
+    if env::var("TARGET").is_ok_and(|target| target.ends_with("-windows-msvc")) {
+        // The Rust test executable does not embed Tauri's application manifest.
+        // Mock Tauri apps link TaskDialogIndirect from Common Controls v6.
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+        // The desktop executable already carries the manifest embedded by Tauri.
+        println!("cargo:rustc-link-arg-bin=omniagent=/MANIFEST:NO");
+    }
     tauri_build::build();
 }

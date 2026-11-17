@@ -119,9 +119,13 @@ async fn open_terminal(
 ) -> Result<(ManualTerminalInfo, Arc<ManualSession>, TerminalOutput)> {
     let (send, events) = mpsc::unbounded_channel();
     let info = terminals
-        .start(store, checkout_id, terminal_size(100, 28)?, move |notice| {
-            send.send(notice).is_ok()
-        })
+        .start(
+            store,
+            checkout_id,
+            terminal_size(100, 28)?,
+            None,
+            move |notice| send.send(notice).is_ok(),
+        )
         .await?;
     let session = terminals
         .find(&info.checkout_id, &info.terminal_id)?
@@ -185,6 +189,7 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
                 &store,
                 "unknown-checkout".into(),
                 terminal_size(80, 24)?,
+                None,
                 |_| false
             )
             .await

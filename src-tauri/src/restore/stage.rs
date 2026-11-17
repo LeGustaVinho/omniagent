@@ -43,6 +43,7 @@ pub fn stage_restore(
     archive: &Path,
     expected_manifest_sha256: &str,
 ) -> Result<RestoreReceipt> {
+    let _maintenance = identity.lock_maintenance_change()?;
     ensure!(
         !record_exists(identity, PENDING)?,
         "A restore is already staged for restart"

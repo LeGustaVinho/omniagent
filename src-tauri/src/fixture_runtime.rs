@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
+    jobs::{ExternalWork, JobScheduler},
     process::TerminalOutcome,
     process_io::{CapturedProcess, ProcessInput, Stream},
     repository,
@@ -30,6 +31,7 @@ struct FixtureState {
 #[derive(Clone)]
 struct ActiveRun {
     checkout_id: String,
+    _work: Arc<ExternalWork>,
     control: Arc<dyn RunControl>,
     input: Arc<Mutex<Option<ProcessInput>>>,
 }
@@ -68,12 +70,19 @@ impl FixtureRuns {
         .await?
     }
 
-    async fn launch(&self, app: AppHandle, store: Store, checkout_id: String) -> Result<RunRecord> {
+    async fn launch(
+        &self,
+        app: AppHandle,
+        store: Store,
+        checkout_id: String,
+        work: ExternalWork,
+    ) -> Result<RunRecord> {
         let cwd = repository::checkout_root(&store, checkout_id.clone()).await?;
         let executable = env::current_exe()?;
         let (mut run, _) = store.start_run(checkout_id.clone()).await?;
         let active = self.0.clone();
         let run_id = run.id.clone();
+        let work = Arc::new(work);
         let process = tokio::task::spawn_blocking(move || {
             let mut state = active.lock().expect("active run lock");
             if state.stopping {
@@ -93,14 +102,15 @@ impl FixtureRuns {
                 run_id,
                 ActiveRun {
                     checkout_id,
+                    _work: work.clone(),
                     control: control.clone(),
                     input: Arc::new(Mutex::new(Some(input))),
                 },
             );
-            Ok::<_, std::io::Error>(Some((control, output)))
+            Ok::<_, std::io::Error>(Some((control, output, work)))
         })
         .await?;
-        let (control, output) = match process {
+        let (control, output, work) = match process {
             Ok(Some(process)) => process,
             Ok(None) => {
                 record_status(&store, &run.id, RunStatus::Cancelled).await?;
@@ -121,18 +131,20 @@ impl FixtureRuns {
             }
         };
         if let Err(error) = record_status(&store, &run.id, RunStatus::Running).await {
+            let _ = control.cancel();
+            let _ = tokio::task::spawn_blocking(move || control.confirm_quiescence()).await;
             self.0
                 .lock()
                 .expect("active run lock")
                 .active
                 .remove(&run.id);
-            let _ = control.cancel();
             return Err(error);
         }
         run.status = RunStatus::Running;
         let active = self.0.clone();
         let run_id = run.id.clone();
         tauri::async_runtime::spawn(async move {
+            let _work = work;
             let wait = tokio::task::spawn_blocking({
                 let control = control.clone();
                 move || control.wait()
@@ -236,9 +248,14 @@ pub async fn start_fixture(
     app: AppHandle,
     store: State<'_, Store>,
     runs: State<'_, FixtureRuns>,
+    scheduler: State<'_, JobScheduler>,
     checkout_id: String,
 ) -> Result<RunRecord, String> {
-    runs.launch(app, store.inner().clone(), checkout_id)
+    let work = scheduler
+        .admit_external_work()
+        .await
+        .map_err(|error| error.to_string())?;
+    runs.launch(app, store.inner().clone(), checkout_id, work)
         .await
         .map_err(|error| error.to_string())
 }

@@ -39,6 +39,14 @@ For the Windows 11 run, `-BuildOnly` prepares the packages on the build machine.
 node tests/desktop/nsis-install-upgrade.mjs C:\path\to\case.json
 ```
 
+### Signed maintenance activation
+
+A release build can embed `OMNIAGENT_UPDATE_FEED` and `OMNIAGENT_UPDATE_PUBLIC_KEY`. Configure both at build time. The feed uses HTTPS and the public key uses the Tauri updater format. Keep the signing operation and its private key outside the candidate's agent workflow.
+
+The maintenance workflow builds the verified commit and retains the exact installer bytes and SHA-256. The feed signature authenticates those bytes. In the signature's trusted comment, put `version:<semver>` and `source:<commit>`, separated by a tab. Confirm the signature and accepted package in the workflow delivery to start the update. OmniAgent drains the scheduler, records a same-installation checkpoint, and invokes the Tauri installer. The journal records the outcome before the new build admits work. A verified startup publishes the receipt to the original workflow.
+
+Five Windows 10 Rust tests exercised signed bytes with ephemeral keys, an installer rejected by Tauri, reversible drain, journal reopen, and a verified Git handoff linked to its workflow. Recovery fixtures verified the cached previous signature and restored a real SQLite checkpoint. The signed NSIS installation and rollback across actual processes remain under validation. [Updater verification](../src-tauri/src/maintenance_update/tests.rs) · [Tauri updater configuration](https://v2.tauri.app/plugin/updater/)
+
 ## CLI and authentication matrix
 
 The observed versions below came from local version probes on 2026-11-16. Git for Windows reported `2.55.0.windows.3` and ripgrep reported `15.2.0`. Settings can show and configure the discovered binaries. The historical authenticated smokes used vendor-managed credentials. Account tier, credential method and organization or tenant were unrecorded in the available release evidence. The installed NSIS trial used only local fixture repository operations. [Executable discovery](../src-tauri/src/providers/profiles/prerequisites.rs)

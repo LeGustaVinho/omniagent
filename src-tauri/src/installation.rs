@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub(crate) mod atomic_file;
+mod maintenance_lock;
 
 const IDENTITY_FILE: &str = "installation.dpapi";
 const IDENTITY_FORMAT: u16 = 1;

@@ -249,6 +249,57 @@ async fn maintenance_uses_the_verified_source_and_requires_a_user_selected_fixtu
             .to_string()
             .contains("disabled")
     );
+    assert!(
+        store
+            .require_signed_update_handoff(activation.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+    {
+        // Take a disposable copy of the approved workflow while the activation
+        // node is still waiting, so the manual and signed routes are independent.
+        let checkpoint = store
+            .create_application_backup(
+                installed.identity.clone(),
+                package_root.clone(),
+                temp.path().into(),
+            )
+            .await?;
+        let signed = restore::open_installation(&temp.path().join("signed-installation"))?;
+        for file in &checkpoint.manifest.entries {
+            file.copy_verified(&checkpoint.root, signed.layout.app_data())?;
+        }
+        let signed_store = Store::open(signed.layout.database_path())?;
+        let settings = signed_store
+            .set_workflow_maintenance(
+                project.clone(),
+                Some(disabled_settings.revision.clone()),
+                MaintenanceConfiguration {
+                    activation: MaintenanceActivationMode::SignedUpdater,
+                    ..configuration.clone()
+                },
+            )
+            .await?;
+        let handoff = signed_store
+            .create_maintenance_handoff(
+                MaintenanceHandoffRequest {
+                    expected_settings_revision: settings.revision,
+                    ..request.clone()
+                },
+                signed.layout.maintenance_packages(),
+            )
+            .await?;
+        crate::maintenance_update::exercise_signed_handoff_activation(
+            &signed_store,
+            &signed.identity,
+            handoff,
+            signed.layout.maintenance_packages(),
+            temp.path().into(),
+        )
+        .await?;
+    }
     configuration.activation = MaintenanceActivationMode::ManualFixture;
     assert!(
         store

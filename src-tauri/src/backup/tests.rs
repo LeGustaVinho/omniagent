@@ -542,6 +542,7 @@ fn insert_package(
         build_executable_revision: "build".into(),
         recorded_at: "00".into(),
         activation: None,
+        signed_activation: None,
     };
     db.execute(
         "INSERT INTO workflow_maintenance_handoffs(id, receipt) VALUES (?1, ?2)",

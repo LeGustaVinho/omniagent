@@ -94,3 +94,39 @@ it("builds from the accepted commit and records activation of the exact handed-o
     request: { projectId, handoffId: handoff.id, expectedSettingsRevision: settings.revision, expectedSha256: handoff.sha256 },
   });
 });
+
+it("verifies the signed handoff before confirmation and reports a failed installer launch", async () => {
+  const handoff = {
+    id: "signed-handoff", workflowRunId: "run", nodeId: "activate-maintenance", gitArtifactId: "commit-artifact",
+    commitEvidenceId: "verified-commit", settingsRevision: settings.revision, version: "0.2.0",
+    sourceRevision: "approved-source", sha256: "signed-package-digest", checks: ["Windows test"],
+    approvalSource: "operator", packageName: "setup.exe", activation: null,
+  };
+  const request = {
+    projectId, handoffId: handoff.id, expectedSettingsRevision: settings.revision, expectedSha256: handoff.sha256,
+  };
+  invoke.mockImplementation(async (command) => {
+    switch (command) {
+      case "workflow_maintenance": return {
+        runningBuild, settings: { ...settings, configuration: { ...configuration, activation: "signed_updater" } }, handoffs: [handoff],
+      };
+      case "verified_delivery_commit": return { sha: handoff.sourceRevision };
+      case "preview_signed_update": return { version: handoff.version, currentVersion: runningBuild.version };
+      case "activate_signed_update": return { outcome: { status: "install_failed", reason: "Windows installer did not start" } };
+      default: throw new Error(command);
+    }
+  });
+  mount(<WorkflowMaintenanceDelivery projectId={projectId} workflowId="maintenance-workflow"
+    workflowRunId="run" nodeId="activate-maintenance" gitArtifactId="commit-artifact" taskId="task" commitEvidenceId="verified-commit" />);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Maintenance package"));
+  const verify = await screen.findByRole("button", { name: "Verify signed update" });
+  expect(screen.queryByRole("button", { name: "Install verified update" })).toBeNull();
+  await user.click(verify);
+  expect(await screen.findByText(/Signature verified for 0\.2\.0/)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("preview_signed_update", { request });
+  expect(invoke.mock.calls.some(([command]) => command === "activate_signed_update")).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Install verified update" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("Windows installer did not start");
+  expect(invoke).toHaveBeenCalledWith("activate_signed_update", { request });
+});

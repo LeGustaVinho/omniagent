@@ -15,12 +15,14 @@ use super::{
 
 mod evidence;
 mod package;
+mod signed_activation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceActivationMode {
     Disabled,
     ManualFixture,
+    SignedUpdater,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,17 @@ pub struct MaintenanceFixtureActivation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MaintenanceSignedActivation {
+    pub id: String,
+    pub version: String,
+    pub source_revision: String,
+    pub sha256: String,
+    pub workflow_artifact_id: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MaintenanceHandoff {
     pub id: String,
     pub project_id: String,
@@ -90,6 +103,22 @@ pub struct MaintenanceHandoff {
     pub build_executable_revision: String,
     pub recorded_at: String,
     pub activation: Option<MaintenanceFixtureActivation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_activation: Option<MaintenanceSignedActivation>,
+}
+
+impl MaintenanceHandoff {
+    fn request(&self) -> MaintenanceHandoffRequest {
+        MaintenanceHandoffRequest {
+            project_id: self.project_id.clone(),
+            workflow_run_id: self.workflow_run_id.clone(),
+            node_id: self.node_id.clone(),
+            git_artifact_id: self.git_artifact_id.clone(),
+            task_id: self.task_id.clone(),
+            commit_evidence_id: self.commit_evidence_id.clone(),
+            expected_settings_revision: self.settings_revision.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -124,11 +153,9 @@ pub struct MaintenanceActivationRequest {
 impl Store {
     pub async fn workflow_maintenance(&self, project: String) -> Result<WorkflowMaintenance> {
         self.execute(move |db| {
-            let mut statement = db.prepare(
-                "SELECT h.receipt, a.id, a.recorded_at, a.output_artifact_id FROM workflow_maintenance_handoffs h
-                 LEFT JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
-                 WHERE h.project_id = ?1 ORDER BY h.recorded_at DESC, h.id DESC",
-            )?;
+            let mut statement = db.prepare(&format!(
+                "{HANDOFF_SELECT} WHERE h.project_id = ?1 ORDER BY h.recorded_at DESC, h.id DESC"
+            ))?;
             let handoffs = statement
                 .query_map([&project], decode_handoff)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -284,7 +311,10 @@ impl Store {
         let initial = self
             .execute({
                 let request = request.clone();
-                move |db| require_activation(db, &request).map(|(handoff, _)| handoff)
+                move |db| {
+                    require_activation(db, &request, MaintenanceActivationMode::ManualFixture)
+                        .map(|(handoff, _)| handoff)
+                }
             })
             .await?;
         if initial.activation.is_some() {
@@ -295,7 +325,7 @@ impl Store {
                 .await??;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (mut handoff, candidate) = require_activation(&tx, &request)?;
+            let (mut handoff, candidate) = require_activation(&tx, &request, MaintenanceActivationMode::ManualFixture)?;
             if handoff.activation.is_none() {
                 let id = Uuid::new_v4().to_string();
                 let output = insert_scoped_artifact(
@@ -324,6 +354,27 @@ impl Store {
         })
         .await
     }
+
+    pub(crate) async fn require_signed_update_handoff(
+        &self,
+        request: MaintenanceActivationRequest,
+    ) -> Result<MaintenanceHandoff> {
+        self.execute(move |db| validate_signed_update_handoff(db, &request))
+            .await
+    }
+}
+
+pub(crate) fn validate_signed_update_handoff(
+    db: &Connection,
+    request: &MaintenanceActivationRequest,
+) -> Result<MaintenanceHandoff> {
+    let (handoff, candidate) =
+        require_activation(db, request, MaintenanceActivationMode::SignedUpdater)?;
+    ensure!(
+        candidate.matches_handoff(&handoff),
+        "The accepted maintenance evidence changed"
+    );
+    Ok(handoff)
 }
 
 fn load_settings(db: &Connection, project: &str) -> Result<Option<MaintenanceSettings>> {
@@ -375,17 +426,21 @@ pub(super) fn validate_activation_wires(nodes: &[PinnedNode], wires: &[Wire]) ->
 fn require_activation(
     db: &Connection,
     request: &MaintenanceActivationRequest,
+    mode: MaintenanceActivationMode,
 ) -> Result<(MaintenanceHandoff, evidence::CandidateEvidence)> {
     let handoff = db
         .query_row(
-            "SELECT h.receipt, a.id, a.recorded_at, a.output_artifact_id FROM workflow_maintenance_handoffs h
-         LEFT JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
-         WHERE h.project_id = ?1 AND h.id = ?2",
+            &format!("{HANDOFF_SELECT} WHERE h.project_id = ?1 AND h.id = ?2"),
             params![request.project_id, request.handoff_id],
             decode_handoff,
         )
         .optional()?
         .context("The candidate handoff is unavailable in this project")?;
+    ensure!(
+        handoff.signed_activation.is_none()
+            && (mode != MaintenanceActivationMode::SignedUpdater || handoff.activation.is_none()),
+        "This maintenance workflow stage already recorded an activation"
+    );
     ensure!(
         handoff.sha256 == request.expected_sha256,
         "The candidate package digest changed"
@@ -394,22 +449,20 @@ fn require_activation(
         handoff.settings_revision == request.expected_settings_revision,
         "Review a handoff prepared for the current maintenance settings"
     );
-    let candidate = evidence::resolve(
-        db,
-        &MaintenanceHandoffRequest {
-            project_id: handoff.project_id.clone(),
-            workflow_run_id: handoff.workflow_run_id.clone(),
-            node_id: handoff.node_id.clone(),
-            git_artifact_id: handoff.git_artifact_id.clone(),
-            task_id: handoff.task_id.clone(),
-            commit_evidence_id: handoff.commit_evidence_id.clone(),
-            expected_settings_revision: request.expected_settings_revision.clone(),
-        },
-    )?;
+    let source = handoff.request();
+    let candidate = evidence::resolve(db, &source)?;
     ensure!(
-        candidate.settings.configuration.activation == MaintenanceActivationMode::ManualFixture,
-        "Fixture activation is disabled for this maintenance workflow"
+        candidate.settings.configuration.activation == mode,
+        "{} activation is disabled for this maintenance workflow",
+        if mode == MaintenanceActivationMode::ManualFixture {
+            "Fixture"
+        } else {
+            "Signed update"
+        },
     );
+    if handoff.activation.is_none() {
+        require_unactivated_stage(db, &source)?;
+    }
     Ok((handoff, candidate))
 }
 
@@ -418,10 +471,11 @@ fn existing_handoff(
     request: &MaintenanceHandoffRequest,
 ) -> Result<Option<MaintenanceHandoff>> {
     db.query_row(
-        "SELECT h.receipt, a.id, a.recorded_at, a.output_artifact_id FROM workflow_maintenance_handoffs h
-         LEFT JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
+        &format!(
+            "{HANDOFF_SELECT}
          WHERE h.project_id = ?1 AND h.pipeline_run_id = ?2 AND h.commit_evidence_id = ?3
-           AND h.settings_revision = ?4 AND h.node_instance_id = ?5 AND h.git_artifact_id = ?6",
+           AND h.settings_revision = ?4 AND h.node_instance_id = ?5 AND h.git_artifact_id = ?6"
+        ),
         params![
             request.project_id,
             request.workflow_run_id,
@@ -439,9 +493,10 @@ fn existing_handoff(
 fn require_unactivated_stage(db: &Connection, request: &MaintenanceHandoffRequest) -> Result<()> {
     let activated: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM workflow_maintenance_handoffs h
-         JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
+         LEFT JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
+         LEFT JOIN workflow_maintenance_signed_activations s ON s.handoff_id = h.id
          WHERE h.project_id = ?1 AND h.pipeline_run_id = ?2 AND h.node_instance_id = ?3
-           AND h.commit_evidence_id = ?4)",
+           AND h.commit_evidence_id = ?4 AND (a.id IS NOT NULL OR s.id IS NOT NULL))",
         params![
             request.project_id,
             request.workflow_run_id,
@@ -452,10 +507,16 @@ fn require_unactivated_stage(db: &Connection, request: &MaintenanceHandoffReques
     )?;
     ensure!(
         !activated,
-        "This workflow stage already recorded its fixture activation"
+        "This workflow stage already recorded its maintenance activation"
     );
     Ok(())
 }
+
+const HANDOFF_SELECT: &str =
+    "SELECT h.receipt, a.id, a.recorded_at, a.output_artifact_id, s.receipt
+     FROM workflow_maintenance_handoffs h
+     LEFT JOIN workflow_maintenance_fixture_activations a ON a.handoff_id = h.id
+     LEFT JOIN workflow_maintenance_signed_activations s ON s.handoff_id = h.id";
 
 fn decode_handoff(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaintenanceHandoff> {
     let mut handoff: MaintenanceHandoff = decode(row, 0)?;
@@ -465,6 +526,9 @@ fn decode_handoff(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaintenanceHandof
             recorded_at: row.get(2)?,
             workflow_artifact_id: row.get(3)?,
         });
+    }
+    if !matches!(row.get_ref(4)?, rusqlite::types::ValueRef::Null) {
+        handoff.signed_activation = Some(decode(row, 4)?);
     }
     Ok(handoff)
 }

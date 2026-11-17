@@ -92,6 +92,7 @@ struct PendingRestore {
 /// Resolve a complete database and package generation before opening the live Store.
 pub fn open_installation(app_data: &Path) -> Result<InstallationStartup> {
     let identity = InstallationIdentity::load_or_create(app_data)?;
+    let _maintenance = identity.lock_maintenance_change()?;
     let mut active = active_receipt(&identity)?;
     if record_exists(&identity, PENDING)? {
         let pending = read_record::<PendingRestore>(&identity, PENDING)
