@@ -7,6 +7,7 @@ use super::{
 };
 
 mod bindings;
+mod credentials;
 #[cfg(test)]
 mod tests;
 
@@ -75,10 +76,12 @@ impl Store {
             require_project(&tx, &project)?;
             let artifacts = collect_dependencies(&tx, &project, selected)?;
             let document = build_exchange(&local, artifacts)?;
+            let serialized = serde_json::to_value(&document)?;
             ensure!(
-                serde_json::to_vec(&document)?.len() <= MAX_EXCHANGE_BYTES,
+                serde_json::to_vec(&serialized)?.len() <= MAX_EXCHANGE_BYTES,
                 "The workflow exchange exceeds the size limit"
             );
+            credentials::check(&serialized)?;
             Ok(document)
         })
         .await
