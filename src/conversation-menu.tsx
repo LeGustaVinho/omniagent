@@ -1,10 +1,10 @@
-import { Activity, Archive, ChevronRight, Clipboard, Columns2, Download, Ellipsis, Eye, GitFork, Link, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
+import { Activity, Archive, ChevronRight, Clipboard, Columns2, Download, Ellipsis, Eye, GitFork, Link, ListChecks, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
 import { useRef, useState, type ReactNode } from "react";
 
 export type ConversationAction =
   | "open" | "open-beside" | "activity" | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
-  | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "export-markdown" | "archive" | "delete";
+  | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "export-markdown" | "archive" | "delete" | "select-to-move";
 
 export type ConversationMenuProps = {
   title: string;
@@ -33,6 +33,7 @@ function readActions(props: ConversationMenuProps) {
     { action: "rename", label: "Rename", icon: <Pencil /> },
     { action: "pin", label: props.pinned ? "Unpin" : "Pin", icon: <Pin /> },
     { action: "unread", label: props.unread ? "Mark as read" : "Mark as unread", icon: <Eye /> },
+    { action: "select-to-move", label: "Select conversations to move…", icon: <ListChecks /> },
   ];
   const section: ItemDescription[] = [
     { action: "move", label: "No section" },
@@ -57,7 +58,7 @@ function readActions(props: ConversationMenuProps) {
 function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & { variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
   const { navigation, organize, section, fork, copy, exportTranscript, retain } = readActions(props);
-  const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? (action !== "open-beside"));
+  const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? !["open-beside", "select-to-move"].includes(action));
   const retentionItems = availableItems(retain);
   const navigationItems = availableItems(navigation);
 

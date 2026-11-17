@@ -11,6 +11,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
 import type { MenuGroups } from "@/components/ui/context-actions";
 import { ConversationLibraryGroup, ConversationLibraryLayout } from "@/conversation-layout";
+import { LibraryBatchMoveDialog, type LibraryMoveItem, type LibraryMoveTarget } from "@/conversation-library-batch";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import { useConversationTranscriptExport } from "@/conversation-transcript-export";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
@@ -33,6 +34,7 @@ type ConversationLibraryEntry = {
 type ConversationLibrarySection = { id: string; projectId: string; name: string };
 type SectionChange = { type: "rename"; expectedName: string; name: string }
   | { type: "move"; neighborId: string; before: boolean };
+type BatchSelection = { projectId: string; items: LibraryMoveItem[] };
 type OrganizationChange =
   | { type: "pin"; pinned: boolean }
   | { type: "read"; unread: boolean }
@@ -256,6 +258,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const [forking, setForking] = useState<ConversationLibraryEntry>();
   const [sectionConversation, setSectionConversation] = useState<ConversationIdentity>();
   const [renamingSection, setRenamingSection] = useState<ConversationLibrarySection>();
+  const [batch, setBatch] = useState<BatchSelection>();
+  const [showBatchDialog, setShowBatchDialog] = useState(false);
   const [notice, setNotice] = useState("");
   const exportTranscript = useConversationTranscriptExport(setNotice);
   const list = useConversationLibrary(query, projectId, true, archived);
@@ -298,6 +302,17 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     },
     onError: () => { void client.invalidateQueries({ queryKey: sectionKey }); },
   });
+  const moveBatch = useMutation({
+    mutationFn: (request: { projectId: string; sectionId: string | null; selection: LibraryMoveTarget[] }) =>
+      invoke<number>("move_conversations_to_library_section", request),
+    onSuccess: async (moved) => {
+      await client.invalidateQueries({ queryKey: conversationLibraryKey });
+      setShowBatchDialog(false);
+      setBatch(undefined);
+      setNotice(moved === 1 ? "Moved 1 conversation." : `Moved ${moved} conversations.`);
+    },
+    onError: () => { void client.invalidateQueries({ queryKey: conversationLibraryKey }); },
+  });
   const registered = useQuery({
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
@@ -307,6 +322,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   ]));
   const error = open.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
     (!sectionConversation ? organize.error : undefined) ?? (!renamingSection ? organizeSection.error : undefined);
+  const groups = libraryGroups(list.data ?? [], sections.data ?? [], projects, projectId === null, archived, !query.trim() && !archived);
 
   function restoreLibraryFocus(event: Event, selector: string, matches: (element: HTMLElement) => boolean) {
     const library = libraryRef.current;
@@ -315,7 +331,24 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     if (target) { event.preventDefault(); target.focus(); }
   }
 
-  function sectionActions(section?: ConversationLibrarySection): MenuGroups | undefined {
+  function selectForMove(entries: readonly ConversationLibraryEntry[]) {
+    const projectId = entries[0]?.checkout.projectId;
+    if (!projectId || (batch && batch.projectId !== projectId)) return;
+    setNotice("");
+    setBatch((current) => {
+      if (current && current.projectId !== projectId) return current;
+      const items = new Map(current?.items.map((item) => [item.conversationId, item]));
+      for (const { conversation, checkout, organization } of entries) {
+        if (checkout.projectId === projectId && !items.has(conversation.id)) {
+          items.set(conversation.id, { title: conversation.title, checkoutId: conversation.checkoutId, worktree: checkout.checkoutRoot,
+            conversationId: conversation.id, expectedSectionId: organization.section?.id ?? null });
+        }
+      }
+      return { projectId, items: [...items.values()] };
+    });
+  }
+
+  function sectionActions(entries: readonly ConversationLibraryEntry[], section?: ConversationLibrarySection): MenuGroups | undefined {
     if (!section) return;
     const siblings = sections.data?.filter(({ projectId }) => projectId === section.projectId) ?? [];
     const index = siblings.findIndex(({ id }) => id === section.id);
@@ -334,7 +367,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       { label: "Move section down", disabled: pending || !neighborAfter, run: () => {
         if (neighborAfter) organizeSection.mutate({ section, change: { type: "move", neighborId: neighborAfter.id, before: false } });
       } },
-    ]];
+    ], [{ label: "Select visible conversations to move…", disabled: !entries.length || Boolean(batch && batch.projectId !== section.projectId),
+      run: () => selectForMove(entries) }]];
   }
 
   function rowAction(action: ConversationAction, entry: ConversationLibraryEntry, sectionId?: string) {
@@ -345,6 +379,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     if (action === "fork") setForking(entry);
     if (action === "export-markdown") exportTranscript.mutate(conversation);
     if (action === "rename") setRenaming(conversation);
+    if (action === "select-to-move") selectForMove([entry]);
     if (action === "new-section") {
       organize.reset();
       setSectionConversation(conversation);
@@ -364,27 +399,35 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   }
 
   return <ConversationLibraryLayout sectionRef={libraryRef} query={query} searchLabel="Search conversation titles" onQuery={setQuery}
-    onCreate={() => { setArchived(false); setQuery(""); setProjectId(checkout.projectId); onStart(); }} creating={startPending} filters={<>
+    onCreate={() => { setBatch(undefined); setArchived(false); setQuery(""); setProjectId(checkout.projectId); onStart(); }} creating={startPending} filters={<>
       <select className="conv-select conv-project-filter" aria-label="Project" value={projectId ?? ""}
-        onChange={(event) => setProjectId(event.currentTarget.value || null)}>
+        onChange={(event) => { setBatch(undefined); setProjectId(event.currentTarget.value || null); }}>
         <option value="">All projects</option>
         {[...projects].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select>
       <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
-        title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
-    </>}>
+        title="Archived" onClick={() => { setBatch(undefined); setArchived(!archived); }}><Archive aria-hidden /></button>
+    </>} tools={batch && <div role="group" aria-label="Conversation selection" className="flex flex-wrap items-center gap-1 py-1">
+      <span role="status" className="pl-1 text-xs text-muted-foreground">{batch.items.length} selected</span>
+      <button type="button" className="conv-quiet-button" disabled={!batch.items.length} onClick={() => {
+        moveBatch.reset();
+        setShowBatchDialog(true);
+      }}>Move selected conversations…</button>
+      <button type="button" className="conv-quiet-button" onClick={() => setBatch(undefined)}>Cancel selection</button>
+    </div>}>
     {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
     {list.isPending && <p role="status" className="conv-sidebar-note">Loading conversations…</p>}
-    {list.data?.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
+    {list.data?.length === 0 && groups.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
       : query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
-    {libraryGroups(list.data ?? [], sections.data ?? [], projects, projectId === null, archived, !query.trim() && !archived)
-      .map(({ id, title, section, entries }) =>
-      <ConversationLibraryGroup key={id} title={title} sectionId={section?.id} actions={sectionActions(section)}>
+    {groups.map(({ id, title, section, entries }) =>
+      <ConversationLibraryGroup key={id} title={title} sectionId={section?.id} actions={sectionActions(entries, section)}>
         {!entries.length && <li className="conv-sidebar-note">No conversations in this section.</li>}
         {entries.map((entry) => {
           const { conversation, organization } = entry;
           const metadataId = `library-metadata-${conversation.id}`;
           const unreadId = `library-unread-${conversation.id}`;
+          const batchProject = batch?.projectId === entry.checkout.projectId;
+          const selected = Boolean(batchProject && batch?.items.some(({ conversationId }) => conversationId === conversation.id));
           return <li key={conversation.id}>
             {renaming?.id === conversation.id
               ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
@@ -396,8 +439,14 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                   (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
                   (action === "fork" && !openFork.isPending) ||
                   (action === "export-markdown" && !exportTranscript.isPending) ||
+                  (action === "select-to-move" && (!batch || batchProject) && !selected) ||
                   (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
                 onAction={(action, sectionId) => rowAction(action, entry, sectionId)}>
+                {batchProject && <input type="checkbox" className="ml-2 shrink-0 accent-primary" aria-label={`Select ${conversation.title}`}
+                  checked={selected} onChange={({ currentTarget }) => {
+                    if (currentTarget.checked) selectForMove([entry]);
+                    else setBatch((current) => current && ({ ...current, items: current.items.filter(({ conversationId }) => conversationId !== conversation.id) }));
+                  }} />}
                 <button type="button" className="conv-session-button items-start" disabled={open.isPending}
                   data-conversation-id={conversation.id} aria-description={organization.unread ? "Unread" : undefined}
                   aria-label={conversation.title} aria-describedby={organization.unread ? `${unreadId} ${metadataId}` : metadataId}
@@ -429,6 +478,12 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       onSave={(name) => organizeSection.mutate({ section: renamingSection, change: { type: "rename", expectedName: renamingSection.name, name } })}
       onClose={() => { setRenamingSection(undefined); organizeSection.reset(); }}
       restoreFocus={(event) => restoreLibraryFocus(event, "[data-library-section-id]", ({ dataset }) => dataset.librarySectionId === renamingSection.id)} />}
+    {batch && showBatchDialog && <LibraryBatchMoveDialog items={batch.items}
+      sections={(sections.data ?? []).filter(({ projectId }) => projectId === batch.projectId)} busy={moveBatch.isPending} error={moveBatch.error}
+      onClose={() => { setShowBatchDialog(false); moveBatch.reset(); }}
+      onMove={(sectionId) => moveBatch.mutate({ projectId: batch.projectId, sectionId,
+        selection: batch.items.map(({ checkoutId, conversationId, expectedSectionId }) => ({ checkoutId, conversationId, expectedSectionId })) })}
+      restoreFocus={(event) => restoreLibraryFocus(event, "[data-conversation-id]", ({ dataset }) => dataset.conversationId === batch.items[0]?.conversationId)} />}
   </ConversationLibraryLayout>;
 }
 

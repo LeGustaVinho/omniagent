@@ -42,8 +42,8 @@ pub use continuation::{
 };
 pub use history::ConversationHistoryInspection;
 pub use library::{
-    ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
-    ConversationLibrarySectionChange,
+    ConversationLibraryChange, ConversationLibraryEntry, ConversationLibraryMoveTarget,
+    ConversationLibrarySection, ConversationLibrarySectionChange,
 };
 pub use reference_delivery::SubmittedConversationReference;
 

@@ -77,7 +77,8 @@ function repository(archiveMessages: MessageRevision[] = []) {
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       checkoutId?: string; conversationId?: string; title?: string; query?: string; projectId?: string;
-      archived?: boolean; sectionId?: string;
+      archived?: boolean; sectionId?: string | null;
+      selection?: { conversationId: string; checkoutId: string; expectedSectionId: string | null }[];
       change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string;
         expectedName?: string; neighborId?: string; before?: boolean };
       workspace?: string; layout?: string; runId?: string; after?: string; text?: string; choice?: string;
@@ -127,6 +128,23 @@ function repository(archiveMessages: MessageRevision[] = []) {
           sections[index] = neighbor;
         }
         return;
+      }
+      case "move_conversations_to_library_section": {
+        const destination = sections.find(({ id, projectId }) => id === input.sectionId && projectId === input.projectId) ?? null;
+        if (input.sectionId && !destination) throw new Error("Section does not belong to this project");
+        const selection = input.selection!;
+        for (const { conversationId, checkoutId, expectedSectionId } of selection) {
+          const entry = summaries.find(({ id }) => id === conversationId);
+          if (entry?.checkout.checkoutId !== checkoutId || entry.checkout.projectId !== input.projectId) throw new Error("Wrong worktree scope");
+          if ((getOrganization(conversationId).section?.id ?? null) !== expectedSectionId) throw new Error("Changed membership");
+        }
+        let moved = 0;
+        for (const { conversationId, expectedSectionId } of selection) {
+          if (expectedSectionId === input.sectionId) continue;
+          organization.set(conversationId, { ...getOrganization(conversationId), section: destination });
+          moved++;
+        }
+        return moved;
       }
       case "export_conversation_markdown":
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong export scope");
@@ -582,6 +600,56 @@ it("renames and reorders a saved section, including empty sections, without chan
   await screen.findByRole("region", { name: "Beta" });
   expect(order()).toEqual(["Conversations", "Beta", "Zulu"]);
   expect(within(library().getByRole("region", { name: "Beta" })).getByRole("button", { name: original })).toBeTruthy();
+});
+
+it("moves a reviewed selection in one project from row and section context menus", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
+  fireEvent.contextMenu(await library().findByRole("button", { name: original }));
+  const submenu = await screen.findByRole("menuitem", { name: "Section" });
+  submenu.focus();
+  await user.keyboard("{ArrowRight}");
+  await user.click(await screen.findByRole("menuitem", { name: "New section…" }));
+  const create = within(await screen.findByRole("dialog", { name: "Create section" }));
+  await user.type(create.getByRole("textbox", { name: "Section name" }), "Triage");
+  await user.click(create.getByRole("button", { name: "Save" }));
+  await screen.findByRole("region", { name: "Launch · Triage" });
+
+  fireEvent.contextMenu(library().getByRole("button", { name: "Live handoff" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Select conversations to move…" }));
+  expect((library().getByRole("checkbox", { name: "Select Live handoff" }) as HTMLInputElement).checked).toBe(true);
+  expect(library().queryByRole("checkbox", { name: "Select Audit details" })).toBeNull();
+  await user.click(library().getByRole("checkbox", { name: `Select ${original}` }));
+  await user.click(library().getByRole("button", { name: "Move selected conversations…" }));
+  const review = within(await screen.findByRole("dialog", { name: "Move selected conversations" }));
+  expect(review.getByText("2 selected")).toBeTruthy();
+  expect(review.getByText(original)).toBeTruthy();
+  expect(review.getByText("Live handoff")).toBeTruthy();
+  expect(review.queryByRole("option", { name: "Audit only" })).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("move_conversations_to_library_section", expect.anything());
+  await user.selectOptions(review.getByRole("combobox", { name: "Destination section" }), "section-2");
+  await user.click(review.getByRole("button", { name: "Move" }));
+  const inSection = within(await screen.findByRole("region", { name: "Launch · Triage" }));
+  expect(inSection.getByRole("button", { name: "Live handoff" })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("move_conversations_to_library_section", {
+    projectId: selected.projectId, sectionId: "section-2", selection: [
+      { checkoutId: selected.checkoutId, conversationId: liveId, expectedSectionId: null },
+      { checkoutId: selected.checkoutId, conversationId: archiveId, expectedSectionId: "section-2" },
+    ],
+  });
+
+  fireEvent.contextMenu(inSection.getByRole("heading", { name: "Launch · Triage" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Select visible conversations to move…" }));
+  expect(library().getByText("2 selected")).toBeTruthy();
+  await user.click(library().getByRole("button", { name: "Move selected conversations…" }));
+  const remove = within(await screen.findByRole("dialog", { name: "Move selected conversations" }));
+  await user.selectOptions(remove.getByRole("combobox", { name: "Destination section" }), "");
+  await user.click(remove.getByRole("button", { name: "Move" }));
+  expect(await screen.findByText("Moved 2 conversations.")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Launch · Triage" })).getByText("No conversations in this section.")).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
 });
 
 it("exports the clicked conversation using its actual checkout, including from Archived", async () => {

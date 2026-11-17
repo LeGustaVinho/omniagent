@@ -2,8 +2,8 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{
         Conversation, ConversationHistory, ConversationHistoryInspection,
-        ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
-        ConversationLibrarySectionChange, SessionScope,
+        ConversationLibraryChange, ConversationLibraryEntry, ConversationLibraryMoveTarget,
+        ConversationLibrarySection, ConversationLibrarySectionChange, SessionScope,
     },
     diagnostics,
     dispatch::{ConversationArtifactRevision, ConversationSelection, QueuedSummary},
@@ -164,6 +164,19 @@ pub async fn organize_conversation_library_section(
 ) -> Result<(), String> {
     store
         .organize_conversation_library_section(project_id, section_id, change)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn move_conversations_to_library_section(
+    store: State<'_, Store>,
+    project_id: String,
+    section_id: Option<String>,
+    selection: Vec<ConversationLibraryMoveTarget>,
+) -> Result<usize, String> {
+    store
+        .move_conversations_to_library_section(project_id, section_id, selection)
         .await
         .map_err(ui_error)
 }

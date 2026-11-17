@@ -10,6 +10,9 @@ use crate::{repository::ProjectCheckout, store::Store};
 
 use super::Conversation;
 
+mod batch;
+pub use batch::ConversationLibraryMoveTarget;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationLibraryEntry {

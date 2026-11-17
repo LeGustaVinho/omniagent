@@ -58,7 +58,7 @@ export function ConversationSidePanel({ label, onKeyDown, children }: {
     resizeKey="conversation-side-panel" resizeLabel={label} onKeyDown={onKeyDown}>{children}</ResizablePanel>;
 }
 
-export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, filters, children }: {
+export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, filters, tools, children }: {
   sectionRef?: Ref<HTMLElement>;
   className?: string;
   query: string;
@@ -67,6 +67,7 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
   onCreate: () => void;
   creating?: boolean;
   filters?: ReactNode;
+  tools?: ReactNode;
   children: ReactNode;
 }) {
   return <section ref={sectionRef} className={`conv-sessions conv-library-frame${className ? ` ${className}` : ""}`} aria-label="Conversation library">
@@ -80,6 +81,7 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
         onChange={(event) => onQuery(event.currentTarget.value)} />
     </label>
     {filters && <div className="conv-library-options">{filters}</div>}
+    {tools}
     <div className="conv-library-entries">{children}</div>
   </section>;
 }
