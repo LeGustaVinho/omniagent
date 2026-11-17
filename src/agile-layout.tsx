@@ -1,6 +1,7 @@
 import { LayoutGrid, List, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { createContext, useContext, useRef, type ComponentProps, type CSSProperties, type ReactNode, type Ref } from "react";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { DeliveryStatus } from "@/tasks-git-ui";
 import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
@@ -54,25 +55,29 @@ export function AgileSearch({ label, value, onChange }: { label: string; value: 
   </label>;
 }
 
-export function AgileKanbanColumn({ label, count, over, nodeRef, children }: {
-  label: string; count: number; over: boolean; nodeRef: Ref<HTMLElement>; children: ReactNode;
+export function AgileKanbanColumn({ label, count, over, nodeRef, children, menu = [] }: {
+  label: string; count: number; over: boolean; nodeRef: Ref<HTMLElement>; children: ReactNode; menu?: MenuGroups;
 }) {
   return <section ref={nodeRef} className="delivery-column" aria-label={label} data-over={over}>
     <header className="agile-column-heading">
-      <DeliveryStatus>{label}</DeliveryStatus>
-      <span className="agile-column-count">{count}</span>
+      <ContextActions label={`${label} column`} groups={menu} className="agile-column-menu">
+        <DeliveryStatus>{label}</DeliveryStatus>
+        <span className="agile-column-count">{count}</span>
+      </ContextActions>
     </header>
     {children}
   </section>;
 }
 
-export function AgileWorkCard({ title, identity, selected, dragging, nodeRef, style, onOpen, handle, children }: {
+export function AgileWorkCard({ title, identity, selected, dragging, nodeRef, style, onOpen, handle, children, menu = [] }: {
   title: string; identity: string; selected: boolean; dragging: boolean; nodeRef: Ref<HTMLElement>;
-  style?: CSSProperties; onOpen: () => void; handle?: ReactNode; children: ReactNode;
+  style?: CSSProperties; onOpen: () => void; handle?: ReactNode; children: ReactNode; menu?: MenuGroups;
 }) {
   return <article ref={nodeRef} style={style} className="delivery-card agile-work-card" data-selected={selected} data-dragging={dragging}>
     <div className="agile-work-card-meta"><small>{identity}</small>{handle}</div>
-    <button type="button" className="agile-work-card-title" aria-pressed={selected} onClick={onOpen}>{title}</button>
+    <ContextActions label={title} groups={menu}>
+      <button type="button" className="agile-work-card-title" aria-pressed={selected} onClick={onOpen}>{title}</button>
+    </ContextActions>
     <div className="agile-work-card-content">{children}</div>
   </article>;
 }

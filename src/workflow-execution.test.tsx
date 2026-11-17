@@ -3,7 +3,7 @@
 import { useState, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -23,9 +23,11 @@ vi.mock("@xyflow/react", async (original) => {
     Handle: ({ id }: { id: string }) => <span data-port={id} />,
     Controls: () => null,
     Background: () => null,
-    ReactFlow: ({ nodes, nodeTypes, onNodeClick }: {
+    ReactFlow: ({ nodes, nodeTypes, onNodeClick, onNodeContextMenu }: {
       nodes: CanvasNode[]; nodeTypes: { execution: ComponentType<CanvasNode> }; onNodeClick: (event: unknown, node: CanvasNode) => void;
-    }) => <div>{nodes.map((node) => <button type="button" key={node.id} aria-label={node.ariaLabel} onClick={() => onNodeClick(undefined, node)}>
+      onNodeContextMenu?: (event: React.MouseEvent, node: CanvasNode) => void;
+    }) => <div>{nodes.map((node) => <button type="button" key={node.id} aria-label={node.ariaLabel} onClick={() => onNodeClick(undefined, node)}
+      onContextMenu={(event) => onNodeContextMenu?.(event, node)}>
       <nodeTypes.execution {...node} />
     </button>)}</div>,
   };
@@ -122,6 +124,26 @@ it("opens the real Builder from the Runs empty state", async () => {
   await runs.findByRole("heading", { name: "No runs yet" });
   await userEvent.setup().click(runs.getByRole("button", { name: "Open builder" }));
   expect(openWorkspace).toHaveBeenCalledWith("pipelines", "drafts");
+});
+
+it("navigates from the context of the clicked saved run", async () => {
+  vi.mocked(invoke).mockResolvedValue([
+    { id: "older-execution", projectId, planRevision: null, version: { ...version, revision: "earlier" } },
+    { id: runId, projectId, planRevision: "exact-plan", version },
+  ]);
+  const openWorkspace = vi.fn();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} target="runs" simulation={null} startSimulation={vi.fn()}
+      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  const list = within(await screen.findByRole("region", { name: "Saved workflow runs" }));
+  fireEvent.contextMenu(list.getByRole("button", { name: /^workflow-original/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy plan revision" }));
+  expect(await navigator.clipboard.readText()).toBe("exact-plan");
+  fireEvent.contextMenu(list.getByRole("button", { name: /^older-execution/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Open execution graph" }));
+  expect(openWorkspace).toHaveBeenCalledExactlyOnceWith("pipelines", "run:older-execution");
 });
 
 it("hands selected saved responses to the exact plan review and queues only after user confirmation", async () => {
@@ -516,6 +538,12 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(inspector.getByText("plan needs planner.plan")).toBeTruthy();
   await user.click(inspector.getByText(/Earlier control decision · skipped/));
   expect(inspector.getByText("Earlier revision outcome")).toBeTruthy();
+  fireEvent.contextMenu(graph.getByRole("button", { name: "Historical plan · Failed" }));
+  const attemptActions = await screen.findByRole("menuitem", { name: "Inspect attempt" });
+  attemptActions.focus();
+  await user.keyboard("{ArrowRight}");
+  await user.click(await screen.findByRole("menuitem", { name: "Attempt 2 · attempt-retry" }));
+  expect(props.openActivity).toHaveBeenCalledWith("attempt-retry", "retry-conversation");
   await user.click(graph.getByRole("button", { name: "Historical plan · Failed" }));
   expect(await inspector.findByText(/Permitted recovery · Retry saved input/)).toBeTruthy();
   await waitFor(() => expect(inspector.getAllByText("The structured result failed validation.")).toHaveLength(2));

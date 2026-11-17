@@ -169,6 +169,200 @@ function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
 
+it("adds only the selected unsaved Markdown to an existing conversation draft", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const openWorkspace = vi.fn();
+  const conversationId = "selected-conversation";
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "list_conversations") {
+      expect(args).toEqual({ checkoutId });
+      return [{ id: conversationId, title: "Existing conversation" }];
+    }
+    if (command === "append_checkout_context_to_conversation") return;
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  const quote = "Working text from the unsaved buffer.";
+  const offset = view.state.doc.length + 1;
+  act(() => view.dispatch({ changes: { from: offset - 1, insert: `\n${quote}` }, selection: { anchor: offset, head: offset + quote.length } }));
+  const line = view.state.doc.lineAt(offset).number;
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  await user.click(screen.getByRole("menuitem", { name: "Add selection to conversation…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(dialog.getByLabelText("Selected text").textContent).toBe(quote);
+  await dialog.findByRole("option", { name: "Existing conversation" });
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Conversation" }), conversationId);
+  expect(ipc).not.toHaveBeenCalledWith("append_checkout_context_to_conversation", expect.anything());
+  await user.click(dialog.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("conversations", conversationId));
+  expect(ipc).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+    checkoutId, conversationId, context: `Source: ${release}:${line}\n\n\`\`\`markdown\n${quote}\n\`\`\``,
+  });
+  expect(ipc.mock.calls.some(([command]) => /send_conversation|submit_turn/.test(command))).toBe(false);
+});
+
+
+it("reviews an exact dirty selection, preserves it on collision, and opens the extracted note on retry", async () => {
+  const fixture = mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const extracted = "notes/Release excerpt.md";
+  const picked = "🙂 scope\n";
+  const prefix = releaseSource + "\n" + picked;
+  const markdown = prefix + picked + "\nNext paragraph.";
+  const replacement = prefix + "[Release excerpt](Release%20excerpt.md)\n\nNext paragraph.";
+  let published = false;
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "list_checkout_folders") return ["notes"];
+    if (command === "extract_repository_note_selection") {
+      const draft = fixture.drafts.get(release);
+      expect(draft?.markdown).toBe(markdown);
+      expect(args).toEqual({
+        checkoutId,
+        request: {
+          path: release, baseRevision: "release-1", fileIdentity: release, expectedDraftRevision: draft?.revision,
+          from: prefix.length, to: prefix.length + picked.length, selectedText: picked,
+          relativeDirectory: "notes", name: "Release excerpt.md", replaceWithLink: true,
+        },
+      });
+      if (!published) {
+        published = true;
+        throw new Error("A note with that name already exists");
+      }
+      fixture.drafts.set(release, { base: draft!.base, revision: "extraction-draft", markdown: replacement });
+      return { path: extracted, replacement: { markdown: replacement, draftRevision: "extraction-draft" } };
+    }
+    if (command === "open_repository_document" && (args as { path: string }).path === extracted) {
+      return { status: "document", document: documentAt(extracted, "extracted-1", picked) };
+    }
+    if (command === "watch_repository_note" && (args as { baseRevision: string }).baseRevision === "extracted-1") {
+      return "watch-extracted";
+    }
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  act(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: markdown },
+    selection: { anchor: prefix.length, head: prefix.length + picked.length } }));
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  await user.click(screen.getByRole("menuitem", { name: "Extract selection to a new note…" }));
+
+  const dialog = within(await screen.findByRole("dialog", { name: "Extract selection to a new note" }));
+  expect(dialog.getByLabelText("Selected Markdown").textContent).toBe(picked);
+  expect((dialog.getByRole("combobox", { name: "Destination folder" }) as HTMLSelectElement).value).toBe("notes");
+  const checkbox = dialog.getByRole("checkbox", { name: "Replace selection with a link in the source draft" }) as HTMLInputElement;
+  expect(checkbox.checked).toBe(false);
+  await user.type(dialog.getByRole("textbox", { name: "New note name" }), "Release excerpt");
+  await user.click(checkbox);
+  const extract = dialog.getByRole("button", { name: "Extract selection" });
+  await user.click(extract);
+  expect((await dialog.findByRole("alert")).textContent).toContain("A note with that name already exists");
+  expect(view.state.doc.toString()).toBe(markdown);
+  expect(fixture.drafts.get(release)?.markdown).toBe(markdown);
+
+  await user.click(extract);
+  const nextView = await editor(extracted);
+  expect(nextView.state.doc.toString()).toBe(picked);
+  expect(fixture.drafts.get(release)?.markdown).toBe(replacement);
+  expect(fixture.writes).not.toHaveBeenCalled();
+});
+
+it("refuses extraction if the source buffer changes while reviewing the selection", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  act(() => view.dispatch({ selection: { anchor: 0, head: view.state.doc.line(1).to } }));
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  await user.click(screen.getByRole("menuitem", { name: "Extract selection to a new note…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Extract selection to a new note" }));
+  await user.type(dialog.getByRole("textbox", { name: "New note name" }), "Release excerpt");
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Additional text." } }));
+  await user.click(dialog.getByRole("button", { name: "Extract selection" }));
+  expect((await dialog.findByRole("alert")).textContent).toContain("select the passage again");
+  expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("extract_repository_note_selection", expect.anything());
+  expect(view.state.doc.toString()).toBe(releaseSource + "Additional text.");
+});
+
+
+it("previews a note merge and reports the exact remaining drafts when a reviewed save conflicts", async () => {
+  const fixture = mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const refPath = "notes/Reference.md";
+  const refText = "[Keep my label](Release.md)\n";
+  const ref = documentAt(refPath, "reference-1", refText);
+  fixture.externalChange(ref);
+  const merged = checklistSource + "\n" + releaseSource;
+  const sourceRedirect = "Merged into [Checklist](Checklist.md).\n";
+  const definitions = [
+    { ...documentAt(checklist, "checklist-1", checklistSource), after: merged },
+    { ...ref, after: "[Keep my label](Checklist.md)\n" },
+    { ...documentAt(release, "release-1", releaseSource), after: sourceRedirect },
+  ];
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "list_checkout_folders") return ["notes"];
+    if (command === "preview_markdown_merge") {
+      expect(args).toEqual({ checkoutId, source: release, destination: checklist });
+      return { id: "reviewed-merge", source: release, destination: checklist,
+        mergedMarkdown: merged, sourceRedirect, warnings: [],
+        files: definitions.map(({ revision }) => ({ path: revision.relativePath, revisionId: revision.id })),
+        references: [{ path: refPath, edits: [{ line: 1, before: "Release.md", after: "Checklist.md" }] }],
+      };
+    }
+    if (command === "stage_markdown_merge") {
+      expect(args).toEqual({ checkoutId, previewId: "reviewed-merge" });
+      return definitions.map(({ revision, after }, index) => {
+        const draft = { base: revision, revision: "merge-draft-" + index, markdown: after };
+        fixture.drafts.set(revision.relativePath, draft);
+        return draft;
+      });
+    }
+    if (command === "save_repository_document" && (args as { path: string }).path === refPath) {
+      fixture.raceNextSave({
+        document: documentAt(refPath, "reference-external", "Concurrent edit to the reference."),
+        recovery: { message: "The reviewed reference changed", editedPath: "C:\\recover\\reference", displacedPath: "C:\\recover\\external" },
+      });
+    }
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "Reveal file Release.md" }));
+  await user.click(screen.getByRole("menuitem", { name: "Merge into another note…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Merge notes" }));
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Destination note" }), checklist);
+  await user.click(dialog.getByRole("button", { name: "Review merge" }));
+  const review = within(await screen.findByRole("dialog", { name: "Review note merge" }));
+  const rewrites = within(review.getByRole("list", { name: "Reference rewrites" }));
+  expect(rewrites.getByText("Release.md").textContent).toBe("Release.md");
+  expect(rewrites.getByText("Checklist.md").textContent).toBe("Checklist.md");
+  expect(fixture.writes).not.toHaveBeenCalled();
+  expect(fixture.drafts.size).toBe(0);
+  await user.click(review.getByRole("button", { name: "Merge and save" }));
+  const report = within(await screen.findByRole("dialog", { name: "Merge result" }));
+  expect(report.getByRole("list", { name: "Saved notes" }).textContent).toContain(checklist);
+  const pending = within(report.getByRole("list", { name: "Pending merge drafts" }));
+  expect(pending.getByRole("button", { name: refPath })).toBeTruthy();
+  expect(pending.getByRole("button", { name: release })).toBeTruthy();
+  expect(fixture.writes.mock.calls.map(([input]) => input.path)).toEqual([checklist, refPath]);
+  expect(fixture.drafts.get(release)?.markdown).toBe(sourceRedirect);
+  expect(fixture.drafts.get(refPath)?.markdown).toBe(definitions[1]!.after);
+});
+
 it("starts Plan Mode delivery from the reviewed note revision and opens only its real linked Task", async () => {
   mockRepository();
   const ipc = vi.mocked(invoke);

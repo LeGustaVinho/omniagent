@@ -13,7 +13,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 import type { ExampleFile } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
-import { parseWiki, type NoteTarget } from "@/knowledge-document";
+import { headings, markdownNoteLink, parseReadingFile, parseWiki, readingLocalAddress, type NoteTarget } from "@/knowledge-document";
+import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteContextHit } from "@/knowledge-context";
+import { useFileEditorDocument } from "@/file-editor-popout";
+import { noteAttachmentCandidates } from "@/repository-note-media";
 import { insertListItem, insertTable, toggleTaskCheckbox } from "@/knowledge-source-commands";
 
 export interface NoteJump {
@@ -38,13 +41,14 @@ const editorTheme = EditorView.theme({
 });
 
 class ConcealedWiki extends WidgetType {
-  constructor(readonly label: string, readonly target: string) { super(); }
-  eq(other: ConcealedWiki) { return other.label === this.label && other.target === this.target; }
+  constructor(readonly label: string, readonly target: string, readonly start: number) { super(); }
+  eq(other: ConcealedWiki) { return other.label === this.label && other.target === this.target && other.start === this.start; }
   toDOM() {
     const label = document.createElement("span");
     label.className = "cm-note-link";
     label.textContent = this.label;
     label.title = "Ctrl+click to follow " + this.target;
+    label.dataset.noteOffset = String(this.start);
     return label;
   }
   ignoreEvent() { return false; }
@@ -81,7 +85,7 @@ function liveDecorations(view: EditorView) {
           if (isActive(from, to)) continue;
           const link = parseWiki(match[2], match[1] === "!");
           hidden.push({ from, to });
-          marks.push(Decoration.replace({ widget: new ConcealedWiki(link.alias ?? (link.target || link.anchor || link.raw), link.raw) }).range(from, to));
+          marks.push(Decoration.replace({ widget: new ConcealedWiki(link.alias ?? (link.target || link.anchor || link.raw), link.raw, from) }).range(from, to));
         }
         const marker = /^\s*[-+*]\s+\[([ xX])\]/.exec(line.text);
         if (marker && !isActive(line.from, line.from + marker[0].length)) {
@@ -126,6 +130,10 @@ type SyntaxNode = {
   checked?: boolean;
   valueRange?: SourceRange;
   level?: number;
+  text?: string;
+  id?: string;
+  name?: string;
+  language?: string;
 };
 type CanonicalSyntax = { bufferRevision: string; nodes: SyntaxNode[] };
 const analyzed = StateEffect.define<CanonicalSyntax>();
@@ -163,7 +171,7 @@ function canonicalDecorations(view: EditorView): DecorationSet {
     if (active) continue;
     if (node.kind === "wikilink" || node.kind === "embed") {
       const label = node.alias || node.target || node.anchor || "";
-      if (label) decorations.push(Decoration.replace({ widget: new ConcealedWiki(label, node.target ?? label) }).range(from, to));
+      if (label) decorations.push(Decoration.replace({ widget: new ConcealedWiki(label, node.target ?? label, from) }).range(from, to));
     } else if (node.kind === "task_marker" && node.valueRange && [" ", "x", "X"].includes(node.status ?? "")) {
       decorations.push(Decoration.replace({ widget: new TaskMarker(Boolean(node.checked), node.valueRange.from) }).range(from, to));
     } else {
@@ -188,7 +196,73 @@ const canonicalLivePreview = ViewPlugin.fromClass(class {
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false, suggestLinks }: {
+function noteContextAt(editor: EditorView, path: string, offset: number): NoteContextHit {
+  const { state } = editor;
+  const doc = state.doc;
+  const line = doc.lineAt(offset);
+  const nodes = state.field(canonicalSyntax)?.nodes;
+  const inside = ({ range }: SyntaxNode) => range.from <= offset && offset <= range.to;
+  const link = nodes?.find((node) => ["wikilink", "embed", "link", "image"].includes(node.kind) && inside(node));
+  const heading = nodes?.find((node) => node.kind === "heading" && inside(node));
+  const block = nodes?.find((node) => node.kind === "block_id" && node.range.from >= line.from && node.range.to <= line.to);
+  const tag = nodes?.find((node) => node.kind === "tag" && inside(node));
+  const mermaid = nodes?.find((node) => node.kind === "code_block" && node.language?.toLowerCase() === "mermaid" && inside(node))?.text;
+  const hit: NoteContextHit = { path, line: line.number, anchor: heading?.text || (block?.id ? `^${block.id}` : undefined), tag: tag?.name, mermaid };
+  if (link) {
+    const sourceLine = doc.lineAt(link.range.from).number;
+    if (link.kind === "wikilink" || link.kind === "embed") {
+      hit.link = { target: link.target ?? "", alias: link.alias ?? undefined, anchor: link.anchor ?? undefined,
+        raw: state.sliceDoc(link.range.from, link.range.to).replace(/^!?\[\[|\]\]$/g, ""), embed: link.kind === "embed",
+        sourcePath: path, sourceLine, sourceOffset: link.range.from, syntax: "wiki" };
+    } else if (link.target) {
+      const reference = markdownNoteLink(path, link.target, sourceLine);
+      if (reference) hit.link = { ...reference, sourceOffset: link.range.from,
+        editableInline: /\]\(/.test(state.sliceDoc(link.range.from, link.range.to)) };
+      const file = parseReadingFile(readingLocalAddress(path, link.target));
+      const paths = file && noteAttachmentCandidates(file[1], file[0], false);
+      if (paths?.length) hit.attachment = { paths, label: link.text || file![1] };
+    }
+  } else if (!nodes) {
+    const tree = syntaxTree(state);
+    const syntax = tree.resolveInner(offset, 1);
+    const isCode = (node: typeof syntax): boolean => /^(?:FencedCode|CodeBlock|CodeText|InlineCode)$/.test(node.name) || Boolean(node.parent && isCode(node.parent));
+    if (!isCode(syntax)) {
+      for (const match of line.text.matchAll(/(?<!\\)(!?)\[\[([^\]]+)\]\]/g)) {
+        const start = line.from + match.index;
+        if (match[2] && offset >= start && offset <= start + match[0].length) {
+          hit.link = { ...parseWiki(match[2], match[1] === "!"), sourcePath: path, sourceLine: line.number, sourceOffset: start, syntax: "wiki" };
+          break;
+        }
+      }
+      if (!hit.link) {
+        for (let node: typeof syntax | null = syntax; node; node = node.parent) {
+          if (node.name !== "Link" && node.name !== "Image") continue;
+          const url = node.getChild("URL");
+          if (url) {
+            const destination = state.sliceDoc(url.from, url.to).replace(/^<|>$/g, "");
+            const reference = markdownNoteLink(path, destination, doc.lineAt(node.from).number);
+            if (reference) hit.link = { ...reference, sourceOffset: node.from, editableInline: /\]\(/.test(state.sliceDoc(node.from, node.to)) };
+            const file = parseReadingFile(readingLocalAddress(path, destination));
+            const paths = file && noteAttachmentCandidates(file[1], file[0], false);
+            if (paths?.length) hit.attachment = { paths, label: file![1] };
+          }
+          break;
+        }
+      }
+      if (!hit.link && !hit.attachment) hit.anchor = headings(doc.toString()).find((entry) => entry.line === line.number)?.anchor;
+    }
+  }
+  const { from, to } = state.selection.main;
+  if (from < to && offset >= from && offset <= to) {
+    const text = state.sliceDoc(from, to);
+    hit.excerpt = { path, text, startLine: doc.lineAt(from).number,
+      endLine: doc.lineAt(to - 1).number, language: "markdown" };
+    hit.selection = { from, to, text, source: doc.toString() };
+  }
+  return hit;
+}
+
+export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false, suggestLinks, contextActions }: {
   mode: "source" | "live";
   path: string;
   source: string;
@@ -198,22 +272,33 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   onLink: (link: NoteTarget) => void;
   analyze?: boolean;
   suggestLinks?: (prefix: string) => Promise<Completion[]>;
+  contextActions?: NoteContextActions;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<EditorView>(undefined);
+  const owner = useFileEditorDocument();
   const compartment = useRef(new Compartment()).current;
-  const fresh = useRef({ source, onChange, onLink, mode, files, analyze, suggestLinks });
+  const { open: openContextMenu, overlay } = useNoteContextMenu();
+  const fresh = useRef({ source, onChange, onLink, mode, files, analyze, suggestLinks, contextActions });
   const generation = useRef(0);
   const reflected = useRef(source);
   const updating = useRef(false);
-  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files, analyze, suggestLinks }; }, [source, onChange, onLink, mode, files, analyze, suggestLinks]);
+  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files, analyze, suggestLinks, contextActions }; }, [source, onChange, onLink, mode, files, analyze, suggestLinks, contextActions]);
 
   useEffect(() => {
     const target = mount.current;
     if (!target) return;
     reflected.current = fresh.current.source;
+    const show = (editor: EditorView, pos: number, point: { x: number; y: number }) => {
+      if (!fresh.current.contextActions) return false;
+      const hit = noteContextAt(editor, path, pos);
+      return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note source", fresh.current.contextActions(hit), point, () => {
+        if (editor.dom.isConnected && !editor.dom.closest("[hidden]")) editor.focus();
+      });
+    };
     const view = new EditorView({
       parent: target,
+      root: target.ownerDocument,
       state: EditorState.create({
         doc: fresh.current.source,
         extensions: [
@@ -253,6 +338,19 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
             fresh.current.onChange(next);
           }),
           EditorView.domEventHandlers({
+            contextmenu(event, editor) {
+              const target = event.target as Element | null;
+              const offset = target?.closest?.<HTMLElement>("[data-note-offset]")?.dataset.noteOffset;
+              const pos = offset === undefined ? editor.posAtCoords({ x: event.clientX, y: event.clientY }) : Number(offset);
+              return pos !== null && show(editor, pos, { x: event.clientX, y: event.clientY });
+            },
+            keydown(event, editor) {
+              if (!isContextKey(event)) return false;
+              const { main } = editor.state.selection;
+              const caret = editor.coordsAtPos(main.head);
+              const bounds = editor.dom.getBoundingClientRect();
+              return show(editor, main.head, { x: caret?.left ?? bounds.left, y: caret?.bottom ?? bounds.top });
+            },
             mousedown(event, editor) {
               if (!event.ctrlKey && !event.metaKey) return false;
               const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
@@ -286,7 +384,11 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     });
     instance.current = view;
     return () => { instance.current = undefined; view.destroy(); };
-  }, [compartment, path]);
+  }, [compartment, openContextMenu, path]);
+
+  useEffect(() => {
+    if (owner && instance.current?.root !== owner) instance.current?.setRoot(owner);
+  }, [owner]);
 
   useEffect(() => {
     instance.current?.dispatch({ effects: compartment.reconfigure(mode === "live" ? (analyze ? canonicalLivePreview : livePreview) : []) });
@@ -362,6 +464,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
         <button type="button" className="fw-icon" title="Insert code block" aria-label="Insert code block" onClick={insertCode}><Braces size={15} /></button>
       </div>
       <div className="note-editor-mount" ref={mount} />
+      {overlay}
     </div>
   );
 }

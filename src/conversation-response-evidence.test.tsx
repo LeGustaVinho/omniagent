@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -38,6 +38,9 @@ it("shows only an explicit final response as final and keeps the other observed 
   const final = within(screen.getByRole("list", { name: "Final responses" }));
   expect(final.getByText("Done.")).toBeTruthy();
   expect(final.queryByText("Checked the input")).toBeNull();
+  fireEvent.contextMenu(final.getByText("Done."));
+  await user.click(screen.getByRole("menuitem", { name: "Copy recorded response" }));
+  expect(await navigator.clipboard.readText()).toBe("Done.");
   await user.click(screen.getByText("Provisional and recorded responses"));
   const provisional = within(screen.getByRole("list", { name: "Provisional and recorded responses" }));
   expect(provisional.getByText("Checked the input")).toBeTruthy();

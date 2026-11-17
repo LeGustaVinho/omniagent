@@ -6,6 +6,7 @@ import type { SessionMode } from "@/bindings/SessionMode";
 import { capabilitySubjectLabel, type CapabilitySubject } from "@/capability-subject";
 import { SideCapabilityValidation, type SideValidationTarget } from "@/capability-side-validation";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 
 type WindowsVersion = { major: number; minor: number; build: number; revision: number; nativeArchitecture: number; server: boolean };
 type Result = "succeeded" | "failed";
@@ -61,17 +62,31 @@ function windowsVersion({ major, minor, build, revision, nativeArchitecture, ser
 }
 
 function RecordedCapabilities({ capabilities }: { capabilities: RecordedCapability[] }) {
+  const { copy, feedback } = useContextActionFeedback();
   if (!capabilities.length) return <p>No capability assessment recorded.</p>;
   return <details className="min-w-32">
     <summary>Recorded capabilities</summary>
     <ul className="grid max-w-72 gap-2 py-2 whitespace-normal [overflow-wrap:anywhere]" aria-label="Recorded capabilities">
-      {capabilities.map(({ subject, boundary, status, observed, evidence }) => <li key={JSON.stringify(subject)}>
-        <strong>{capabilitySubjectLabel(subject)} · {statuses[status]}</strong>
-        <div className="text-muted-foreground">{boundary === "exact_checkout" ? "Exact checkout" : "Equivalent configuration"}</div>
-        {observed && <div>Observed result · {observed}</div>}
-        {evidence && <div>{origins[evidence.origin]} · {evidence.result} · <time dateTime={evidence.checkedAt}>{displayDate.format(new Date(evidence.checkedAt))}</time></div>}
-      </li>)}
+      {capabilities.map(({ subject, boundary, status, observed, evidence }) => {
+        const capability = capabilitySubjectLabel(subject);
+        const title = `${capability} · ${statuses[status]}`;
+        const scope = boundary === "exact_checkout" ? "Exact checkout" : "Equivalent configuration";
+        return <li key={JSON.stringify(subject)}><ContextActions label={title} groups={[[
+          { label: "Copy capability assessment", run: () => copy([
+            title, scope, observed && `Observed result · ${observed}`,
+            evidence && `${origins[evidence.origin]} · ${evidence.result} · ${evidence.checkedAt}`,
+          ].filter(Boolean).join("\n")) },
+        ]]}>
+          <div className="min-w-0">
+            <strong>{title}</strong>
+            <div className="text-muted-foreground">{scope}</div>
+            {observed && <div>Observed result · {observed}</div>}
+            {evidence && <div>{origins[evidence.origin]} · {evidence.result} · <time dateTime={evidence.checkedAt}>{displayDate.format(new Date(evidence.checkedAt))}</time></div>}
+          </div>
+        </ContextActions></li>;
+      })}
     </ul>
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </details>;
 }
 
@@ -84,13 +99,33 @@ function RecordedValidation({ target }: { target: SideValidationTarget }) {
   </details>;
 }
 
-function profileRow(record: RecordedProfile): MatrixRow {
+function RecordedCli({ record }: { record: RecordedProfile }) {
+  const { copy, feedback } = useContextActionFeedback();
   const recordedAt = new Date(record.recordedAt * 1000);
+  const { runId, cliVersion, provider, reportedModel, requestedModel, platform, runner, mode } = record;
+  const title = `${providers[provider]} ${cliVersion}`;
+  return <>
+    <ContextActions label={`Recorded profile ${runId}`} groups={[[
+      { label: "Copy qualification run ID", run: () => copy(runId) },
+      { label: "Copy recorded profile", run: () => copy([
+        title, `Run ${runId}`, `Recorded ${recordedAt.toISOString()}`,
+        requestedModel && `Requested model · ${requestedModel}`, reportedModel && `Reported model · ${reportedModel}`,
+        platform && `Host · ${windowsVersion(platform.host)}`, platform?.guest && `Guest · ${windowsVersion(platform.guest)}`,
+        `${runner} · ${modes[mode]}`,
+      ].filter(Boolean).join("\n")) },
+    ]]}>
+      <div className="min-w-0"><strong>{providers[provider]}</strong> {cliVersion}<br />
+        <time className="text-muted-foreground" dateTime={recordedAt.toISOString()}>{displayDate.format(recordedAt)}</time></div>
+    </ContextActions>
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+  </>;
+}
+
+function profileRow(record: RecordedProfile): MatrixRow {
   const model = record.reportedModel ?? record.requestedModel;
   return {
     id: record.runId,
-    cli: <><strong>{providers[record.provider]}</strong> {record.cliVersion}<br />
-      <time className="text-muted-foreground" dateTime={recordedAt.toISOString()}>{displayDate.format(recordedAt)}</time></>,
+    cli: <RecordedCli record={record} />,
     model: <>{model ?? "Provider default"}
       {!record.reportedModel && <div className="text-muted-foreground">Model report unavailable</div>}
       {record.reportedModel && record.requestedModel && record.reportedModel !== record.requestedModel &&

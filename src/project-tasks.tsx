@@ -6,6 +6,7 @@ import { Dialog } from "radix-ui";
 import type { JobInspection } from "@/bindings/JobInspection";
 import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkRelations, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
 import { Button } from "@/components/ui/button";
+import type { MenuGroups } from "@/components/ui/context-actions";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants, taskParticipantsQuery } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
@@ -223,6 +224,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const [filterStatus, setFilterStatus] = useState("");
   const [participantFilter, setParticipantFilter] = useState<ParticipantFilter>({ agent: "", provider: "", model: null });
   const [editing, setEditing] = useState<ProjectEditorSelection>();
+  const [menuError, setMenuError] = useState("");
   const hierarchy = useQuery({
     queryKey: ["project-tasks", projectId, "hierarchy"],
     queryFn: () => invoke<Hierarchy>("project_work_hierarchy", { projectId }),
@@ -289,11 +291,46 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   }
   const views = {
     selected, busy: mutation.isPending, openWork,
+    workMenu, copyWorkText,
     openHistory: (id: string) => openWork(id, "Work history"),
     openActivity: props.openActivity, openQueueJob: props.openQueueJob,
     openEvidence: (target: EvidenceTarget) => { openWork(target.taskId, "Changes"); setSelectedEvidence(target); },
     openQuestion: ({ runId, conversationId, requestId }: TaskQuestionBlocker) => props.openActivity(runId, conversationId, requestId),
   };
+  function copyWorkText(text: string) {
+    setMenuError("");
+    void Promise.resolve().then(() => navigator.clipboard.writeText(text)).catch(() => setMenuError("Could not copy to the clipboard."));
+  }
+  function startEditor(selection: ProjectEditorSelection) {
+    if (mutation.isPending) return;
+    mutation.reset();
+    setEditing(selection);
+  }
+  function workMenu(row: AgileRow): MenuGroups {
+    const available = workflowStates.filter(({ value }) => canMove(row, value));
+    const workflow = row.workflow?.activeWorkflowRunId;
+    const evidence = row.evidence;
+    const parent = row.parentId;
+    return [[
+      { label: "Open details", run: () => openWork(row.id) },
+      { label: "Edit work…", disabled: mutation.isPending, run: () => edit(row) },
+      { label: "Duplicate work…", disabled: mutation.isPending, run: () => startEditor({ kind: row.kind, copyOf: row }) },
+      ...(row.kind === "subtask" ? [] : [{ label: row.kind === "epic" ? "Add task…" : "Add sub-task…", disabled: mutation.isPending,
+        run: () => startEditor({ kind: row.kind === "epic" ? "task" : "subtask", parentId: row.id }) }]),
+      ...(available.length ? [{ label: "Move to state", disabled: mutation.isPending,
+        items: available.map(({ value, label }) => ({ label, run: () => move(row, value) })) }] : []),
+    ], [
+      { label: "Copy work ID", run: () => copyWorkText(row.id) },
+      { label: "Copy title", run: () => copyWorkText(row.title) },
+      { label: "Open work history", run: () => views.openHistory(row.id) },
+      ...(parent ? [{ label: "Open parent work", run: () => openWork(parent) }] : []),
+      ...(workflow ? [{ label: "Open workflow", run: () => props.openWorkspace("pipelines", `run:${workflow}`) }] : []),
+      ...(evidence ? [{ label: "Open changes", run: () => views.openEvidence(evidence) }] : []),
+      ...(row.attempts?.length ? [{ label: "Open attempt", items: row.attempts.map((attempt) => ({
+        label: `Attempt ${attempt.ordinal} · ${attempt.runId}`, run: () => props.openActivity(attempt.runId, attempt.conversationId),
+      })) }] : []),
+    ]];
+  }
   function check(taskId: string, item: Item, checked: boolean) {
     mutation.mutate(() => invoke("revise_project_checklist_item", { projectId, taskId, next: { ...item, checked } }));
   }
@@ -351,13 +388,17 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       <div className="delivery-body">
         <div className="delivery-main">
           <ProjectWorkModes projectId={projectId} />
-          {(mutation.error || hierarchy.error || readError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError)}</p>}
+          {(mutation.error || hierarchy.error || readError || menuError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError ?? menuError)}</p>}
           {hierarchy.isPending && <p className="delivery-empty" role="status">Loading project work…</p>}
           {hierarchy.data && !rows.length && <p className="delivery-empty">No project work yet.</p>}
           {byParticipant && participants.some(({ isPending }) => isPending) && <p className="delivery-empty" role="status">Loading work participants…</p>}
           {hierarchy.data && rows.length > 0 && (!byParticipant || !participants.some(({ isPending }) => isPending)) &&
             !(view === "kanban" ? kanbanRows.length : matched.length) && <p className="delivery-empty">No matching work.</p>}
-          {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} /> :
+          {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} columnMenu={(state, label) => [[
+            { label: `New ${workLabel(level).toLowerCase()} here…`, disabled: mutation.isPending || level === "epic" && state !== "backlog",
+              run: () => startEditor({ kind: level, state }) },
+            { label: `Filter by ${label}`, run: () => setFilterStatus(state) },
+          ]]} /> :
             <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
         </div>
         {current && (current.kind === "epic" ?

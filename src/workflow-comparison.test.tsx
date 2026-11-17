@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowComparisons } from "@/workflow-comparison";
@@ -145,9 +145,17 @@ it("queues a separate synthesis from only selected successful run IDs and restor
   });
   const user = userEvent.setup();
   const initial = mount();
-  await user.click(await screen.findByText("Synthesis", { selector: "summary" }));
-  await user.click(await screen.findByRole("checkbox", { name: /first-codex.*first-run/ }));
+  await screen.findByText("Original saved answer");
+  const candidate = await screen.findByRole("heading", { name: "first-codex" });
+  fireEvent.contextMenu(candidate);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Copy original response" }));
+  await screen.findByText("Copied to the clipboard.");
+  expect(await navigator.clipboard.readText()).toBe("Original saved answer");
+  fireEvent.contextMenu(candidate);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Include in synthesis" }));
+  expect((await screen.findByRole<HTMLInputElement>("checkbox", { name: /first-codex.*first-run/ })).checked).toBe(true);
   expect(screen.queryByRole("checkbox", { name: /failed-run/ })).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison_synthesis", expect.anything());
   await user.click(screen.getByRole("button", { name: /Synthesis model/ }));
   await user.click(await screen.findByRole("menuitemradio", { name: /Second Codex model/ }));
   await user.click(screen.getByRole("button", { name: "Queue synthesis" }));

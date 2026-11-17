@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NoteReading } from "@/knowledge-reading";
 
@@ -43,4 +43,32 @@ it("maps a source-line jump after frontmatter and an expanded embed to the rende
     jump={{ line: 8, token: 1 }} onLink={vi.fn()} onAttachment={vi.fn()} />);
 
   expect(container.querySelector("[data-note-line-target]")?.nextElementSibling).toBe(screen.getByText("Jump here."));
+});
+
+it("keeps embedded links and rendered selections tied to their original note and source line", () => {
+  const source = "---\nstatus: ready\n---\n# Launch\n\n![[ops/Checks#Verify]]\n\nAfter the embed.";
+  const embedded = "---\nstatus: draft\n---\n# Preparation\n\n## Verify\n\nRead the checklist.\nSee [the handoff](./handoff%20%231.md#Ready).\n";
+  const files = [{ path: "ops/Checks.md", content: embedded }, { path: "ops/handoff #1.md", content: "# Ready" }];
+  const chosen = vi.fn();
+  render(<NoteReading path="Launch.md" content={source} files={files} onLink={vi.fn()} onAttachment={vi.fn()}
+    contextActions={(hit) => [[{ label: "Use reading context", run: () => chosen(hit) }]]} />);
+  fireEvent.contextMenu(screen.getByRole("button", { name: "the handoff" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Use reading context" }));
+  expect(chosen).toHaveBeenLastCalledWith(expect.objectContaining({ link: expect.objectContaining({
+    raw: "./handoff%20%231.md#Ready", target: "./handoff #1.md", anchor: "Ready", sourcePath: "ops/Checks.md", sourceLine: 9, syntax: "markdown",
+  }) }));
+
+  const paragraph = screen.getByText("After the embed.");
+  const selection = document.getSelection()!;
+  const range = document.createRange();
+  range.setStart(paragraph.firstChild!, 0);
+  range.setEnd(paragraph.firstChild!, 5);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  fireEvent.contextMenu(paragraph);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Use reading context" }));
+  expect(chosen).toHaveBeenLastCalledWith(expect.objectContaining({ excerpt: {
+    path: "Launch.md", text: "After", startLine: 8, endLine: 8, language: "markdown",
+  } }));
+  selection.removeAllRanges();
 });

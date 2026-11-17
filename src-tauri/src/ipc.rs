@@ -544,6 +544,11 @@ pub async fn desktop_cli_prerequisites(
 }
 
 #[tauri::command]
+pub async fn reveal_desktop_cli_executable(store: State<'_, Store>, provider: Option<Provider>, expected: PathBuf) -> Result<(), String> {
+    store.reveal_desktop_cli_executable(provider, expected).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn set_cli_executable(
     store: State<'_, Store>,
     provider: Provider,

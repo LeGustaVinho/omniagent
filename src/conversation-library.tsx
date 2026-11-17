@@ -2,13 +2,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Archive, ArrowUp, MessageSquare, Search } from "lucide-react";
 import { Dialog, Popover } from "radix-ui";
-import { createContext, useCallback, useRef, useState } from "react";
+import { useCallback, useContext, useRef, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
+import type { ConversationHistory } from "@/bindings/ConversationHistory";
+import type { JobInspection } from "@/bindings/JobInspection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
 import { ConversationLibraryGroup, ConversationLibraryLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
+import { ConversationHistoryControls } from "@/conversation-history-controls";
+import { ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library-navigation";
 import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
+import { isLiveRun } from "@/conversation-run";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
 type ConversationLibraryEntry = {
   conversation: Conversation;
@@ -30,14 +37,9 @@ type OrganizationChange =
   | { type: "newSection"; name: string };
 
 type ConversationIdentity = Pick<Conversation, "id" | "checkoutId" | "title">;
-export type OpenLibraryConversation = (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
+export { ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library-navigation";
 export const conversationLibraryKey = ["conversation-library"];
 const sectionKey = ["conversation-library-sections"];
-export const ConversationLibraryNavigation = createContext<{
-  checkoutId: string;
-  projectId: string;
-  open: OpenLibraryConversation;
-} | null>(null);
 
 const titleKey = (checkoutId: string, conversationId: string) => ["checkout-conversation", checkoutId, conversationId];
 
@@ -139,6 +141,41 @@ function openEntry(onOpen: OpenLibraryConversation, { checkout, conversation }: 
   return onOpen(checkout, conversation.id);
 }
 
+function LibraryFork({ entry, onClose, onOpen }: {
+  entry: ConversationLibraryEntry; onClose: () => void; onOpen: OpenLibraryConversation;
+}) {
+  const { conversation, checkout } = entry;
+  const conversationId = conversation.id;
+  const history = useQuery({ queryKey: ["conversation", conversationId, "messages"], refetchOnMount: "always",
+    queryFn: () => invoke<ConversationHistory>("conversation_history", { conversationId }) });
+  const run = useQuery({ queryKey: ["conversation", conversationId, "latest-run"], refetchOnMount: "always",
+    queryFn: () => invoke<RunRecord | null>("latest_conversation_run", { conversationId }),
+    refetchInterval: (query) => isLiveRun(query.state.data) ? 1000 : false });
+  const job = useQuery({ queryKey: ["conversation", conversationId, "latest-job"], refetchOnMount: "always",
+    queryFn: () => invoke<JobInspection | null>("latest_conversation_job", { conversationId }) });
+  if (!history.data) return <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="conv-dialog-scrim" />
+      <Dialog.Content className="conv-dialog">
+        <Dialog.Title>Load conversation history</Dialog.Title>
+        <Dialog.Description>{conversation.title}</Dialog.Description>
+        {history.error ? <p role="alert">{String(history.error)}</p> : <p role="status">Loading messages…</p>}
+        <Dialog.Close className="conv-quiet-button">Close</Dialog.Close>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
+  return <>
+    {(run.error || job.error) && <p role="alert" className="conv-alert">{String(run.error || job.error)}</p>}
+    <ConversationLibraryNavigation.Provider value={{ checkoutId: checkout.checkoutId, projectId: checkout.projectId, open: onOpen }}>
+      <ConversationHistoryControls conversationId={conversationId} title={conversation.title} history={history.data}
+        disabled={!history.isSuccess || history.isFetching || !run.isSuccess || !job.isSuccess || run.isFetching || job.isFetching ||
+          isLiveRun(run.data) || isLiveRun(job.data?.job.latestAttempt)} mode="read_only"
+        requestedAction={{ kind: "fork", revisionId: "" }} standaloneAction onRequestedActionClose={onClose}
+        openFork={(source) => void onOpen(checkout, source.id)} />
+    </ConversationLibraryNavigation.Provider>
+  </>;
+}
+
 function libraryGroups(entries: ConversationLibraryEntry[], archived: boolean) {
   const groups = new Map<string, { id: string; title: string; pinned: boolean; entries: ConversationLibraryEntry[] }>();
   for (const entry of entries) {
@@ -162,11 +199,13 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   onOpen: OpenLibraryConversation;
 }) {
   const client = useQueryClient();
+  const inspector = useContext(RunInspectorNavigation);
   const libraryRef = useRef<HTMLElement>(null);
   const { projectId } = checkout;
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(false);
   const [renaming, setRenaming] = useState<ConversationIdentity>();
+  const [forking, setForking] = useState<ConversationLibraryEntry>();
   const [sectionConversation, setSectionConversation] = useState<ConversationIdentity>();
   const [sectionName, setSectionName] = useState("");
   const [notice, setNotice] = useState("");
@@ -176,6 +215,15 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     queryFn: () => invoke<ConversationLibrarySection[]>("conversation_library_sections", { projectId }),
   });
   const open = useMutation({ mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry) });
+  const openFork = useMutation({ mutationFn: ({ source, id }: { source: ProjectCheckout; id: string }) => onOpen(source, id) });
+  const inspect = useMutation({
+    mutationFn: async ({ conversation, checkout }: ConversationLibraryEntry) => {
+      const run = await invoke<RunRecord | null>("latest_conversation_run", { conversationId: conversation.id });
+      if (run && run.projectId !== checkout.projectId) throw new Error("The attempt is no longer in this project.");
+      if (run) inspector?.openActivity(run.id, conversation.id);
+      else setNotice("No attempt is available for this conversation.");
+    },
+  });
   const organize = useMutation({
     mutationFn: ({ conversation, change }: { conversation: ConversationIdentity; change: OrganizationChange }) =>
       organizeConversation(conversation, change),
@@ -188,21 +236,27 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       if (change.type === "archive") setNotice(change.archived ? "Conversation moved to Archived." : "Conversation restored.");
     },
   });
-  const error = open.error ?? list.error ?? sections.error ?? startError ??
+  const error = open.error ?? inspect.error ?? openFork.error ?? list.error ?? sections.error ?? startError ??
     (!sectionConversation ? organize.error : undefined);
 
-  function rowAction(action: ConversationAction, { conversation, organization }: ConversationLibraryEntry, sectionId?: string) {
+  function rowAction(action: ConversationAction, entry: ConversationLibraryEntry, sectionId?: string) {
+    const { conversation, organization } = entry;
+    if (action === "open") open.mutate(entry);
+    if (action === "activity") inspect.mutate(entry);
+    if (action === "fork") setForking(entry);
     if (action === "rename") setRenaming(conversation);
     if (action === "new-section") {
       organize.reset();
       setSectionName("");
       setSectionConversation(conversation);
     }
-    if (action === "copy-title") {
+    if (action === "copy-title" || action === "copy-id" || action === "copy-worktree") {
       setNotice("");
-      void Promise.resolve().then(() => navigator.clipboard.writeText(conversation.title))
-        .then(() => setNotice("Title copied."))
-        .catch(() => setNotice("Couldn’t copy the title."));
+      const [value, confirmation] = action === "copy-title" ? [conversation.title, "Title copied."]
+        : action === "copy-id" ? [conversation.id, "Conversation ID copied."] : [entry.checkout.checkoutRoot, "Worktree path copied."];
+      void Promise.resolve().then(() => navigator.clipboard.writeText(value))
+        .then(() => setNotice(confirmation))
+        .catch(() => setNotice("Couldn’t copy to the clipboard."));
     }
     if (action === "pin") organize.mutate({ conversation, change: { type: "pin", pinned: !organization.pinned } });
     if (action === "unread") organize.mutate({ conversation, change: { type: "read", unread: !organization.unread } });
@@ -230,7 +284,9 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
               ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
               : <ConversationRow title={conversation.title} {...organization}
                 sections={sections.data?.filter(({ projectId }) => projectId === entry.checkout.projectId)}
-                available={(action) => action === "rename" || action === "copy-title" ||
+                available={(action) => ["rename", "copy-title", "copy-id", "copy-worktree"].includes(action) ||
+                  (action === "open" && !open.isPending) || (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
+                  (action === "fork" && !openFork.isPending) ||
                   (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
                 onAction={(action, sectionId) => rowAction(action, entry, sectionId)}>
                 <button type="button" className="conv-session-button items-start" disabled={open.isPending}
@@ -252,6 +308,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
         })}
       </ConversationLibraryGroup>)}
     {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}
+    {forking && <LibraryFork key={forking.conversation.id} entry={forking} onClose={() => setForking(undefined)}
+      onOpen={async (source, id) => { openFork.mutate({ source, id }); }} />}
     {sectionConversation && <Dialog.Root open onOpenChange={(shown) => {
       if (!shown && !organize.isPending) { setSectionConversation(undefined); organize.reset(); }
     }}>

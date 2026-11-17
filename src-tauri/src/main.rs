@@ -15,6 +15,8 @@ mod delivery_merge_ipc;
 mod desktop;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
+mod editor_windows;
+mod file_link_runtime;
 mod fixture;
 mod fixture_runtime;
 mod git_review_runtime;
@@ -220,8 +222,17 @@ fn main() {
         context
     };
 
+    let file_links = file_link_runtime::PendingFileLink::default();
+    file_links.enqueue(
+        std::env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    let forwarded_file_links = file_links.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .manage(file_links)
+        .plugin(tauri_plugin_single_instance::init(move |app, args, _| {
+            forwarded_file_links.forward(app, args);
             desktop::show(app)
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -279,14 +290,18 @@ fn main() {
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
+            app.manage(note_runtime::NoteMergePreviews::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
             app.manage(fixture_runtime::FixtureRuns::default());
+            editor_windows::build_main_window(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
+            editor_windows::close_editor_window,
+            file_link_runtime::take_pending_file_link,
             backup_ipc::create_application_backup,
             backup_ipc::preview_application_restore,
             backup_ipc::stage_application_restore,
@@ -415,6 +430,7 @@ fn main() {
             workflow_ipc::authoring::simulate_workflow_package_revision,
             workflow_ipc::decisions::resolve_workflow_stage_decision,
             workflow_ipc::authoring::create_workflow_package,
+            workflow_ipc::authoring::duplicate_workflow_template_draft,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,
             workflow_ipc::authoring::start_workflow_package_authoring,
@@ -462,10 +478,19 @@ fn main() {
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
             desktop::repository_note_catalog,
+            omniagent::repository::checkout_items::open_checkout_item_in_shell,
+            omniagent::repository::checkout_items::list_checkout_folders,
+            omniagent::repository::checkout_items::list_checkout_ignored_items,
+            omniagent::repository::checkout_items::windows_hidden::list_checkout_windows_hidden_items,
+            omniagent::repository::checkout_items::create_checkout_item,
+            omniagent::repository::checkout_items::mutations::mutate_checkout_items,
+            omniagent::repository::checkout_items::mutations::import_checkout_items,
             ide_source_runtime::list_repository_source_files,
             ide_source_runtime::open_repository_source_file,
             ide_source_runtime::save_repository_source_file,
             ide_source_runtime::read_repository_source_revision,
+            ide_source_runtime::checkout_document_history,
+            ide_source_runtime::checkout_document_history_text,
             ide_source_runtime::list_repository_source_drafts,
             ide_source_runtime::read_repository_source_draft,
             ide_source_runtime::save_repository_source_draft,
@@ -477,15 +502,25 @@ fn main() {
             project_search_runtime::search_repository_files,
             manual_terminal::start_manual_terminal,
             manual_terminal::write_manual_terminal,
+            manual_terminal::resolve_manual_terminal_file,
             manual_terminal::resize_manual_terminal,
             manual_terminal::close_manual_terminal,
             git_review_runtime::git_checkout_review,
             git_review_runtime::git_checkout_history,
+            git_review_runtime::git_checkout_file_history,
+            git_review_runtime::git_compare_file_versions,
+            git_review_runtime::git_file_permalink,
             git_review_runtime::git_checkout_diff,
+            git_review_runtime::git_conflict_review,
+            git_review_runtime::git_mark_conflict_resolved,
             git_review_runtime::git_branch_comparison,
             git_review_runtime::git_branch_comparison_diff,
+            git_review_runtime::git_review_comments,
+            git_review_runtime::git_add_review_comment,
+            git_review_runtime::git_set_review_comment_resolved,
             git_review_runtime::create_git_worktree,
             git_review_runtime::set_git_path_staged,
+            git_review_runtime::set_git_hunk_staged,
             git_review_runtime::commit_git_index,
             git_review_runtime::git_saved_attempts,
             note_index_runtime::rebuild_repository_note_index,
@@ -511,6 +546,9 @@ fn main() {
             note_runtime::list_repository_markdown_drafts,
             note_runtime::save_repository_markdown_draft,
             note_runtime::discard_repository_markdown_draft,
+            note_runtime::extract_repository_note_selection,
+            note_runtime::preview_markdown_merge,
+            note_runtime::stage_markdown_merge,
             note_runtime::watch_repository_note,
             note_runtime::unwatch_repository_note,
             ipc::active_checkout,
@@ -519,6 +557,7 @@ fn main() {
             omniagent::appearance::save_appearance_settings,
             ipc::cli_executables,
             ipc::desktop_cli_prerequisites,
+            ipc::reveal_desktop_cli_executable,
             ipc::set_cli_executable,
             ipc::project_attachment_limits,
             ipc::set_project_attachment_limits,
@@ -560,6 +599,8 @@ fn main() {
             conversation_continuation_runtime::conversation_reference_draft,
             conversation_continuation_runtime::edit_conversation_reference_draft,
             conversation_attachment_ipc::conversation_attachment_draft,
+            conversation_attachment_ipc::add_checkout_files_to_conversation,
+            conversation_attachment_ipc::append_checkout_context_to_conversation,
             conversation_attachment_ipc::pick_conversation_attachments,
             conversation_attachment_ipc::accept_conversation_attachment_drop,
             conversation_attachment_ipc::edit_conversation_attachment_draft,

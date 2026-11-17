@@ -12,6 +12,7 @@
   "app": {
     "windows": [{
       "label": "main",
+      "create": false,
       "title": "OmniAgent",
       "width": 1120,
       "height": 760,
@@ -24,6 +25,7 @@
     }
   },
   "plugins": {
+    "deep-link": { "desktop": { "schemes": ["omniagent"] } },
     "updater": { "pubkey": "", "requireSignedVersion": true }
   },
   "bundle": {

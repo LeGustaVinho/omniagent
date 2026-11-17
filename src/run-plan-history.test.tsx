@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -92,6 +92,9 @@ it("opens frozen plan versions, revision feedback, and the prior release in the 
   expect(await screen.findByText("Require a smoke test")).toBeTruthy();
   const original = await screen.findByText("Proposal 26");
   const revised = screen.getByText("Proposal 53 · Selected plan");
+  fireEvent.contextMenu(original);
+  await user.click(screen.getByRole("menuitem", { name: "Copy plan text" }));
+  expect(await navigator.clipboard.readText()).toBe("Original frozen plan");
   await user.click(original);
   expect(screen.getByText("Original frozen plan")).toBeTruthy();
   expect(screen.getByText("approval-one")).toBeTruthy();

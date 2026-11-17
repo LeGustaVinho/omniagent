@@ -5,6 +5,8 @@ import { Popover } from "radix-ui";
 import { useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ContextActions } from "@/components/ui/context-actions";
+import { fileContextActions } from "@/file-context-actions";
 
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
@@ -19,6 +21,7 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
   const registered = useQuery({
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
@@ -30,6 +33,7 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
   async function select(checked: ProjectCheckout) {
     setPending(true);
     setError("");
+    setStatus("");
     try {
       await onSelect(checked);
       setOpen(false);
@@ -64,19 +68,31 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
         </label>
         {registered.isPending && <p role="status">Loading checkouts…</p>}
         {(error || registered.error) && <p role="alert">{error || String(registered.error)}</p>}
+        {status && <p role="status">{status}</p>}
         {registered.data?.length === 0 && <p>No registered repositories yet.</p>}
         {Boolean(registered.data?.length) && !results?.length && <p role="status">No matching checkouts.</p>}
         {pending && <p role="status">Opening checkout…</p>}
         <ul>
-          {results?.map((item) => <li key={item.checkoutId}>
-            <button type="button" className="work-project-option" aria-current={item.checkoutId === checkout?.checkoutId ? "true" : undefined}
-              disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
-              {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
-              <span className="grow"><strong>{basename(item.repositoryRoot)}
-                {item.checkoutRoot !== item.repositoryRoot && " / " + basename(item.checkoutRoot)}</strong><small>{item.checkoutRoot}</small></span>
-              {item.checkoutId === checkout?.checkoutId && <Check size={16} aria-hidden="true" />}
-            </button>
-          </li>)}
+          {results?.map((item) => {
+            const selected = item.checkoutId === checkout?.checkoutId;
+            const actions = fileContextActions({ checkout: item, simulated: false, status: setStatus,
+              report: (message) => { setStatus(""); setError(message); } });
+            return <li key={item.checkoutId}>
+              <ContextActions label={item.checkoutRoot} groups={[[
+                { label: "Use this worktree", disabled: selected || pending, run: () => void select(item) },
+                { label: "Copy repository path", run: () => actions.copy(item.repositoryRoot, "Copied repository path") },
+                { label: "Copy checkout ID", run: () => actions.copy(item.checkoutId, "Copied checkout ID") },
+              ], ...actions.location({ kind: "root", path: "" })]}>
+                <button className="work-project-option" type="button" aria-current={selected ? "true" : undefined}
+                  disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
+                  {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
+                  <span className="grow"><strong>{basename(item.repositoryRoot)}
+                    {item.checkoutRoot !== item.repositoryRoot && " / " + basename(item.checkoutRoot)}</strong><small>{item.checkoutRoot}</small></span>
+                  {selected && <Check size={16} aria-hidden="true" />}
+                </button>
+              </ContextActions>
+            </li>;
+          })}
         </ul>
       </Popover.Content>
     </Popover.Portal>

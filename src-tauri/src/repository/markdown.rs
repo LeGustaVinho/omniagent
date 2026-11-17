@@ -110,30 +110,29 @@ impl Store {
         sha256: String,
         base_commit: Option<String>,
         markdown: String,
+        before_save: Option<RepositoryMarkdownRevision>,
     ) -> Result<RepositoryMarkdownRevision> {
         self.execute(move |db| {
             let identity = serde_json::to_vec(&(&checkout_id, &path, &sha256, &base_commit))?;
-            let id = format!("{}-{:x}", kind.editor_prefix(), Sha256::digest(identity));
-            let existing = db
-                .query_row(
-                    "SELECT id, checkout_id, path, sha256, base_commit
-                 FROM repository_markdown_revisions
-                 WHERE checkout_id = ?1 AND id = ?2",
-                    params![checkout_id, id],
-                    decode_revision,
-                )
-                .optional()?;
-            if let Some(revision) = existing {
-                return Ok(revision);
-            }
             let revision = RepositoryMarkdownRevision {
-                id,
+                id: format!("{}-{:x}", kind.editor_prefix(), Sha256::digest(identity)),
                 checkout_id,
                 relative_path: path,
                 sha256,
                 base_commit,
             };
-            insert_revision(db, &revision, &protection::protect(markdown.as_bytes())?)?;
+            let transaction = db.transaction()?;
+            let existing: bool = transaction.query_row(
+                "SELECT EXISTS (SELECT 1 FROM repository_markdown_revisions WHERE checkout_id = ?1 AND id = ?2)",
+                params![revision.checkout_id, revision.id], |row| row.get(0),
+            )?;
+            if !existing {
+                insert_revision(&transaction, &revision, &protection::protect(markdown.as_bytes())?)?;
+            }
+            if let Some(before) = before_save.as_ref().filter(|before| before.sha256 != revision.sha256) {
+                super::documents::history::append_save(&transaction, before, &revision)?;
+            }
+            transaction.commit()?;
             Ok(revision)
         })
         .await

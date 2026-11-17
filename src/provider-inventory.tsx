@@ -10,6 +10,7 @@ import type { Provider } from "@/bindings/Provider";
 import type { ReportedPlugin } from "@/bindings/ReportedPlugin";
 import type { ReviewState } from "@/bindings/ReviewState";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { useCustomizationInventory } from "@/customizations-panel";
 import type { LiveModel } from "@/live-models";
 import { QualificationMatrix } from "@/qualification-matrix";
@@ -233,6 +234,7 @@ function TransportCapabilities({ report, searching }: { report: TransportReport;
 
 function PluginReport({ inventory, entries, searching }: { inventory: PluginInventory; entries: ReportedPlugin[]; searching: boolean }) {
   const { report, checkedAt } = inventory;
+  const { copy, feedback } = useContextActionFeedback();
   const hasInventory = report.status === "reported" || report.status === "partial";
   return <details className="provider-inventory-section" open={searching || undefined}>
     <summary>{hasInventory ? `Installed plugins (${report.plugins.length})` : "Plugin inventory"}</summary>
@@ -241,11 +243,18 @@ function PluginReport({ inventory, entries, searching }: { inventory: PluginInve
         <span className="provider-inventory-note"> · {new Date(checkedAt).toLocaleString()}</span></p>
       {report.executable && <p className="provider-inventory-note provider-inventory-path">{report.executable}{report.version && ` · ${report.version}`}</p>}
       {hasInventory && !report.loadTelemetryReported && <p className="provider-inventory-note">CLI profile inventory. In-session plugin loads are unconfirmed.</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
       {entries.length > 0 && <ul className="provider-inventory-results">{entries.map((plugin, index) => <li key={`${plugin.id}:${plugin.scope ?? ""}:${index}`}>
-        <div className="provider-inventory-row-title"><strong>{plugin.name ?? plugin.id}</strong>
+        <ContextActions label={plugin.id} groups={[[
+          { label: "Copy plugin ID", run: () => copy(plugin.id) },
+          ...(plugin.version ? [{ label: "Copy version", run: () => copy(plugin.version!) }] : []),
+          ...(plugin.sourceLocation ? [{ label: "Copy plugin source", run: () => copy(plugin.sourceLocation!) }] : []),
+          ...(plugin.skills?.length ? [{ label: "Copy skill names", run: () => copy(plugin.skills!.join("\n")) }] : []),
+          ...(plugin.mcpServers?.length ? [{ label: "Copy MCP server names", run: () => copy(plugin.mcpServers!.join("\n")) }] : []),
+        ]]}><div className="provider-inventory-row-title"><strong>{plugin.name ?? plugin.id}</strong>
           <Status tone={plugin.enabled == null ? "unknown" : plugin.enabled ? "reported" : "warning"}>
             {plugin.enabled == null ? "Enablement unknown" : plugin.enabled ? "Enabled" : "Disabled"}
-          </Status></div>
+          </Status></div></ContextActions>
         <p className="provider-inventory-note provider-inventory-path">
           {[plugin.version, plugin.scope, plugin.marketplace, plugin.source, plugin.sourceLocation ?? plugin.installPath].filter(Boolean).join(" · ")}
         </p>

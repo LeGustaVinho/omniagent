@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef } from "react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -23,7 +23,7 @@ function Composer() {
   const ref = useRef<HTMLFormElement>(null);
   const attachments = useConversationAttachments("conversation", true, true, ref);
   return <form ref={ref} aria-label="Composer">
-    <ConversationAttachments attachments={attachments} disabled={false} />
+    <ConversationAttachments attachments={attachments} checkoutId="conversation-checkout" disabled={false} />
   </form>;
 }
 
@@ -65,7 +65,19 @@ it("keeps native picker and drop files in one recoverable draft and removes by i
   mount();
   const files = within(await screen.findByRole("list", { name: "Draft files" }));
   expect(files.getAllByRole("listitem")).toHaveLength(2);
-  await user.click(files.getByRole("button", { name: "Remove file note.md" }));
+  fireEvent.contextMenu(files.getByText("screenshot.png · Selected external file"));
+  expect(screen.queryByRole("menuitem", { name: "Show source in File Explorer" })).toBeNull();
+  await user.click(screen.getByRole("menuitem", { name: "Copy original path" }));
+  expect(await navigator.clipboard.readText()).toBe(second.source.path);
+
+  const note = files.getByText("note.md · Checkout");
+  fireEvent.contextMenu(note);
+  await user.click(screen.getByRole("menuitem", { name: "Show source in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", {
+    checkoutId: "conversation-checkout", relativePath: "docs/note.md", action: "reveal",
+  });
+  fireEvent.contextMenu(note);
+  await user.click(screen.getByRole("menuitem", { name: "Remove from draft" }));
   expect(invoke).toHaveBeenCalledWith("edit_conversation_attachment_draft", {
     conversationId: "conversation", expectedRevision: "r2", fileId: "one", edit: { kind: "remove" },
   });

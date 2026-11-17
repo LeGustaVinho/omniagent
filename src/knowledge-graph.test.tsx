@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type cytoscape from "cytoscape";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import NoteGraph, { type NoteGraphProjection } from "@/knowledge-graph";
 
@@ -75,6 +75,17 @@ function graphPaths() {
   return within(screen.getByRole("list", { name: "Graph notes" }))
     .queryAllByRole("button").map((button) => button.getAttribute("title"));
 }
+
+it("centers the local graph on the exact canvas node without opening the note", () => {
+  const open = vi.fn();
+  render(<NoteGraph projection={projection} selected={active} onOpen={open} onNodeActions={() => []} />);
+  act(() => { graph().getElementById(`note:${outgoing}`).emit("cxttap"); });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Center local graph here" }));
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Local" }).getAttribute("aria-pressed")).toBe("true");
+  expect(graph().nodes().map((node) => node.data("path"))).toEqual([outgoing, active, secondHop]);
+  expect(graph().getElementById(`note:${outgoing}`).position()).toEqual({ x: 200, y: 200 });
+});
 
 it("uses indexed paths, titles, tags, and projected edges in the global graph", () => {
   const open = vi.fn();

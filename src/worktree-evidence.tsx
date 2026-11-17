@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useContext, useState } from "react";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
 type FileChange = { path: string; sha256: string; contentBase64?: string };
@@ -24,19 +26,51 @@ type Evidence = { kind: "unavailable"; reason: string } | {
 type LiveCheckout = { worktree: { branch: string }; head: string; status: string[] };
 
 function decode(base64: string) {
-  const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return new TextDecoder().decode(decodeArtifactBytes(base64));
 }
 
 function Patch({ title, data }: { title: string; data: string }) {
   const [open, setOpen] = useState(false);
+  const { copy, feedback, run } = useContextActionFeedback();
   if (!data) return null;
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>{title}</summary>
-      {open && <pre className="max-h-72 overflow-auto rounded bg-muted p-2 text-xs">{decode(data)}</pre>}
+      {open && <>
+        <ContextActions label={title} groups={[[
+          { label: "Copy saved patch", run: () => copy(decode(data)) },
+          { label: "Download saved patch", run: () => void run(async () => {
+            downloadArtifact(`${title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}.patch`, new Blob([decodeArtifactBytes(data)], { type: "application/octet-stream" }));
+          }) },
+        ]]}>
+          <pre tabIndex={0} className="max-h-72 min-w-0 flex-1 overflow-auto rounded bg-muted p-2 text-xs">{decode(data)}</pre>
+        </ContextActions>
+        {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
+      </>}
     </details>
   );
+}
+
+function SnapshotFile({ file }: { file: FileChange }) {
+  const { copy, feedback, run } = useContextActionFeedback();
+  const bytes = file.contentBase64;
+  const name = file.path.split("/").at(-1) || "captured-file";
+  const download = () => void run(async () => {
+    if (bytes !== undefined) downloadArtifact(name, new Blob([decodeArtifactBytes(bytes)], { type: "application/octet-stream" }));
+  });
+  return <li className="break-all">
+    <ContextActions label={file.path} groups={[[
+      { label: "Copy relative path", run: () => copy(file.path) },
+      { label: "Copy saved SHA-256", run: () => copy(file.sha256) },
+      ...(bytes !== undefined ? [{ label: "Download captured file", run: download }] : []),
+    ]]}>
+      <div className="min-w-0 flex-1">
+        {bytes === undefined ? file.path : <button type="button" className="text-left underline" onClick={download}>{file.path}</button>}
+        <span className="ml-2 text-xs text-muted-foreground" title={`SHA-256 ${file.sha256}`}>{file.sha256.slice(0, 12)}</span>
+      </div>
+    </ContextActions>
+    {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
+  </li>;
 }
 
 function SnapshotChanges({ snapshot }: { snapshot: Snapshot }) {
@@ -50,15 +84,7 @@ function SnapshotChanges({ snapshot }: { snapshot: Snapshot }) {
       <Patch title="Staged changes" data={changes.stagedPatchBase64} />
       <Patch title="Unstaged changes" data={changes.unstagedPatchBase64} />
       {changes.untracked.length > 0 && <ul aria-label="Untracked files">
-        {changes.untracked.map((file) => (
-          <li key={file.path} className="break-all">
-            {file.contentBase64 === undefined ? file.path : (
-              <a className="underline" download={file.path.split("/").at(-1)}
-                href={`data:application/octet-stream;base64,${file.contentBase64}`}>{file.path}</a>
-            )}
-            <span className="ml-2 text-xs text-muted-foreground" title={`SHA-256 ${file.sha256}`}>{file.sha256.slice(0, 12)}</span>
-          </li>
-        ))}
+        {changes.untracked.map((file) => <SnapshotFile key={file.path} file={file} />)}
       </ul>}
     </>
   );
@@ -68,6 +94,7 @@ export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
   projectId: string; runId: string; ownerTaskId: string | null;
 }) {
   const navigation = useContext(RunInspectorNavigation);
+  const { copy, feedback } = useContextActionFeedback();
   const [savedOpen, setSavedOpen] = useState(false);
   const [liveOpen, setLiveOpen] = useState(false);
   const saved = useQuery({
@@ -94,7 +121,13 @@ export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
         {saved.error && <p role="alert">{String(saved.error)}</p>}
         {saved.isSuccess && !artifact && <p>{evidence?.kind === "unavailable" ? evidence.reason : "Attempt evidence is unavailable."}</p>}
         {artifact && <div className="grid gap-1 pt-2">
-          <p>Candidate <code title={artifact.revision}>{artifact.revision.slice(0, 12)}</code></p>
+          <ContextActions label="saved candidate" groups={[[
+            { label: "Copy candidate revision ID", run: () => copy(artifact.revision) },
+            { label: "Copy saved HEAD", run: () => copy(artifact.candidate.head) },
+            { label: "Copy starting HEAD", run: () => copy(artifact.start.starting.head) },
+            ...(navigation?.openGitAttempt ? [{ label: "Open saved diff in Git", run: () => navigation.openGitAttempt?.(runId) }] : []),
+          ]]}><p>Candidate <code title={artifact.revision}>{artifact.revision.slice(0, 12)}</code></p></ContextActions>
+          {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
           <p>Saved HEAD <code>{artifact.candidate.head}</code></p>
           <Patch title="Changes committed during the attempt" data={artifact.committedPatchBase64} />
           <SnapshotChanges snapshot={artifact.candidate} />

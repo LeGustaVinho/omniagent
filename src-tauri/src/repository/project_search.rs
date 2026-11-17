@@ -14,11 +14,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     process::{self, TerminalOutcome, WindowsProcess, WindowsProcessControl},
-    providers::configuration::plain_metadata,
+    providers::configuration::{open_locked_local_file, plain_metadata},
     store::Store,
 };
 
-use super::{checkout_root, verify_checkout};
+use super::{
+    checkout_items::{checkout_directory, checkout_regular_file},
+    checkout_root,
+    documents::lock_directories,
+    verify_checkout,
+};
 
 #[cfg(test)]
 mod tests;
@@ -30,6 +35,8 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const PROBE_OUTPUT_LIMIT: usize = 16 * 1024;
 const SEARCH_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const RESULT_LIMIT: usize = 200;
+const MATCH_COLUMNS_LIMIT: usize = 256;
+const FULL_LINE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,10 +60,19 @@ pub enum ProjectSearch {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSearchMatch {
     pub path: String,
     pub line: u32,
     pub excerpt: String,
+    pub columns: Vec<u32>,
+    pub occurrences: usize,
+    pub line_text: Option<String>,
+}
+
+enum SearchScope {
+    Directory(String),
+    File(String),
 }
 
 impl Store {
@@ -117,6 +133,40 @@ impl Store {
         checkout_id: String,
         query: String,
     ) -> Result<ProjectSearch> {
+        self.search_repository_files_in(checkout_id, query, String::new())
+            .await
+    }
+
+    pub async fn search_repository_files_in(
+        &self,
+        checkout_id: String,
+        query: String,
+        relative_directory: String,
+    ) -> Result<ProjectSearch> {
+        self.search_repository_scope(
+            checkout_id,
+            query,
+            SearchScope::Directory(relative_directory),
+        )
+        .await
+    }
+
+    pub async fn search_repository_file(
+        &self,
+        checkout_id: String,
+        query: String,
+        relative_file: String,
+    ) -> Result<ProjectSearch> {
+        self.search_repository_scope(checkout_id, query, SearchScope::File(relative_file))
+            .await
+    }
+
+    async fn search_repository_scope(
+        &self,
+        checkout_id: String,
+        query: String,
+        scope: SearchScope,
+    ) -> Result<ProjectSearch> {
         validate_query(&query)?;
         let root = checkout_root(self, checkout_id.clone()).await?;
         let layout = verify_checkout(self, checkout_id, root).await?;
@@ -130,7 +180,23 @@ impl Store {
                         .unwrap_or_else(|| "ripgrep is unavailable".into()),
                 });
             };
-            search(&executable, &layout.root, &query)
+            match scope {
+                SearchScope::Directory(directory) => {
+                    let directory = checkout_directory(&layout.root, &directory)?;
+                    let target = directory.strip_prefix(&layout.root)?;
+                    search(&executable, &layout.root, &query, target, false)
+                }
+                SearchScope::File(file) => {
+                    let file = checkout_regular_file(&layout.root, &file)?;
+                    let _parents = lock_directories(
+                        file.parent()
+                            .context("The search file has no parent directory")?,
+                    )?;
+                    let _file = open_locked_local_file(&file)?;
+                    let target = file.strip_prefix(&layout.root)?;
+                    search(&executable, &layout.root, &query, target, true)
+                }
+            }
         })
         .await?
     }
@@ -238,7 +304,13 @@ fn probe(executable: &Path) -> Result<String> {
         .context("The selected executable did not report a ripgrep version")
 }
 
-fn search(executable: &Path, root: &Path, query: &str) -> Result<ProjectSearch> {
+fn search(
+    executable: &Path,
+    root: &Path,
+    query: &str,
+    target: &Path,
+    file: bool,
+) -> Result<ProjectSearch> {
     let args = [
         "--no-config",
         "--no-follow",
@@ -254,15 +326,16 @@ fn search(executable: &Path, root: &Path, query: &str) -> Result<ProjectSearch> 
         "!**/.git/**",
         "--",
         query,
-        ".",
     ]
     .map(OsStr::new);
+    let argument = Path::new(".").join(target);
+    let args = [args.as_slice(), &[argument.as_os_str()]].concat();
     let capture = run_bounded(executable, root, &args, SEARCH_TIMEOUT, SEARCH_OUTPUT_LIMIT)?;
     ensure!(
         capture.truncated || matches!(capture.outcome, TerminalOutcome::Exited(0 | 1)),
         "ripgrep could not search this checkout"
     );
-    let (matches, limited) = read_matches(root, &capture.stdout)?;
+    let (matches, limited) = read_matches(root, &capture.stdout, Some((target, file)))?;
     Ok(ProjectSearch::Results {
         matches,
         truncated: capture.truncated || limited,
@@ -366,7 +439,11 @@ struct Submatch {
     start: usize,
 }
 
-fn read_matches(root: &Path, output: &[u8]) -> Result<(Vec<ProjectSearchMatch>, bool)> {
+fn read_matches(
+    root: &Path,
+    output: &[u8],
+    scope: Option<(&Path, bool)>,
+) -> Result<(Vec<ProjectSearchMatch>, bool)> {
     let mut matches = Vec::new();
     for frame in output.split_inclusive(|byte| *byte == b'\n') {
         if !frame.ends_with(b"\n") {
@@ -385,16 +462,41 @@ fn read_matches(root: &Path, output: &[u8]) -> Result<(Vec<ProjectSearchMatch>, 
         let Some(path) = safe_path(root, &path) else {
             continue;
         };
+        if let Some((target, file)) = scope {
+            let path = Path::new(&path);
+            if (file && path != target) || (!file && !path.starts_with(target)) {
+                continue;
+            }
+        }
         if matched.line_number == 0 {
             continue;
         }
         if matches.len() == RESULT_LIMIT {
             return Ok((ordered(matches), true));
         }
+        let line = text.strip_suffix('\n').map_or(text.as_str(), |line| {
+            line.strip_suffix('\r').unwrap_or(line)
+        });
+        let mut previous = 0;
+        let mut column = 1;
+        let columns = matched
+            .submatches
+            .iter()
+            .take(MATCH_COLUMNS_LIMIT)
+            .filter_map(|entry| {
+                let segment = line.get(previous..entry.start)?;
+                previous = entry.start;
+                column += segment.encode_utf16().count() as u32;
+                Some(column)
+            })
+            .collect();
         matches.push(ProjectSearchMatch {
             path,
             line: matched.line_number,
-            excerpt: excerpt(&text, matched.submatches.first().map(|entry| entry.start)),
+            excerpt: excerpt(line, matched.submatches.first().map(|entry| entry.start)),
+            columns,
+            occurrences: matched.submatches.len(),
+            line_text: (line.len() <= FULL_LINE_LIMIT).then(|| line.into()),
         });
     }
     Ok((ordered(matches), false))
@@ -425,7 +527,6 @@ fn safe_path(root: &Path, reported: &str) -> Option<String> {
 }
 
 fn excerpt(line: &str, first_match: Option<usize>) -> String {
-    let line = line.trim_end_matches(['\r', '\n']);
     let before = first_match
         .and_then(|offset| line.get(..offset))
         .unwrap_or_default();

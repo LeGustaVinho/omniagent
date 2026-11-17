@@ -2,6 +2,7 @@ import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, 
 import { ChevronDown, ChevronRight, GitBranch, GitCommitHorizontal, GripVertical } from "lucide-react";
 import { Fragment, useState } from "react";
 import { AgileKanbanColumn, AgileTableFrame, AgileWorkCard } from "@/agile-layout";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { DeliveryStatus } from "@/tasks-git-ui";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import { canMove, questionBlockerLabel, recordedMergeForCommit, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
@@ -19,6 +20,8 @@ type Views = {
   openQuestion: (question: TaskQuestionBlocker) => void;
   openActivity: WorkspaceProps["openActivity"];
   openQueueJob?: WorkspaceProps["openQueueJob"];
+  workMenu: (row: AgileRow) => MenuGroups;
+  copyWorkText: (text: string) => void;
 };
 
 function ChecklistProgress({ items }: { items: Item[] }) {
@@ -92,11 +95,11 @@ function EvidenceLink({ row, reference, merge, openEvidence }: {
   </button>;
 }
 
-function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob }: Omit<Views, "rows"> & { row: AgileRow }) {
+function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, workMenu }: Omit<Views, "rows"> & { row: AgileRow }) {
   const allowed = !busy && workflowStates.some(({ value }) => canMove(row, value));
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: row.id, disabled: !allowed });
   return <AgileWorkCard nodeRef={setNodeRef} title={row.title} identity={workLabel(row.kind)} dragging={isDragging}
-    selected={selected === row.id} onOpen={() => openWork(row.id)}
+    selected={selected === row.id} onOpen={() => openWork(row.id)} menu={workMenu(row)}
     style={transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 2 } : undefined}
     handle={allowed && <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${row.title}`}
       className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:text-foreground"><GripVertical size={16} aria-hidden /></button>}>
@@ -111,14 +114,16 @@ function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, 
   </AgileWorkCard>;
 }
 
-function KanbanColumn({ status, label, rows, ...views }: Views & { status: WorkflowStatus; label: string }) {
+function KanbanColumn({ status, label, rows, menu, ...views }: Views & { status: WorkflowStatus; label: string; menu: MenuGroups }) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  return <AgileKanbanColumn nodeRef={setNodeRef} label={label} count={rows.length} over={isOver}>
+  return <AgileKanbanColumn nodeRef={setNodeRef} label={label} count={rows.length} over={isOver} menu={menu}>
     {rows.map((row) => <KanbanCard key={row.id} row={row} {...views} />)}
   </AgileKanbanColumn>;
 }
 
-export function ProjectKanban({ move, rows, ...views }: Views & { move: (row: AgileRow, next: WorkflowStatus) => void }) {
+export function ProjectKanban({ move, rows, columnMenu, ...views }: Views & {
+  move: (row: AgileRow, next: WorkflowStatus) => void; columnMenu: (state: WorkflowStatus, label: string) => MenuGroups;
+}) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor));
   function drop({ active, over }: DragEndEvent) {
     const row = rows.find(({ id }) => id === active.id);
@@ -128,12 +133,13 @@ export function ProjectKanban({ move, rows, ...views }: Views & { move: (row: Ag
   return <DndContext sensors={sensors} onDragEnd={drop}>
     <div className="delivery-board" aria-label="Agile Kanban">
       {workflowStates.map(({ value, label }) => <KanbanColumn key={value} status={value} label={label}
-        rows={rows.filter(({ status }) => status === value)} {...views} />)}
+        rows={rows.filter(({ status }) => status === value)} menu={columnMenu(value, label)} {...views} />)}
     </div>
   </DndContext>;
 }
 
-export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, check }: Views & {
+export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, check,
+  workMenu, copyWorkText }: Views & {
   matches: ReadonlySet<string>;
   check: (taskId: string, item: Item, checked: boolean) => void;
 }) {
@@ -164,9 +170,11 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
                 aria-label={`${open ? "Collapse" : "Expand"} ${row.title}`} onClick={() => toggle(row.id)}>
                 {open ? <ChevronDown size={15} aria-hidden /> : <ChevronRight size={15} aria-hidden />}
               </button> : <span className="agile-disclosure" aria-hidden />}
-              <button type="button" className="agile-work-name" aria-pressed={row.id === selected} onClick={() => openWork(row.id)}>
-                <strong>{row.title}</strong><small>{workLabel(row.kind)}</small>
-              </button>
+              <ContextActions label={row.title} groups={workMenu(row)}>
+                <button type="button" className="agile-work-name" aria-pressed={row.id === selected} onClick={() => openWork(row.id)}>
+                  <strong>{row.title}</strong><small>{workLabel(row.kind)}</small>
+                </button>
+              </ContextActions>
             </div>
           </td>
           <td>{row.status ? <DeliveryStatus>{statusLabel(row.status)}</DeliveryStatus> : <span>Loading state…</span>}
@@ -187,8 +195,14 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
         </tr>
         {open && items.map((item) => <tr key={item.id} className="agile-checklist-row">
           <td style={{ paddingInlineStart: `${1 + (depth + 1) * 1.25}rem` }}>
-            <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
-              onChange={(event) => check(row.id, item, event.currentTarget.checked)} />{item.body}</label>
+            <ContextActions label={item.body} groups={[[
+              { label: item.checked ? "Reopen checklist item" : "Check checklist item", disabled: busy, run: () => check(row.id, item, !item.checked) },
+              { label: "Copy checklist text", run: () => copyWorkText(item.body) },
+              { label: "Open parent work", run: () => openWork(row.id) },
+            ]]}>
+              <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
+                onChange={(event) => check(row.id, item, event.currentTarget.checked)} />{item.body}</label>
+            </ContextActions>
           </td>
           <td>{item.checked ? "Checked" : "Open"}</td><td colSpan={3}>Checklist item</td>
         </tr>)}

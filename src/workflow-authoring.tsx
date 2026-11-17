@@ -8,6 +8,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { availableModelSelection, liveModelsQuery, sameModelSelection, useLiveModelOptions } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
@@ -203,6 +204,7 @@ function baseKey(version: Version) { return JSON.stringify([version.id, version.
 export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const projectId = checkout.projectId;
   const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }) });
+  const { copy, feedback } = useContextActionFeedback();
   return <PipelineBuilderLanding checkout={checkout} openWorkspace={openWorkspace}
     authoring={<BuilderAuthoring checkout={checkout} openWorkspace={openWorkspace} />}
     drafts={<section aria-label="Pipeline drafts" className="pipeline-builder-card">
@@ -213,12 +215,17 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
       <div className="pipeline-builder-card-body">
         {drafts.isPending && <p role="status">Loading pipeline drafts…</p>}
         {drafts.error && <p role="alert">{String(drafts.error)}</p>}
+        {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
         {drafts.data?.length === 0 && <p className="pipeline-builder-empty">No pipeline drafts yet.</p>}
         {!!drafts.data?.length && <ul className="workflow-draft-list">
           {drafts.data.map((draft) => <li key={draft.id}>
-            <div><strong>{draft.name ?? "Pipeline authoring request"}</strong>
+            <ContextActions label={draft.name ?? draft.id} className="workflow-draft-menu" groups={[[
+              { label: draft.revision ? "Open draft" : "Open request", run: () => openWorkspace("pipelines", workflowAuthoringTarget(draft.id)) },
+              { label: "Copy draft ID", run: () => copy(draft.id) },
+              ...(draft.revision ? [{ label: "Copy draft revision", run: () => copy(draft.revision!) }] : []),
+            ]]}><div><strong>{draft.name ?? "Pipeline authoring request"}</strong>
               {draft.revision && <p>Revision <code>{draft.revision.slice(0, 12)}</code></p>}
-            </div>
+            </div></ContextActions>
             <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", workflowAuthoringTarget(draft.id))}>
               {draft.revision ? "Open draft" : "Open request"} <ArrowRight size={15} aria-hidden />
             </Button>

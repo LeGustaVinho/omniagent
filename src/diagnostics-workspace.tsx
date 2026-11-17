@@ -1,6 +1,7 @@
 import { Activity, FlaskConical, HardDrive, TerminalSquare, type LucideIcon } from "lucide-react";
 import { useId, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { SystemInstallation } from "@/system-installation";
 import "./diagnostics-workspace.css";
@@ -39,15 +40,17 @@ export function DiagnosticsWorkspace({ active, onSelect, desktop, fixtures }: {
   </section>;
 }
 
-export function DiagnosticsCard({ title, icon: Icon, children, action, heading: Heading = "h2" }: {
-  title: string; icon: LucideIcon; children: ReactNode; action?: ReactNode; heading?: "h1" | "h2";
+export function DiagnosticsCard({ title, icon: Icon, children, action, menu = [], heading: Heading = "h2" }: {
+  title: string; icon: LucideIcon; children: ReactNode; action?: ReactNode; menu?: MenuGroups; heading?: "h1" | "h2";
 }) {
   const id = useId();
   return <section className="diagnostics-card" aria-labelledby={id}>
-    <div className="diagnostics-card-heading">
-      <span className="diagnostics-icon"><Icon size={17} aria-hidden="true" /></span>
-      <Heading id={id} className="text-[15px] font-[650] [overflow-wrap:anywhere]">{title}</Heading>
-    </div>
+    <ContextActions label={title} groups={menu}>
+      <div className="diagnostics-card-heading">
+        <span className="diagnostics-icon"><Icon size={17} aria-hidden="true" /></span>
+        <Heading id={id} className="text-[15px] font-[650] [overflow-wrap:anywhere]">{title}</Heading>
+      </div>
+    </ContextActions>
     <div className="diagnostics-card-body">{children}</div>
     {action && <div className="diagnostics-card-actions">{action}</div>}
   </section>;
@@ -59,6 +62,10 @@ export function DesktopDiagnostics({ openSystem, installation = <SystemInstallat
 }) {
   return <div className="diagnostics-cards">
     <DiagnosticsCard title="Current installation" icon={HardDrive}
+      menu={[[
+        ...(openSystem ? [{ label: "Open System settings", run: openSystem }] : []),
+        ...(openAttempt ? [{ label: "Open run inspector", run: openAttempt }] : []),
+      ]]}
       action={(openSystem || openAttempt) && <>
         {openSystem && <Button type="button" variant="outline" onClick={openSystem}>System settings</Button>}
         {openAttempt && <Button type="button" variant="outline" onClick={openAttempt}>Open run inspector</Button>}

@@ -294,10 +294,13 @@
 }
 
 .settings-row-label > label,
-.settings-row-label > span {
+.settings-row-label > span,
+.settings-row-label .context-actions-target > label {
   display: block;
   font-weight: 550;
 }
+
+.settings-profile-model-menu .model-picker-field { flex: 1; min-width: 0; }
 
 .settings-row-label p,
 .settings-model-row p,

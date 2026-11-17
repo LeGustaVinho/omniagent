@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, FilePlus2, LayoutTemplate, Package as PackageIcon, Plus, Sparkles, Workflow, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, useLiveModelOptions } from "@/live-models";
@@ -74,6 +75,7 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
     queryKey: packagesKey(projectId),
     queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId }),
   });
+  const { copy, feedback } = useContextActionFeedback();
   function openDraft(draft: PackageDraft) {
     client.setQueryData(packageKey(projectId, draft.id), draft);
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
@@ -154,10 +156,15 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
           <div className="pipeline-builder-card-body">
             {packages.isPending && <p role="status">Loading workflow packages…</p>}
             {(packages.error ?? (!creatingPipeline && create.error)) && <p role="alert">{String(packages.error ?? create.error)}</p>}
+            {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
             {packages.data?.length === 0 && <p className="pipeline-builder-empty">No workflow packages yet.</p>}
             {!!packages.data?.length && <ul className="workflow-draft-list">
               {packages.data.map((draft) => <li key={draft.id}>
-                <div><strong>{draft.name}</strong><p>{draft.memberCount} {draft.memberCount === 1 ? "artifact" : "artifacts"} · {draft.published ? "Published" : "Draft"}</p></div>
+                <ContextActions label={draft.name} className="workflow-draft-menu" groups={[[
+                  { label: "Open package", run: () => openWorkspace("pipelines", packageDraftTarget(draft.id)) },
+                  { label: "Copy package ID", run: () => copy(draft.id) },
+                  { label: "Copy draft revision", run: () => copy(draft.revision) },
+                ]]}><div><strong>{draft.name}</strong><p>{draft.memberCount} {draft.memberCount === 1 ? "artifact" : "artifacts"} · {draft.published ? "Published" : "Draft"}</p></div></ContextActions>
                 <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", packageDraftTarget(draft.id))}>
                   Open package <ArrowRight size={15} aria-hidden />
                 </Button>
@@ -195,6 +202,7 @@ function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string;
     queryFn: () => invoke<FactoryTemplate[]>("workflow_factory_templates"),
     enabled: open,
   });
+  const { copy, feedback } = useContextActionFeedback();
   const create = useMutation({
     mutationFn: ({ id, revision }: FactoryTemplate) => invoke<PackageDraft>("create_workflow_factory_draft", {
       projectId, template: id, revision,
@@ -208,13 +216,18 @@ function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string;
     <BuilderLandingDialog title="Workflow templates" icon={<LayoutTemplate size={20} aria-hidden />}
       description="Choose a template to open it as an editable draft in this project." busy={create.isPending}>
       {error && <p role="alert">{String(error)}</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
       {!error && templates.isPending && <p role="status">Loading workflow templates…</p>}
       {templates.data?.length === 0 && <p className="pipeline-builder-empty">No templates are available.</p>}
       {!!templates.data?.length && <ul className="workflow-draft-list">
         {templates.data.map((entry) => <li key={entry.id}>
-          <div><strong>{entry.name}</strong>
+          <ContextActions label={entry.name} className="workflow-draft-menu" groups={[[
+            { label: "Create draft…", disabled: create.isPending, run: () => create.mutate(entry) },
+            { label: "Copy template ID", run: () => copy(entry.id) },
+            { label: "Copy template revision", run: () => copy(String(entry.revision)) },
+          ]]}><div><strong>{entry.name}</strong>
             {entry.members.length > 1 && <p>{entry.members.join(" · ")}</p>}
-          </div>
+          </div></ContextActions>
           <Button type="button" variant="outline" disabled={create.isPending} aria-label={`Create ${entry.name} draft`}
             onClick={() => create.mutate(entry)}>Create draft</Button>
         </li>)}

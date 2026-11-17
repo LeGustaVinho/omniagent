@@ -2,7 +2,9 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitDiffSource, GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
+        GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
+        GitPermalinkLines, GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface,
+        GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
     repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
     store::Store,
@@ -37,6 +39,49 @@ pub async fn git_checkout_history(
 }
 
 #[tauri::command]
+pub async fn git_checkout_file_history(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    branch: Option<String>,
+    pinned_head: Option<String>,
+    offset: u32,
+) -> Result<GitFileHistory, String> {
+    store
+        .git_checkout_file_history(checkout_id, path, branch, pinned_head, offset)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_file_versions(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    base: Option<GitFileVersion>,
+    revised: GitFileVersion,
+) -> Result<GitFileVersionComparison, String> {
+    store
+        .git_compare_file_versions(checkout_id, path, base, revised)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_file_permalink(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    sha: Option<String>,
+    lines: Option<GitPermalinkLines>,
+) -> Result<String, String> {
+    store
+        .git_file_permalink(checkout_id, path, sha, lines)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_diff(
     store: State<'_, Store>,
     checkout_id: String,
@@ -45,6 +90,31 @@ pub async fn git_checkout_diff(
 ) -> Result<GitReviewDiff, String> {
     store
         .git_checkout_diff(checkout_id, path, source)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_conflict_review(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+) -> Result<GitConflictReview, String> {
+    store
+        .git_conflict_review(checkout_id, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_mark_conflict_resolved(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    expected: String,
+) -> Result<(), String> {
+    store
+        .git_mark_conflict_resolved(checkout_id, path, expected)
         .await
         .map_err(review_error)
 }
@@ -71,6 +141,44 @@ pub async fn git_branch_comparison_diff(
 ) -> Result<GitBranchDiff, String> {
     store
         .git_branch_comparison_diff(checkout_id, range, expected, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_review_comments(
+    store: State<'_, Store>,
+    checkout_id: String,
+    surface: GitReviewCommentSurface,
+    path: Option<String>,
+) -> Result<Vec<GitReviewComment>, String> {
+    store
+        .git_review_comments(checkout_id, surface, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_add_review_comment(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: GitReviewCommentRequest,
+) -> Result<GitReviewComment, String> {
+    store
+        .git_add_review_comment(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_set_review_comment_resolved(
+    store: State<'_, Store>,
+    checkout_id: String,
+    comment_id: String,
+    resolved: bool,
+) -> Result<(), String> {
+    store
+        .git_set_review_comment_resolved(checkout_id, comment_id, resolved)
         .await
         .map_err(review_error)
 }
@@ -103,6 +211,21 @@ pub async fn set_git_path_staged(
 ) -> Result<(), String> {
     store
         .set_git_path_staged(checkout_id, path, staged, expected)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn set_git_hunk_staged(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    source: GitDiffSource,
+    expected: GitReviewRevision,
+    hunk_id: String,
+) -> Result<(), String> {
+    store
+        .set_git_hunk_staged(checkout_id, path, source, expected, hunk_id)
         .await
         .map_err(review_error)
 }

@@ -129,6 +129,10 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
   }
 
   function rowAction(conversation: PreviewConversation, action: ConversationAction, section?: string) {
+    if (action === "open") {
+      openConversation(conversation.id);
+      return;
+    }
     if (action === "rename" || action === "new-section" || action === "fork" || action === "delete") {
       openDialog(action, conversation);
       return;
@@ -141,8 +145,8 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
       updateConversation(id, (item) => ({ ...item, archived: !item.archived }));
       setNotice(conversation.archived ? "Conversation restored." : "Conversation moved to Archived.");
     }
-    if (action === "copy-title" || action === "copy-reference") {
-      const value = action === "copy-title" ? conversation.title : `@conversation:${id}`;
+    if (action === "copy-title" || action === "copy-reference" || action === "copy-id") {
+      const value = action === "copy-title" ? conversation.title : action === "copy-id" ? id : `@conversation:${id}`;
       void Promise.resolve().then(() => navigator.clipboard.writeText(value))
         .then(() => setNotice(action === "copy-title" ? "Title copied." : "Example reference copied."))
         .catch(() => setNotice(`Copy: ${value}`));
@@ -234,6 +238,7 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
             {conversations.map((conversation) => (
               <li key={conversation.id}>
                 <ConversationRow {...conversation}
+                  available={(action) => action !== "activity" && action !== "copy-worktree"}
                   sections={library.sections[conversation.project]?.map((name) => ({ id: name, name }))}
                   onAction={(action, section) => rowAction(conversation, action, section)}>
                   <button type="button" className="conv-session-button" data-conversation-id={conversation.id}

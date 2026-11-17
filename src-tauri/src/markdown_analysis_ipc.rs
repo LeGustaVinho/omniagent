@@ -2,7 +2,9 @@ use omniagent::{
     diagnostics,
     markdown_analysis::{MarkdownAnalysis, analyze_markdown},
     markdown_properties::replace_markdown_property,
-    repository::markdown_renames::replace_wiki_note_reference,
+    repository::markdown_renames::{
+        replace_markdown_note_reference, replace_wiki_note_reference_at,
+    },
 };
 
 #[tauri::command]
@@ -22,15 +24,27 @@ pub async fn repair_note_wikilink(
     source_line: Option<u32>,
     destination: String,
     anchor: Option<String>,
+    markdown_source_path: Option<String>,
+    source_offset: Option<usize>,
 ) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        replace_wiki_note_reference(
+    tokio::task::spawn_blocking(move || match markdown_source_path.as_deref() {
+        Some(source) => replace_markdown_note_reference(
+            &markdown,
+            &reference,
+            source,
+            source_line,
+            source_offset,
+            &destination,
+            anchor.as_deref(),
+        ),
+        None => replace_wiki_note_reference_at(
             &markdown,
             &reference,
             source_line,
+            source_offset,
             &destination,
             anchor.as_deref(),
-        )
+        ),
     })
     .await
     .map_err(|error| diagnostics::preview(&error.to_string()))?

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { Handle, MarkerType, Position, useUpdateNodeInternals,
-  type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
+  type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import { Plus, Redo2, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineNodeCatalog, workflowRegistryGroups } from "@/pipeline-catalog";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineToolbar } from "@/pipeline-layout";
 import { WorkflowAgileFields } from "@/workflow-agile-editor";
@@ -134,6 +135,8 @@ const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTh
 
 type PendingConnection = { from: WorkflowEndpoint; replacing?: string };
 type EditorHistory = { past: WorkflowEditorState[]; future: WorkflowEditorState[] };
+type CanvasTarget = { kind: "pane" } | { kind: "node" | "edge"; id: string };
+type CanvasMenu = { target: CanvasTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement };
 const historyLimit = 32;
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
@@ -160,9 +163,13 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
   const addNodeButton = useRef<HTMLButtonElement>(null);
   const [catalogOpen, showCatalog] = useState(false);
+  const [catalogPosition, setCatalogPosition] = useState<{ x: number; y: number }>();
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConnection>();
   const [history, setHistory] = useState<EditorHistory>({ past: [], future: [] });
+  const [flow, setFlow] = useState<ReactFlowInstance<CanvasNode, Edge>>();
+  const [menu, setMenu] = useState<CanvasMenu>();
+  const canvas = useRef<HTMLDivElement>(null);
   const dragging = useRef<WorkflowLayout>({});
   const [previewPositions, setPreviewPositions] = useState<WorkflowLayout>({});
   const node = graph.nodes.find(({ id }) => id === selected);
@@ -225,10 +232,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     let id = stem;
     for (let ordinal = 2; issuedIds.current.has(id) || graph.nodes.some((node) => node.id === id); ordinal += 1) id = `${stem}-${ordinal}`;
     issuedIds.current.add(id);
-    patchGraph((previous) => ({ ...previous, nodes: [...previous.nodes, { id, kind: definition.kind,
-      configuration: defaultConfiguration(definition.configuration) }] }));
+    apply({ ...state, layout: catalogPosition ? { ...layout, [id]: catalogPosition } : layout,
+      graph: { ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration: defaultConfiguration(definition.configuration) }] } });
     select(id);
     closeCatalog();
+    setCatalogPosition(undefined);
   }
 
   function changeNodes(changes: NodeChange<CanvasNode>[], removedWireIds: string[] = []) {
@@ -317,6 +325,70 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         ? item : { ...item, configuration: defaultConfiguration(version.configuration) }) } });
   }
 
+  function reconnect(wire: WorkflowWire) {
+    if (disabled) return;
+    setConnectionError(null);
+    setPending({ from: wire.from, replacing: wireKey(wire) });
+  }
+
+  function openMenu(event: MouseEvent | globalThis.MouseEvent, target: CanvasTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    const origin = event.currentTarget;
+    setMenu({ target, point: { x: event.clientX, y: event.clientY },
+      origin: origin instanceof HTMLElement || origin instanceof SVGElement ? origin : undefined });
+  }
+
+  function copy(text: string) {
+    setConnectionError(null);
+    void Promise.resolve().then(() => navigator.clipboard.writeText(text))
+      .catch(() => setConnectionError("Could not copy to the clipboard."));
+  }
+
+  function menuGroups(target: CanvasTarget): { label: string; groups: MenuGroups } | undefined {
+    if (target.kind === "pane") return { label: "Pipeline canvas", groups: [[
+      { label: "Add node…", disabled, run: () => {
+        setCatalogPosition(menu && flow ? flow.screenToFlowPosition(menu.point) : undefined);
+        showCatalog(true);
+      } },
+      { label: "Fit graph to view", disabled: !flow, run: () => { void flow?.fitView({ padding: 0.15, maxZoom: 1 }); } },
+      { label: "Copy graph JSON", run: () => copy(JSON.stringify(graph, null, 2)) },
+    ], [
+      { label: "Undo graph edit", disabled: disabled || !history.past.length, run: () => restore("undo") },
+      { label: "Redo graph edit", disabled: disabled || !history.future.length, run: () => restore("redo") },
+      ...(pending ? [{ label: "Cancel connection", run: () => { setPending(undefined); setConnectionError(null); } }] : []),
+    ]] };
+    if (target.kind === "node") {
+      const clicked = graph.nodes.find(({ id }) => id === target.id);
+      if (!clicked) return;
+      return { label: clicked.id, groups: [[
+        { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); } },
+        { label: "Copy node ID", run: () => copy(clicked.id) },
+        { label: "Copy node configuration", run: () => copy(JSON.stringify(clicked.configuration, null, 2)) },
+      ], disabled ? [] : [
+        ...(layout[clicked.id] ? [{ label: "Reset node position", run: () => {
+          const nextLayout = { ...layout };
+          delete nextLayout[clicked.id];
+          apply({ ...state, layout: nextLayout });
+        } }] : []),
+        { label: "Remove node", destructive: true, run: () => changeNodes([{ type: "remove", id: clicked.id }]) },
+      ]] };
+    }
+    const wire = graph.wires.find((candidate) => wireKey(candidate) === target.id);
+    if (!wire) return;
+    const details = `${wire.from.node}.${wire.from.port} → ${wire.to.node}.${wire.to.port}`;
+    return { label: details, groups: [[
+      { label: "Inspect source node", run: () => select(wire.from.node) },
+      { label: "Inspect destination node", run: () => select(wire.to.node) },
+      { label: "Copy connection", run: () => copy(details) },
+    ], disabled ? [] : [
+      { label: "Reconnect destination…", run: () => reconnect(wire) },
+      { label: "Remove connection", destructive: true, run: () => changeNodes([], [target.id]) },
+    ]] };
+  }
+
+  const context = menu && menuGroups(menu.target);
+
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: item.id === selected,
@@ -340,7 +412,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
-      <Button type="button" ref={addNodeButton} variant="outline" disabled={disabled} aria-expanded={catalogOpen} onClick={() => showCatalog(!catalogOpen)}>
+      <Button type="button" ref={addNodeButton} variant="outline" disabled={disabled} aria-expanded={catalogOpen} onClick={() => {
+        setCatalogPosition(undefined);
+        showCatalog(!catalogOpen);
+      }}>
         <Plus size={15} /> Add node
       </Button>
       <div className="workflow-history" aria-label="Graph edit history" role="group">
@@ -362,7 +437,18 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       onClosePalette={closeCatalog}
       inspectorClassName="workflow-graph-inspector pipeline-form pipeline-stack" palette={catalogOpen && !disabled ?
         <section aria-label="Node catalog"><PipelineNodeCatalog groups={groups} searchLabel="Search node catalog" compact /></section> : undefined}
-      canvas={<div className="workflow-graph-canvas">
+      canvas={<div ref={canvas} tabIndex={0} aria-label="Workflow canvas actions" className="workflow-graph-canvas" onKeyDown={(event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        if (!(event.target instanceof Element)) return;
+        const anchor = event.target.closest(".react-flow__node, .react-flow__edge");
+        const id = anchor?.getAttribute("data-id");
+        const origin = anchor instanceof HTMLElement || anchor instanceof SVGElement ? anchor : event.currentTarget;
+        const rect = origin.getBoundingClientRect();
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu({ target: id ? { kind: anchor?.classList.contains("react-flow__edge") ? "edge" : "node", id } : { kind: "pane" },
+          point: { x: rect.left + 8, y: rect.top + 8 }, origin });
+      }}>
         <PipelineGraphCanvas<CanvasNode, Edge> interactive={!disabled} nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
@@ -377,6 +463,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
             if (!disabled && removed.size) patchGraph((previous) => ({ ...previous, wires: previous.wires.filter((wire) => !removed.has(wireKey(wire))) }));
           }}
           onNodeClick={(_, selectedNode) => { select(selectedNode.id); setConnectionError(null); }}
+          onInit={setFlow}
+          onPaneContextMenu={(event) => openMenu(event, { kind: "pane" })}
+          onNodeContextMenu={(event, clicked) => openMenu(event, { kind: "node", id: clicked.id })}
+          onEdgeContextMenu={(event, clicked) => openMenu(event, { kind: "edge", id: clicked.id })}
           onConnect={(candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire); }}
           onReconnect={(previous, candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire, previous.id); }}
         />
@@ -399,18 +489,15 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
             disabled={disabled} apply={() => updateVersion(node, available)} />}
           {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
             definitions={definitions} definition={definition} disabled={disabled} connect={connect} />}
-          <NodeConnections node={node} wires={graph.wires} definitions={definitions} disabled={disabled} reconnect={(wire) => {
-            setConnectionError(null);
-            setPending({ from: wire.from, replacing: wireKey(wire) });
-          }} remove={(wire) => {
-            if (pending?.replacing === wireKey(wire)) setPending(undefined);
-            patchGraph((previous) => ({ ...previous, wires: previous.wires.filter((item) => wireKey(item) !== wireKey(wire)) }));
-          }} />
+          <NodeConnections node={node} wires={graph.wires} definitions={definitions} disabled={disabled} reconnect={reconnect}
+            remove={(wire) => changeNodes([], [wireKey(wire)])} />
         </>}
         {node && <Button type="button" variant="outline" disabled={disabled} onClick={() => changeNodes([{ id: node.id, type: "remove" }])}>
           <Trash2 size={14} /> Remove node
         </Button>}
       </>} />
+    {menu && context && <PositionedContextActions {...context} point={menu.point} onClose={() => setMenu(undefined)}
+      restoreFocus={() => (menu.origin?.isConnected && menu.origin.tabIndex >= 0 ? menu.origin : canvas.current)?.focus()} />}
   </section>;
 }
 

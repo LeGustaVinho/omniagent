@@ -1,17 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
+import { ContextActions, type MenuAction } from "@/components/ui/context-actions";
 
-export function NotePropertyEditor({ name, value, read, update, replace }: {
+export function NotePropertyEditor({ name, value, read, update, replace, actions }: {
   name: string;
   value: string;
   read: () => string | undefined;
   update: (markdown: string) => void;
   replace?: (markdown: string, name: string, value: string) => string;
+  actions?: readonly MenuAction[];
 }) {
   const inputId = useId();
   const [pending, setPending] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const input = useRef<HTMLInputElement>(null);
 
   async function apply(event: FormEvent) {
     event.preventDefault();
@@ -36,8 +39,12 @@ export function NotePropertyEditor({ name, value, read, update, replace }: {
   }
 
   return <form className="note-property-row" onSubmit={(event) => void apply(event)}>
-    <label htmlFor={inputId}>{name}</label>
-    <input id={inputId} value={pending ?? value} onChange={(event) => setPending(event.currentTarget.value)} disabled={saving} />
+    <ContextActions label={name} groups={actions ? [[{ label: "Edit property", disabled: saving, run: () => {
+      requestAnimationFrame(() => { input.current?.focus(); input.current?.select(); });
+    } }, ...actions]] : []}>
+      <label htmlFor={inputId}>{name}</label>
+    </ContextActions>
+    <input ref={input} id={inputId} value={pending ?? value} onChange={(event) => setPending(event.currentTarget.value)} disabled={saving} />
     {pending !== undefined && pending !== value && <button className="fw-btn" type="submit" disabled={saving}>Apply</button>}
     {error && <span role="alert" className="file-help">{error}</span>}
   </form>;

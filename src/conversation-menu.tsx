@@ -1,10 +1,10 @@
-import { Archive, ChevronRight, Clipboard, Ellipsis, Eye, GitFork, Link, ListPlus, Pencil, Pin, Trash2 } from "lucide-react";
+import { Activity, Archive, ChevronRight, Clipboard, Ellipsis, Eye, GitFork, Link, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 export type ConversationAction =
-  | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
-  | "copy-title" | "copy-reference" | "archive" | "delete";
+  | "open" | "activity" | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
+  | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "archive" | "delete";
 
 export type ConversationMenuProps = {
   title: string;
@@ -24,6 +24,10 @@ type ItemDescription = {
 };
 
 function readActions(props: ConversationMenuProps) {
+  const navigation: ItemDescription[] = [
+    { action: "open", label: "Open conversation", icon: <MessageSquare /> },
+    { action: "activity", label: "Inspect latest attempt", icon: <Activity /> },
+  ];
   const organize: ItemDescription[] = [
     { action: "rename", label: "Rename", icon: <Pencil /> },
     { action: "pin", label: props.pinned ? "Unpin" : "Pin", icon: <Pin /> },
@@ -37,20 +41,23 @@ function readActions(props: ConversationMenuProps) {
   const fork: ItemDescription = { action: "fork", label: "Create fork…", icon: <GitFork /> };
   const copy: ItemDescription[] = [
     { action: "copy-title", label: "Title" },
+    { action: "copy-id", label: "Conversation ID" },
+    { action: "copy-worktree", label: "Worktree path" },
     { action: "copy-reference", label: "Local reference", icon: <Link /> },
   ];
   const retain: ItemDescription[] = [
     { action: "archive", label: props.archived ? "Unarchive" : "Archive", icon: <Archive /> },
     { action: "delete", label: "Delete permanently…", icon: <Trash2 /> },
   ];
-  return { organize, section, fork, copy, retain };
+  return { navigation, organize, section, fork, copy, retain };
 }
 
 function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & { variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
-  const { organize, section, fork, copy, retain } = readActions(props);
+  const { navigation, organize, section, fork, copy, retain } = readActions(props);
   const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? true);
   const retentionItems = availableItems(retain);
+  const navigationItems = availableItems(navigation);
 
   function item({ action, label, icon, section }: ItemDescription) {
     return (
@@ -77,6 +84,8 @@ function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & 
 
   return (
     <>
+      {navigationItems.map(item)}
+      {navigationItems.length > 0 && <Separator className="conv-menu-separator" />}
       {availableItems(organize).map(item)}
       {submenu("Section", <ListPlus />, section)}
       <Separator className="conv-menu-separator" />
@@ -92,12 +101,15 @@ export function ConversationRow({ children, ...props }: ConversationMenuProps & 
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const keyboardTarget = useRef<HTMLElement>(null);
   return (
     <ContextMenu.Root>
       <ContextMenu.Trigger asChild>
         <div className="conv-session-row" onKeyDown={(event) => {
           if (!(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
           event.preventDefault();
+          event.stopPropagation();
+          keyboardTarget.current = event.target as HTMLElement;
           setOpen(true);
         }}>
           {children}
@@ -106,7 +118,13 @@ export function ConversationRow({ children, ...props }: ConversationMenuProps & 
               <Ellipsis aria-hidden />
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content className="conv-menu" align="end" sideOffset={5} collisionPadding={8}>
+              <DropdownMenu.Content className="conv-menu" align="end" sideOffset={5} collisionPadding={8} onCloseAutoFocus={(event) => {
+                const target = keyboardTarget.current;
+                keyboardTarget.current = null;
+                if (!target?.isConnected || event.defaultPrevented) return;
+                event.preventDefault();
+                target.focus();
+              }}>
                 <ConversationMenuContent variant="dropdown" {...props} />
               </DropdownMenu.Content>
             </DropdownMenu.Portal>

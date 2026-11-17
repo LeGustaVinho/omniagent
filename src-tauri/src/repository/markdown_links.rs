@@ -447,7 +447,7 @@ fn anchor_label(entry: &MarkdownLinkAnchor) -> String {
     }
 }
 
-fn anchor_key(kind: MarkdownLinkAnchorKind, label: &str) -> String {
+pub(super) fn anchor_key(kind: MarkdownLinkAnchorKind, label: &str) -> String {
     if kind == MarkdownLinkAnchorKind::Block {
         return label.trim_start_matches('^').to_owned();
     }

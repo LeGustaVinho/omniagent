@@ -85,9 +85,9 @@ describe("delivery review UI", () => {
     render(<GitHarness start="review" />);
     const files = () => within(screen.getByRole("region", { name: "Changed files" }));
 
-    expect(files().getByRole("button", { name: /docs\/release\.md/ })).toBeDefined();
+    expect(files().getByRole("button", { name: "docs/release.md · Modified" })).toBeDefined();
     await user.selectOptions(screen.getByLabelText("Git worktree"), "main");
-    expect(files().getByRole("button", { name: /docs\/release\.md/ })).toBeDefined();
+    expect(files().getByRole("button", { name: "docs/release.md · Modified" })).toBeDefined();
     await user.selectOptions(screen.getByLabelText("Diff source"), "working");
     expect(screen.getByText("No changes")).toBeDefined();
   });

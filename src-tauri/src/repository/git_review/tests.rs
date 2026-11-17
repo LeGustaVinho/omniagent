@@ -28,6 +28,564 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_result() -> Result<()> {
+    use crate::store::DraftKey;
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("conflict worktree");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "conflict [literal].txt";
+    let deleted = "deleted-incoming.txt";
+    fs::write(root.join(path), "base\n")?;
+    fs::write(root.join(deleted), "before deletion\n")?;
+    fs::write(root.join("unrelated.txt"), "unrelated base\n")?;
+    commit_fixture(&root, "Base")?;
+    git(&root, &["checkout", "--quiet", "-b", "incoming"])?;
+    fs::write(root.join(path), "incoming\n")?;
+    fs::remove_file(root.join(deleted))?;
+    commit_fixture(&root, "Incoming")?;
+    git(&root, &["checkout", "--quiet", "main"])?;
+    fs::write(root.join(path), "local\n")?;
+    fs::write(root.join(deleted), "updated locally\n")?;
+    commit_fixture(&root, "Local")?;
+    assert!(
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "merge",
+                "--no-edit",
+                "incoming"
+            ]
+        )
+        .is_err()
+    );
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let original = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    let details = serde_json::to_value(&original)?;
+    assert_eq!(details["base"]["file"]["content"], "base\n");
+    assert_eq!(details["local"]["file"]["content"], "local\n");
+    assert_eq!(details["incoming"]["file"]["content"], "incoming\n");
+    assert!(
+        details["working"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("<<<<<<<")
+    );
+    assert!(original.resolution_blocked.is_some());
+    let deleted_before = git(&root, &["ls-files", "--unmerged", "--", deleted])?;
+    let missing = serde_json::to_value(
+        store
+            .git_conflict_review(checkout.clone(), deleted.into())
+            .await?,
+    )?;
+    assert_eq!(missing["incoming"], serde_json::Value::Null);
+    assert_eq!(missing["local"]["file"]["content"], "updated locally\n");
+    assert!(
+        store
+            .git_conflict_review(checkout.clone(), "unrelated.txt".into())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .set_git_path_staged(
+                checkout.clone(),
+                path.into(),
+                true,
+                original.revision.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .set_git_path_staged(
+                checkout.clone(),
+                path.into(),
+                false,
+                original.revision.clone()
+            )
+            .await
+            .is_err()
+    );
+    let original_snapshot = original.snapshot.context("snapshot of unedited conflict")?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), original_snapshot.clone())
+            .await
+            .is_err()
+    );
+
+    let merged = "checked and combined\n";
+    fs::write(root.join(path), merged)?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), original_snapshot)
+            .await
+            .is_err()
+    );
+    let ready = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    assert!(ready.resolution_blocked.is_none());
+    let snapshot = ready.snapshot.context("reviewed working resolution")?;
+    let draft = || DraftKey::CheckoutFile {
+        checkout_id: checkout.clone(),
+        relative_path: path.to_uppercase(),
+    };
+    store
+        .save_draft(draft(), b"unsaved edit".to_vec())
+        .await?;
+    assert!(
+        store
+            .git_conflict_review(checkout.clone(), path.into())
+            .await?
+            .resolution_blocked
+            .is_some()
+    );
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), snapshot.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.load_draft(draft()).await?,
+        Some(b"unsaved edit".to_vec())
+    );
+    store.delete_draft(draft()).await?;
+
+    fs::write(root.join("unrelated.txt"), "separately staged change\n")?;
+    git(&root, &["add", "--", "unrelated.txt"])?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), path.into(), snapshot)
+            .await
+            .is_err()
+    );
+    let fresh = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?;
+    store
+        .git_mark_conflict_resolved(
+            checkout.clone(),
+            path.into(),
+            fresh.snapshot.context("refreshed conflict review")?,
+        )
+        .await?;
+    assert!(
+        store
+            .git_conflict_review(checkout, path.into())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git(&root, &["show", &format!(":{path}")])?,
+        merged.trim_end()
+    );
+    assert_eq!(
+        git(&root, &["show", ":unrelated.txt"])?,
+        "separately staged change"
+    );
+    assert_eq!(
+        git(&root, &["ls-files", "--unmerged", "--", deleted])?,
+        deleted_before
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, merged);
+    Ok(())
+}
+
+#[tokio::test]
+async fn persists_reviewed_line_ranges_and_rejects_stale_or_cross_checkout_anchors() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("comment-repo");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "example.txt";
+    fs::write(root.join(path), "original\nbase second\n")?;
+    commit_fixture(&root, "Base")?;
+    let raw = "first\r\nsecond α\r\nthird β\rfourth\n";
+    fs::write(root.join(path), raw)?;
+
+    let database = temporary.path().join("review.sqlite");
+    let store = Store::open(database.clone())?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let scope = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?
+        .comment_scope
+        .context("commentable working comparison")?;
+    let request = |side: &str, start: u64, end: u64| {
+        serde_json::from_value::<GitReviewCommentRequest>(serde_json::json!({
+            "path": path, "source": &scope.source, "snapshot": &scope.snapshot, "side": side,
+            "startLine": start, "endLine": end, "body": "Explain the original behavior",
+        }))
+    };
+    let comment = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 2, 4)?)
+            .await?,
+    )?;
+    assert_eq!(comment["excerpt"], "second α\r\nthird β\rfourth\n");
+    assert_eq!(comment["scope"]["snapshot"], scope.snapshot);
+    let id = comment["id"]
+        .as_str()
+        .context("stored review comment ID")?
+        .to_owned();
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 5, 5)?)
+            .await
+            .is_err()
+    );
+    let original = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request("original", 2, 2)?)
+            .await?,
+    )?;
+    assert_eq!(original["excerpt"], "base second\n");
+
+    let worktree = temporary.path().join("linked");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            &worktree.to_string_lossy(),
+        ],
+    )?;
+    fs::write(worktree.join(path), raw)?;
+    let linked = register(&store, worktree).await?.checkout_id;
+    assert_ne!(linked, checkout);
+    assert!(
+        store
+            .git_add_review_comment(linked.clone(), request("modified", 2, 4)?)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .git_set_review_comment_resolved(linked.clone(), id.clone(), true)
+            .await
+            .is_err()
+    );
+    let payload_is_protected = store
+        .execute(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) = 0 FROM git_review_comments
+         WHERE instr(payload, CAST('Explain the original behavior' AS BLOB)) > 0",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
+    assert!(payload_is_protected);
+    drop(store);
+
+    let store = Store::open(database)?;
+    fs::write(
+        root.join(path),
+        raw.replace("second α", "different contents"),
+    )?;
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 2, 4)?)
+            .await
+            .is_err()
+    );
+    let revised = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?
+        .comment_scope
+        .context("updated worktree comparator")?;
+    assert_ne!(scope.snapshot, revised.snapshot);
+    store
+        .git_set_review_comment_resolved(checkout.clone(), id.clone(), true)
+        .await?;
+    let saved = serde_json::to_value(
+        store
+            .git_review_comments(
+                checkout.clone(),
+                GitReviewCommentSurface::Working,
+                Some(path.into()),
+            )
+            .await?,
+    )?;
+    let retained = saved
+        .as_array()
+        .context("persisted comments")?
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .context("retained review comment")?;
+    assert_eq!(retained["excerpt"], comment["excerpt"]);
+    assert_eq!(retained["scope"], comment["scope"]);
+    assert_eq!(retained["resolved"], true);
+    assert!(
+        store
+            .git_review_comments(linked, GitReviewCommentSurface::Working, None)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        store
+            .git_review_comments(checkout, GitReviewCommentSurface::Staged, None)
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("file-history");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old_path = "previous name.md";
+    let path = "read me [a].md";
+    fs::write(root.join(old_path), "original\n")?;
+    let original = commit_fixture(&root, "Create the note")?;
+    git(&root, &["mv", old_path, path])?;
+    let renamed = commit_fixture(&root, "Rename the note")?;
+    fs::write(root.join(path), "staged\n")?;
+    git(&root, &["--literal-pathspecs", "add", "--", path])?;
+    fs::write(root.join(path), "unsaved to Git\n")?;
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let page = store
+        .git_checkout_file_history(checkout.clone(), path.into(), None, None, 0)
+        .await?;
+    assert_eq!(page.head.as_deref(), Some(renamed.as_str()));
+    assert_eq!(page.entries.len(), 2);
+    assert_eq!(page.entries[0].status, 'R');
+    assert_eq!(page.entries[0].previous_path.as_deref(), Some(old_path));
+    assert_eq!(page.entries[1].sha, original);
+    assert_eq!(page.entries[1].path, old_path);
+    assert_eq!(page.entries[1].parent, None);
+
+    let next = store
+        .git_checkout_file_history(checkout.clone(), path.into(), None, page.head, 1)
+        .await?;
+    assert_eq!(next.entries.len(), 1);
+    assert_eq!(next.entries[0].path, old_path);
+    let staged = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(GitFileVersion::Commit {
+                sha: original.clone(),
+                path: old_path.into(),
+            }),
+            GitFileVersion::Index,
+        )
+        .await?;
+    assert_eq!(
+        staged.original,
+        GitFileSide::Text {
+            content: "original\n".into()
+        }
+    );
+    assert_eq!(
+        staged.modified,
+        GitFileSide::Text {
+            content: "staged\n".into()
+        }
+    );
+    let disk = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(GitFileVersion::Head),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert_eq!(disk.original, staged.original);
+    assert_eq!(
+        disk.modified,
+        GitFileSide::Text {
+            content: "unsaved to Git\n".into()
+        }
+    );
+    git(
+        &root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:some-owner/example.git",
+        ],
+    )?;
+    let line = |text: &str| GitPermalinkLines {
+        start_line: 1,
+        end_line: 1,
+        text: text.to_owned(),
+    };
+    assert_eq!(
+        store
+            .git_file_permalink(checkout.clone(), path.into(), None, Some(line("original")))
+            .await?,
+        format!(
+            "https://github.com/some-owner/example/blob/{renamed}/read%20me%20%5Ba%5D.md?plain=1#L1"
+        )
+    );
+    assert!(
+        store
+            .git_file_permalink(
+                checkout.clone(),
+                path.into(),
+                None,
+                Some(line("unsaved to Git"))
+            )
+            .await
+            .is_err()
+    );
+    git(
+        &root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://test-token@gitlab.com/subgroup/example.git",
+        ],
+    )?;
+    assert_eq!(
+        store
+            .git_file_permalink(checkout.clone(), old_path.into(), Some(original), None)
+            .await?,
+        format!(
+            "https://gitlab.com/subgroup/example/-/blob/{}/previous%20name.md",
+            next.entries[0].sha
+        )
+    );
+    assert!(
+        store
+            .git_compare_file_versions(
+                checkout,
+                path.into(),
+                None,
+                GitFileVersion::Commit {
+                    sha: "main".into(),
+                    path: old_path.into(),
+                }
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("hunks");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "example text.txt";
+    let base = (1..=36)
+        .map(|line| format!("Line {line}\n"))
+        .collect::<String>();
+    fs::write(root.join(path), &base)?;
+    commit_fixture(&root, "Base content")?;
+    let first = base.replace("Line 3\n", "First change\n");
+    let both = first.replace("Line 31\n", "Second change\n");
+    fs::write(root.join(path), &both)?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let working = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert_eq!(working.hunks.len(), 2);
+    assert!(working.hunks[0].patch.contains("+First change"));
+    assert!(!working.hunks[0].patch.contains("+Second change"));
+
+    fs::write(
+        root.join(path),
+        both.replace("First change", "Updated after review"),
+    )?;
+    assert!(
+        store
+            .set_git_hunk_staged(
+                checkout.clone(),
+                path.into(),
+                GitDiffSource::Working,
+                working.revision.clone(),
+                working.hunks[0].id.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(git(&root, &["show", ":example text.txt"])?, base.trim_end());
+
+    fs::write(root.join(path), &both)?;
+    let working = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    store
+        .set_git_hunk_staged(
+            checkout.clone(),
+            path.into(),
+            GitDiffSource::Working,
+            working.revision.clone(),
+            working.hunks[0].id.clone(),
+        )
+        .await?;
+    assert_eq!(
+        git(&root, &["show", ":example text.txt"])?,
+        first.trim_end()
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, both);
+    assert!(
+        store
+            .set_git_hunk_staged(
+                checkout.clone(),
+                path.into(),
+                GitDiffSource::Working,
+                working.revision,
+                working.hunks[1].id.clone()
+            )
+            .await
+            .is_err()
+    );
+
+    git(&root, &["add", "--", path])?;
+    let staged = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Staged)
+        .await?;
+    assert_eq!(staged.hunks.len(), 2);
+    store
+        .set_git_hunk_staged(
+            checkout,
+            path.into(),
+            GitDiffSource::Staged,
+            staged.revision,
+            staged.hunks[1].id.clone(),
+        )
+        .await?;
+    assert_eq!(
+        git(&root, &["show", ":example text.txt"])?,
+        first.trim_end()
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, both);
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("comparison");
@@ -99,7 +657,41 @@ async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content(
             content: "committed topic text\n".into()
         }
     );
+    let scope = diff
+        .comment_scope
+        .context("commentable branch comparison")?;
+    let request = || {
+        serde_json::from_value::<GitReviewCommentRequest>(serde_json::json!({
+            "path": "README.md", "source": &scope.source, "snapshot": &scope.snapshot,
+            "side": "modified", "startLine": 1, "endLine": 1, "body": "Check this committed wording",
+        }))
+    };
+    let comment = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request()?)
+            .await?,
+    )?;
+    assert_eq!(comment["excerpt"], "committed topic text\n");
+    assert_eq!(comment["scope"]["source"]["revisions"]["base"], base);
+    assert_eq!(comment["scope"]["source"]["revisions"]["head"], feature);
+    assert_eq!(
+        comment["scope"]["source"]["revisions"]["mergeBase"],
+        ancestor
+    );
     git(&root, &["update-ref", "refs/heads/topic", &base, &feature])?;
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request()?)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .git_review_comments(checkout.clone(), GitReviewCommentSurface::Branch, None)
+            .await?
+            .len(),
+        1
+    );
     let stale = store
         .git_branch_comparison_diff(checkout, range(), expected(), "README.md".into())
         .await;

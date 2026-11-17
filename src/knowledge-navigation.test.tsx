@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -136,4 +136,20 @@ it("opens the exact source of an unresolved inline link when repair is unavailab
   render(<KnowledgeLinkPreview link={link} onOpen={open} />);
   await userEvent.setup().click(screen.getByRole("button", { name: "Broken · Missing" }));
   expect(open).toHaveBeenCalledExactlyOnceWith(source);
+});
+
+it("opens the exact reference location and repair from the link menu", async () => {
+  const open = vi.fn();
+  const repair = vi.fn();
+  const source = { path: "notes/Start.md", line: 18, anchor: "^ref" };
+  const link: KnowledgeOutgoingLink = { label: "Broken", source, rawTarget: "Not indexed", resolution: { kind: "missing" } };
+  render(<KnowledgeLinks outgoing={[link]} backlinks={[]} onOpen={open} onRepair={repair} actions={() => []} />);
+  const user = userEvent.setup();
+  const row = screen.getByRole("button", { name: "Broken · Missing" });
+  fireEvent.contextMenu(row);
+  await user.click(await screen.findByRole("menuitem", { name: "Go to link in source" }));
+  expect(open).toHaveBeenCalledExactlyOnceWith(source);
+  fireEvent.contextMenu(row);
+  await user.click(await screen.findByRole("menuitem", { name: "Repair link…" }));
+  expect(repair).toHaveBeenCalledExactlyOnceWith(link);
 });

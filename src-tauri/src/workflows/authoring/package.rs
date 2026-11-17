@@ -190,6 +190,52 @@ impl Store {
         .await
     }
 
+    pub async fn duplicate_workflow_template_draft(
+        &self,
+        project: String,
+        version: PackageArtifactVersion,
+    ) -> Result<WorkflowPackageDraft> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let saved = publish::load_published(&tx, &project, &version)?
+                .context("The selected published workflow is unavailable in this project")?;
+            let PackageArtifactBody::Pipeline { mut graph } = saved.body else {
+                anyhow::bail!("Select a published pipeline");
+            };
+            let mut name = saved.name;
+            name.truncate(name.floor_char_boundary(155));
+            name.push_str(" copy");
+            graph.name.clone_from(&name);
+            let key = "pipeline".to_owned();
+            let package = WorkflowPackage {
+                name: name.clone(),
+                members: vec![PackageMember {
+                    key: key.clone(),
+                    name,
+                    destination: PackageDestination::Project,
+                    base: None,
+                    body: PackageArtifactBody::Pipeline { graph },
+                    references: saved
+                        .references
+                        .into_iter()
+                        .map(|(slot, reference)| (slot, reference.into()))
+                        .collect(),
+                }],
+            };
+            validate_structure(&package)?;
+            let mut document = PackageDocument {
+                package,
+                definitions: BTreeMap::from([(key.clone(), saved.definitions)]),
+                layouts: BTreeMap::from([(key, saved.layout)]),
+            };
+            document.retain_layouts();
+            let draft = create_draft_document(&tx, &project, None, &document)?;
+            tx.commit()?;
+            Ok(draft)
+        })
+        .await
+    }
+
     pub async fn save_workflow_package(
         &self,
         project: String,

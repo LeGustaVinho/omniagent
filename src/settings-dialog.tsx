@@ -219,7 +219,7 @@ function SettingsSession({
     }
     const setting = panel.querySelector<HTMLElement>(`[data-setting="${selection.anchor}"]`);
     setting?.scrollIntoView?.({ block: "start" });
-    const focus = setting?.querySelector<HTMLElement>("button:not([disabled]), input:not([disabled]), select:not([disabled]), summary")
+    const focus = setting?.querySelector<HTMLElement>("button:not([disabled], .context-actions-more), input:not([disabled]), select:not([disabled]), summary")
       ?? (setting?.hasAttribute("tabindex") ? setting : pageTitle.current);
     focus?.focus({ preventScroll: true });
   }, [open, selection]);

@@ -3,7 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { PanelRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { GitDiffReview, type GitTextComparison } from "@/git-diff-view";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
+import { excerptReference, type EditorExcerpt } from "@/editor-context";
+import { GitConflictReview } from "@/git-conflict-review";
+import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
+import { useGitReviewComments, type GitReviewScope } from "@/git-review-comments";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
 import { InlineIssue } from "@/tasks-git-ui";
 import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
@@ -15,7 +19,7 @@ export type Worktree = { checkoutId: string | null; root: string; branch: string
 export type CheckoutReview = { checkoutId: string; root: string; revision: ReviewRevision; managed: boolean; changes: FileStatus[]; branches: Branch[]; worktrees: Worktree[] };
 type FileSide = { status: "missing" } | { status: "text"; content: string } | { status: "unavailable"; reason: string };
 type Source = "working" | "staged";
-type TextDiff = { path: string; original: FileSide; modified: FileSide };
+type TextDiff = { path: string; original: FileSide; modified: FileSide; hunks?: GitHunk[]; revision?: ReviewRevision; commentScope?: GitReviewScope | null };
 type BranchRevisions = { base: string; head: string; mergeBase: string };
 const reviewSources = ["working", "staged", "branch"] as const;
 type ReviewSource = typeof reviewSources[number];
@@ -27,6 +31,10 @@ const languages: Record<string, string> = {
 };
 const sourceLabels: Record<Source, string> = { working: "Working tree", staged: "Staged" };
 
+function isUnmerged({ staged, working }: FileStatus) {
+  return staged === "U" || working === "U" || (staged === working && (staged === "A" || staged === "D"));
+}
+
 export function useGitCheckoutReview(checkoutId: string, enabled = true) {
   return useQuery({
     queryKey: ["git-review", checkoutId], queryFn: () => invoke<CheckoutReview>("git_checkout_review", { checkoutId }),
@@ -34,33 +42,51 @@ export function useGitCheckoutReview(checkoutId: string, enabled = true) {
   });
 }
 
-export function GitCheckoutChanges({ review, indexActions, initialSource = "working", openFile, openPanel, onClose }: {
+export function GitCheckoutChanges({ review, indexActions, initialSource = "working", initialPath, openFile, openPanel, openConversation, onClose }: {
   review: CheckoutReview;
   indexActions?: boolean;
   initialSource?: Source;
-  openFile?: (path: string) => void;
+  initialPath?: string;
+  openFile?: (path: string, line?: number) => void;
   openPanel?: () => void;
+  openConversation?: (id: string) => void;
   onClose?: () => void;
 }) {
   const [source, setSource] = useState<ReviewSource>(initialSource);
-  const [selection, setSelection] = useState<string>();
+  const [selection, setSelection] = useState(initialPath);
+  const [conflict, setConflict] = useState<string>();
+  const changeStage = useChangeStage(review);
+  const conversationActions = useCheckoutConversationActions(review.checkoutId, !openConversation, (id) => openConversation?.(id));
   const view = useRef<HTMLDivElement>(null);
   const indexTrigger = useRef<HTMLButtonElement>(null);
   const indexDrawer = useWorkspaceSize(view).width < 872;
   const [indexOpen, setIndexOpen] = useState(false);
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
-    return status ? [{ path: file.path, kind: statusLabels[status] ?? status }] : [];
+    return status ? [{ path: file.path, kind: isUnmerged(file) ? "Unmerged" : statusLabels[status] ?? status }] : [];
   });
-  const path = selection === "" ? undefined : files.find((file) => file.path === selection)?.path ?? files[0]?.path;
+  const selectedFile = selection === undefined ? files[0] : files.find((file) => file.path === selection);
+  const path = selectedFile?.path;
+  const unmerged = selectedFile?.kind === "Unmerged";
   const diff = useQuery({
     queryKey: ["git-live-diff", review.checkoutId, source, path, review.revision.branch, review.revision.head, review.revision.index],
     queryFn: () => invoke<TextDiff>("git_checkout_diff", { checkoutId: review.checkoutId, path, source }),
-    enabled: !!path, refetchInterval: 2500, retry: false,
+    enabled: Boolean(path && !unmerged), refetchInterval: 2500, retry: false,
   });
-  const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const comparison = useMemo(() => diff.error || unmerged ? null : comparisonFile(diff.data), [diff.data, diff.error, unmerged]);
+  const comments = useGitReviewComments({
+    checkoutId: review.checkoutId, surface: source, comparisonPath: comparison?.path,
+    scope: comparison ? diff.data?.commentScope : undefined, language: comparison?.language,
+    startContextText: openConversation ? conversationActions.startContextText : undefined,
+    enabled: source !== "branch",
+  });
+  const diffRevision = diff.data?.revision;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
+  const addDiffExcerpt = openConversation && diffRevision ? (selection: EditorExcerpt, side: string, instruction?: string) => {
+    conversationActions.startContextText({ title: `Git diff · ${selection.path}`, text: selection.text, language: selection.language,
+      reference: `${excerptReference(selection)} · ${side} · HEAD ${diffRevision.head ?? "Unborn"} · Index ${diffRevision.index ?? "None"}` }, instruction);
+  } : undefined;
   function closeIndex() {
     setIndexOpen(false);
     requestAnimationFrame(() => indexTrigger.current?.focus({ preventScroll: true }));
@@ -73,18 +99,49 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
       {source !== "branch" && indexActions && indexDrawer && <Button type="button" ref={indexTrigger} variant="outline"
         aria-expanded={indexOpen} onClick={() => setIndexOpen(true)}><PanelRight size={16} aria-hidden="true" /> Index</Button>}
     </div>
-    {source === "branch" ? <GitBranchComparison review={review} onClose={onClose} /> : <div className="delivery-body">
+    {source === "branch" ? <GitBranchComparison review={review} onClose={onClose}
+      startContextText={openConversation ? conversationActions.startContextText : undefined} /> : <div className="delivery-body">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
           files={files} selectedPath={path} select={setSelection} comparison={comparison}
-          preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
+          notice={selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
+          preview={path && (unmerged ? <div className="grid justify-items-start gap-2 p-3">
+            <p className="text-sm">This file has unmerged Git index stages.</p>
+            <Button type="button" variant="outline" onClick={() => setConflict(path)}>Review conflict</Button>
+          </div> : diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
             : diff.error ? <div className="p-3"><InlineIssue>{String(diff.error)}</InlineIssue></div>
             : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
-          onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined} />
+          onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
+          openLine={canOpen ? (line) => openFile(comparison.path, line) : undefined} addExcerpt={addDiffExcerpt}
+          reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
+          hunkActions={(hunk) => [[
+            ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
+              disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
+            ...(openConversation && comparison && diffRevision ? [{ label: "Review hunk in conversation…", run: () => {
+              const head = diffRevision.head ?? "Unborn";
+              const index = diffRevision.index ?? "None";
+              const line = Math.max(1, hunk.modifiedLine);
+              const description = source === "working" ? "index to worktree" : "HEAD to staged index";
+              conversationActions.startExcerpt({ path: comparison.path, startLine: line, endLine: line, text: hunk.patch, language: "diff" },
+                `Review this Git hunk (${description}).\nHEAD: ${head}\nIndex fingerprint: ${index}`);
+            } }] : []),
+          ]]}
+          fileActions={(file) => {
+            if (file.kind === "Unmerged") return [[{ label: "Review conflict…", run: () => setConflict(file.path) }]];
+            const entry = review.changes.find((change) => change.path === file.path);
+            return [[
+              ...(openFile && source === "working" && file.kind !== "Deleted"
+                ? [{ label: "Open working file", run: () => openFile(file.path) }] : []),
+              ...(indexActions && entry?.working ? [{ label: "Stage file", disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ path: file.path, staged: true }) }] : []),
+              ...(indexActions && entry?.staged ? [{ label: "Unstage file", disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ path: file.path, staged: false }) }] : []),
+            ]];
+          }} />
       </div>
-      {indexActions && <IndexOperations review={review} drawer={indexDrawer} open={!indexDrawer || indexOpen}
+      {indexActions && <IndexOperations review={review} changeStage={changeStage} reviewConflict={setConflict} drawer={indexDrawer} open={!indexDrawer || indexOpen}
         onClose={closeIndex} reviewingStaged={source === "staged"} onReviewStaged={() => {
         setSource("staged");
         setSelection(undefined);
@@ -94,10 +151,15 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
         }
       }} />}
     </div>}
+    {source !== "branch" && comments.dialog}
+    {conversationActions.dialog}
+    {conflict && <GitConflictReview key={conflict} checkoutId={review.checkoutId} checkoutRoot={review.root}
+      path={conflict} openFile={openFile} close={() => setConflict(undefined)} />}
   </div>;
 }
 
-function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onClose?: () => void }) {
+function GitBranchComparison({ review, onClose, startContextText }: { review: CheckoutReview; onClose?: () => void;
+  startContextText?: ReturnType<typeof useCheckoutConversationActions>["startContextText"] }) {
   const [baseReference, setBase] = useState(() => review.branches.find((branch) => branch.reference === "refs/remotes/origin/main")?.reference
     ?? review.branches.find((branch) => branch.reference === "refs/heads/main")?.reference
     ?? review.branches[0]?.reference ?? "");
@@ -122,6 +184,10 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
     enabled: Boolean(path && revisions), retry: false,
   });
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const comments = useGitReviewComments({
+    checkoutId, surface: "branch", comparisonPath: comparison?.path,
+    scope: comparison ? diff.data?.commentScope : undefined, language: comparison?.language, startContextText,
+  });
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const options = review.branches.map(({ name, reference }) => <option key={reference} value={reference}>{name}</option>);
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -145,10 +211,15 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
       </label>
     </div>
     <GitDiffReview source="branch" title="Branch comparison" files={files} selectedPath={path} select={setSelection} comparison={comparison}
+      reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
       ranges={{
         base: `Merge base of ${base?.name ?? "selected branch"}${revisions ? ` · ${revisions.mergeBase.slice(0, 12)}` : ""}`,
         revised: `${head ? head.name : "Checkout HEAD"}${revisions ? ` · ${revisions.head.slice(0, 12)}` : ""}`,
       }}
+      addExcerpt={startContextText && revisions ? (selection, side, instruction) => startContextText({
+        title: `Git diff · ${selection.path}`, text: selection.text, language: selection.language,
+        reference: `${excerptReference(selection)} · ${side} · Merge base ${revisions.mergeBase} · Compared ref ${revisions.head}`,
+      }, instruction) : undefined}
       preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
         : diff.error ? <div className="p-3"><InlineIssue>{String(diff.error)}</InlineIssue></div>
         : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
@@ -157,23 +228,29 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
         : summary.isPending ? <p role="status">Loading branch comparison…</p>
         : <p>No committed changes since the merge base.</p>}
       onClose={onClose} />
+    {comments.dialog}
   </div>;
 }
 
-function IndexOperations({ review, reviewingStaged, onReviewStaged, drawer, open, onClose }: {
-  review: CheckoutReview; reviewingStaged: boolean; onReviewStaged: () => void; drawer: boolean; open: boolean; onClose: () => void;
-}) {
+function useChangeStage(review: CheckoutReview) {
   const client = useQueryClient();
-  const changeStage = useMutation({
-    mutationFn: ({ path, staged }: { path: string; staged: boolean }) => invoke("set_git_path_staged", {
-      checkoutId: review.checkoutId, path, staged, expected: review.revision,
-    }),
+  return useMutation({
+    mutationFn: (request: { path: string; staged: boolean } | { path: string; source: Source; hunkId: string; expected: ReviewRevision }) =>
+      "hunkId" in request ? invoke("set_git_hunk_staged", { checkoutId: review.checkoutId, ...request })
+        : invoke("set_git_path_staged", { checkoutId: review.checkoutId, ...request, expected: review.revision }),
     onSettled: () => Promise.all([
       client.invalidateQueries({ queryKey: ["git-review", review.checkoutId] }),
       client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),
     ]),
   });
-  const stagedCount = review.changes.filter((file) => file.staged).length;
+
+}
+
+function IndexOperations({ review, changeStage, reviewConflict, reviewingStaged, onReviewStaged, drawer, open, onClose }: {
+  review: CheckoutReview; changeStage: ReturnType<typeof useChangeStage>; reviewConflict: (path: string) => void;
+  reviewingStaged: boolean; onReviewStaged: () => void; drawer: boolean; open: boolean; onClose: () => void;
+}) {
+  const stagedCount = review.changes.filter((file) => file.staged && !isUnmerged(file)).length;
   return <WorkbenchPanel as="aside" className="delivery-detail git-index-panel" label="Index" aria-label="Stage files"
     open={open} drawer={drawer} drawerClass="git-index-drawer" onClose={onClose}
     edge="left" resizeKey="git-stage" resizeLabel="index">
@@ -191,10 +268,13 @@ function IndexOperations({ review, reviewingStaged, onReviewStaged, drawer, open
         {review.changes.map((entry) => <li className="grid gap-1 rounded border border-border p-2" key={entry.path}>
           <span className="wrap-anywhere font-mono text-xs">{entry.path}</span>
           <div className="flex flex-wrap gap-2">
+            {isUnmerged(entry) ? <Button type="button" className="px-2.5 py-1.5 text-xs" variant="outline"
+              aria-label={`Review conflict ${entry.path}`} onClick={() => reviewConflict(entry.path)}>Review conflict</Button> : <>
             {entry.working && <Button type="button" className="px-2.5 py-1.5 text-xs" variant="outline" disabled={changeStage.isPending}
               aria-label={`Stage ${entry.path}`} onClick={() => changeStage.mutate({ path: entry.path, staged: true })}>Stage</Button>}
             {entry.staged && <Button type="button" className="px-2.5 py-1.5 text-xs" variant="outline" disabled={changeStage.isPending}
               aria-label={`Unstage ${entry.path}`} onClick={() => changeStage.mutate({ path: entry.path, staged: false })}>Unstage</Button>}
+            </>}
           </div>
         </li>)}
       </ul> : <p className="text-sm text-muted-foreground">This worktree has a clean index and working tree.</p>}
@@ -246,5 +326,5 @@ function comparisonFile(diff?: TextDiff): GitTextComparison | null {
   if (!diff || diff.original.status === "unavailable" || diff.modified.status === "unavailable") return null;
   const content = (side: FileSide) => side.status === "text" ? side.content : "";
   const extension = diff.path.split(".").at(-1)?.toLowerCase() ?? "";
-  return { path: diff.path, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified) };
+  return { path: diff.path, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified), hunks: diff.hunks };
 }

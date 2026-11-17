@@ -8,6 +8,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { DownstreamWait } from "@/bindings/DownstreamWait";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationApprovalEvidence, ObservedConversationResponse } from "@/conversation-response-evidence";
 import {
@@ -34,7 +35,7 @@ type InspectorProps = WorkspaceProps & {
 export function RunInspector({
   runId, conversationId, focusQuestion, onClose, checkout, simulation, openWorkspace, openChanges, openActivity,
 }: InspectorProps) {
-  if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} runId={runId}
+  if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} checkoutId={checkout.checkoutId} runId={runId}
     conversationId={conversationId} focusQuestion={focusQuestion}
     onClose={onClose} openActivity={openActivity} openWorkspace={openWorkspace} />;
 
@@ -69,7 +70,7 @@ export function RunInspector({
   ]} />;
 }
 
-type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "focusQuestion" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string };
+type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "focusQuestion" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string; checkoutId: string };
 
 function RecordedExecutionRun(props: RecordedRunProps) {
   const { projectId, conversationId, runId } = props;
@@ -112,6 +113,7 @@ function RecordedCommandRun({ run, onClose, navigation }: {
 }
 
 function RecordedCommandOutput({ projectId, runId }: Pick<RecordedRunProps, "projectId" | "runId">) {
+  const { copy, feedback } = useContextActionFeedback();
   const outputs = useQuery({
     queryKey: ["command-job-output", projectId, runId],
     queryFn: () => invoke<CommandJobOutput | null>("command_job_output", { projectId, runId }),
@@ -121,16 +123,31 @@ function RecordedCommandOutput({ projectId, runId }: Pick<RecordedRunProps, "pro
   if (outputs.isError) return <p role="alert">{String(outputs.error)}</p>;
   if (!outputs.data) return <p>Command output is unavailable.</p>;
   const { process, truncated, stdout, stderr } = outputs.data;
+  const streams = [
+    { name: "Standard output", text: stdout },
+    { name: "Standard error", text: stderr },
+  ].filter(({ text }) => text);
   return <>
-    {process && <p>Exit code {process.code}</p>}
+    {process && <ContextActions label="Command exit code" groups={[[{ label: "Copy exit code", run: () => copy(String(process.code)) }]]}>
+      <p>Exit code {process.code}</p>
+    </ContextActions>}
     {truncated && <p>Output capture is incomplete.</p>}
-    {stdout && <><h3>Standard output</h3><pre>{stdout}</pre></>}
-    {stderr && <><h3>Standard error</h3><pre>{stderr}</pre></>}
+    {streams.map(({ name, text }) => <ContextActions key={name} label={name} groups={[[
+      { label: `Copy ${name.toLowerCase()}`, run: () => copy(text) },
+      ...(streams.length > 1 ? [{ label: "Copy captured output", run: () => copy(
+        [process && `Exit code ${process.code}`, truncated && "Output capture is incomplete.",
+          ...streams.map(({ name, text }) => `${name}\n${text}`)].filter(Boolean).join("\n\n"),
+      ) }] : []),
+    ]]}>
+      <div className="min-w-0 flex-1"><h3>{name}</h3><pre>{text}</pre></div>
+    </ContextActions>)}
     {!process && !truncated && !stdout && !stderr && <p>No output was captured.</p>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </>;
 }
 
-function RecordedConversationRun({ conversationId, projectId, runId, focusQuestion, onClose, openActivity, openWorkspace }: RecordedRunProps) {
+function RecordedConversationRun({ conversationId, projectId, checkoutId, runId, focusQuestion, onClose, openActivity, openWorkspace }: RecordedRunProps) {
+  const { copy, feedback, run: perform } = useContextActionFeedback();
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
@@ -148,10 +165,20 @@ function RecordedConversationRun({ conversationId, projectId, runId, focusQuesti
   const showNotice = activity.inputs.length > 0 || activity.savedQuestions.length > 0 || Boolean(activity.error);
   return <RunInspectionLayout key={run.id} as="aside" label="Conversation activity" title="Conversation attempt"
     runId={run.id} status={conversationRunStatus(run)}
+    menu={[[
+      ...(run.checkoutId === checkoutId ? [{ label: "Open conversation", run: () => void perform(async () => {
+        await invoke("checkout_conversation", { checkoutId, conversationId: owner });
+        openWorkspace("conversations", owner);
+        onClose();
+      }) }] : []),
+      { label: "Copy conversation ID", run: () => copy(owner) },
+      { label: "Copy attempt checkout ID", run: () => copy(run.checkoutId) },
+    ]]}
     actions={live && <StopConversation {...activity} />}
-    notice={showNotice && <>
+    notice={(showNotice || feedback) && <>
       <ConversationRequests conversationId={owner} runId={runId} activity={activity} focusQuestion={focusQuestion} />
       {activity.error && <p role="alert">{String(activity.error)}</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     </>}
     pages={[
       { id: "overview", name: "Overview", content: <>
@@ -167,7 +194,7 @@ function RecordedConversationRun({ conversationId, projectId, runId, focusQuesti
       </> },
       { id: "agents", name: "Agents", content: <ConversationActivityAgents {...scope} projection={projection} openActivity={openActivity} /> },
       { id: "context", name: "Context", content: <ConversationActivityContext {...scope} projectId={projectId} projection={projection} /> },
-      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} /> },
+      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId} /> },
       { id: "approvals", name: "Approvals", content: <><h3>Approval history</h3><ConversationApprovalEvidence {...scope} /></> },
       { id: "artifacts", name: "Artifacts", content: <>
         <h3>Recorded output</h3>
@@ -184,6 +211,7 @@ function RecordedConversationRun({ conversationId, projectId, runId, focusQuesti
 }
 
 function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
+  const { copy, feedback } = useContextActionFeedback();
   const recorded = useQuery({
     queryKey: ["downstream-wait", projectId, runId],
     queryFn: () => invoke<DownstreamWait | null>("downstream_wait", { projectId, runId }),
@@ -196,17 +224,25 @@ function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunP
     <h3>Downstream results</h3>
     <p className="capitalize">{wait.state.replaceAll("_", " ")}</p>
     <ul className="grid gap-1">
-      {wait.inputs.map((input) => <li key={input.childJobId} className="flex flex-wrap items-center gap-2">
-        <code className="break-all">{input.childJobId}</code>
-        <span className="capitalize">{input.status ?? "Pending result"}</span>
-        {input.childRunId && <Button type="button" variant="outline" onClick={() => openActivity(input.childRunId!)}>
-          Inspect child attempt
-        </Button>}
+      {wait.inputs.map(({ childJobId, childRunId, status }) => <li key={childJobId}>
+        <ContextActions label={`Downstream job ${childJobId}`} groups={[[
+          ...(childRunId ? [{ label: "Inspect child attempt", run: () => openActivity(childRunId) }] : []),
+        ], [
+          { label: "Copy child job ID", run: () => copy(childJobId) },
+          ...(childRunId ? [{ label: "Copy child run ID", run: () => copy(childRunId) }] : []),
+        ]]}>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <code className="break-all">{childJobId}</code>
+            <span className="capitalize">{status ?? "Pending result"}</span>
+            {childRunId && <Button type="button" variant="outline" onClick={() => openActivity(childRunId)}>Inspect child attempt</Button>}
+          </div>
+        </ContextActions>
       </li>)}
     </ul>
     {wait.continuationRunId && <Button className="justify-self-start" variant="outline" onClick={() => openActivity(wait.continuationRunId!)}>
       Open continuation
     </Button>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </section>;
 }
 

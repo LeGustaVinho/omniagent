@@ -160,8 +160,8 @@ async function waitForFixtureResult(browser, projectId, conversationId, label, t
   throw new Error(`${label} did not succeed (${JSON.stringify(state)})`, { cause: pollFailure });
 }
 
-async function showTestApplication(browser, application) {
-  const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true, env: fixtureEnvironment(application) });
+async function showTestApplication(browser, application, args = []) {
+  const reopen = spawn(application, args, { stdio: "ignore", windowsHide: true, env: fixtureEnvironment(application) });
   const stopped = new Promise((resolve, reject) => {
     reopen.once("error", reject);
     reopen.once("exit", resolve);
@@ -514,7 +514,7 @@ async function checkSimulation(browser, checkout) {
 
   await click(browser, 'button[aria-label="IDE"]');
   const ide = browser.$(shown);
-  if (!await ide.$('details[open] > summary[title="src"]').isExisting()) await click(ide, 'summary[title="src"]');
+  if (!await ide.$('button[aria-expanded="true"][title="src"]').isExisting()) await click(ide, 'button[title="src"][aria-expanded]');
   await click(ide, "button=index.ts");
   await ide.$(".monaco-editor").waitForDisplayed();
   const bottom = ide.$('button[aria-label="Toggle bottom panel"]');
@@ -658,7 +658,7 @@ function runRows(browser, runId) {
     const timeline = Array.from(document.querySelectorAll('ol[aria-label="Run events"]')).find(
       (list) => list.closest("section")?.querySelector("h1")?.textContent === "Run " + prefix,
     );
-    return timeline ? Array.from(timeline.children, (row) => row.lastElementChild.textContent) : [];
+    return timeline ? Array.from(timeline.children, (row) => row.querySelector("span + span")?.textContent) : [];
   }, runId.slice(0, 8));
 }
 
@@ -2083,6 +2083,406 @@ test("compares committed branches and registers a manual worktree in the real Gi
     await capture(browser, "real-git-manual-worktree");
   } finally {
     await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("keeps a line review comment bound to its saved Git snapshot", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Inline review checkout");
+  const path = "sample.rs";
+  const commentText = "Check this exact review revision";
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, path), "fn original() {}\n");
+  git(repo, "add", path);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Review base");
+  await writeFile(join(repo, path), "fn revised() {}\n");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const gitView = browser.$('[aria-label="Git workspace"]');
+    await click(gitView, "button=Review hunks");
+    const editedLine = gitView.$('.//*[@aria-label="Git hunks"]//span[normalize-space(.)="+fn revised() {}"]');
+    await editedLine.waitForDisplayed();
+    await editedLine.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Add review comment on revised line…"]');
+    const dialog = browser.$('[role="dialog"].file-dialog');
+    await dialog.waitForDisplayed();
+    await dialog.$("textarea").setValue(commentText);
+    await click(dialog, "button=Save comment");
+    const saved = gitView.$('[data-review-comment]');
+    await saved.waitForDisplayed();
+    assert.match(await saved.getText(), /sample\.rs:1 · Revised/);
+    assert.match(await saved.getText(), /Current comparison/);
+    assert.ok((await saved.getText()).includes(commentText));
+
+    await writeFile(join(repo, path), "fn latest() {}\n");
+    await browser.refresh();
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const reloaded = browser.$('[aria-label="Git workspace"]');
+    await click(reloaded, "summary*=Review comments");
+    const persisted = reloaded.$('[data-review-comment]');
+    await persisted.waitForDisplayed();
+    assert.match(await persisted.getText(), /Saved snapshot/);
+    assert.ok((await persisted.getText()).includes(commentText));
+    await click(persisted, "summary=Reviewed text and revision");
+    assert.equal(await persisted.$("pre").getText(), "fn revised() {}");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("opens Git and local file history and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Explorer context checkout");
+  const retained = "retained.txt";
+  const original = "Original retained text\n";
+  const updated = "Original retained textx\n";
+  const removed = `OmniAgent-context-smoke-${randomUUID()}.txt`;
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, retained), original);
+  git(repo, "add", retained);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Retained file revision");
+  await writeFile(join(repo, removed), "Disposable file for the Explorer context menu\n");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const retainedRow = ide.$(`button[title="${retained}"]`);
+    await retainedRow.waitForDisplayed();
+    await browser.execute((name) => document.querySelector(`[aria-label="IDE workspace"] button[title="${CSS.escape(name)}"]`).focus(), retained);
+    await browser.keys([Key.Shift, Key.F10]);
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show file history"]');
+    const history = browser.$('[aria-label="File history"]');
+    await history.$("button*=Retained file revision").waitForDisplayed();
+
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    await click(ide, `button=${retained}`);
+    const editor = ide.$(".code-editor .view-lines");
+    await editor.waitForDisplayed();
+    await editor.$(".view-line:first-child").click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("x");
+    const source = { checkoutId: checkout.checkoutId, path: retained };
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === updated);
+    await click(ide, 'button[aria-label="Save file"]');
+    await browser.waitUntil(async () => (await readFile(join(repo, retained), "utf8")) === updated);
+
+    await retainedRow.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show local history"]');
+    const localHistory = browser.$('[role="dialog"].file-comparison-dialog');
+    await click(localHistory, "button*=Before saving");
+    await localHistory.$('select[aria-label="Revision comparison"]').selectByAttribute("value", "text");
+    const preview = localHistory.$('[aria-label="Local revision preview"] pre');
+    await preview.waitForDisplayed();
+    assert.equal(await preview.getText(), original.trimEnd());
+    await click(localHistory, "button=Load text into editor");
+    await localHistory.waitForExist({ reverse: true });
+    assert.equal((await invoke(browser, "read_repository_source_draft", source))?.markdown, original);
+    assert.equal(await readFile(join(repo, retained), "utf8"), updated);
+
+    const root = ide.$("button=Checkout root");
+    await root.waitForDisplayed();
+    await root.click({ button: "right" });
+    const templates = browser.$('//*[@role="menuitem"][normalize-space(.)="New from template"]');
+    await templates.waitForDisplayed();
+    await templates.moveTo();
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Markdown note"]');
+    const create = browser.$('[role="dialog"].file-dialog');
+    await create.waitForDisplayed();
+    await create.$('input[aria-label="Name"]').setValue("new-from-template");
+    await click(create, "button=Create");
+    await create.waitForExist({ reverse: true });
+    assert.equal(await readFile(join(repo, "new-from-template.md"), "utf8"), "# Title\n\n");
+
+    await browser.$('.work-rail button[aria-label="Knowledge"][aria-current="page"]').waitForDisplayed();
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const disposableRow = ide.$(`button[title="${removed}"]`);
+    await disposableRow.waitForDisplayed();
+    await disposableRow.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move to Recycle Bin…"]');
+    const confirmation = browser.$('[role="dialog"].file-dialog');
+    await confirmation.waitForDisplayed();
+    assert.ok((await confirmation.getText()).includes(removed));
+    await click(confirmation, "button=Move to Recycle Bin");
+    await confirmation.waitForExist({ reverse: true, timeout: 15_000 });
+    await disposableRow.waitForExist({ reverse: true });
+    await assert.rejects(access(join(repo, removed)), { code: "ENOENT" });
+    assert.equal(await readFile(join(repo, retained), "utf8"), updated);
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("detaches the selected dirty editor into a native window and returns it with its draft", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Detached editor checkout");
+  const file = "draft.txt";
+  const other = "other.txt";
+  const note = "meeting.md";
+  const original = "Draft content\n";
+  const revised = "Draft contentx\n";
+  const editedInWindow = "Draft contentxy\n";
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, file), original);
+  await writeFile(join(repo, other), "Other file\n");
+  await writeFile(join(repo, note), "# Meeting notes\n");
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Seed detached editor checkout");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const main = await browser.getWindowHandle();
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    const source = { checkoutId: checkout.checkoutId, path: file };
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    await click(ide, `button=${file}`);
+    const editor = ide.$(".code-editor .view-line:first-child");
+    await editor.waitForDisplayed();
+    await editor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("x");
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === revised);
+    await click(ide, `button=${other}`);
+    await ide.$(`.file-tab-label[title="${file}"]`).click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move tab to new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).some((handle) => handle !== main));
+    const labels = () => invoke(browser, "plugin:window|get_all_windows");
+    assert.ok((await labels()).some((label) => label.startsWith("editor-")));
+    const popup = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(popup);
+    const popupTab = browser.$(`.file-tab-label[title="${file}"]`);
+    await popupTab.waitForDisplayed();
+    const detachedEditor = browser.$(".code-editor .view-line:first-child");
+    await detachedEditor.waitForDisplayed();
+    assert.match(await detachedEditor.getText(), /Draft contentx/);
+    assert.equal(await browser.$$(".file-tab-label").length, 1);
+    await detachedEditor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("y");
+    await browser.waitUntil(async () => (await detachedEditor.getText()).includes("Draft contentxy"));
+    await click(popupTab, `button[aria-label="Close ${file}"]`);
+    const dirtyClose = browser.$('[role="dialog"].file-dialog');
+    await dirtyClose.waitForDisplayed();
+    await click(dirtyClose, "button=Cancel");
+    await popupTab.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 1);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")),
+      { timeoutMsg: "The detached editor's native window stayed open." });
+    await ide.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === editedInWindow);
+    assert.equal(await readFile(join(repo, file), "utf8"), original);
+
+    await ide.$(".file-dock-group-menu").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move group to new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
+    const group = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(group);
+    await browser.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
+    await browser.$(`.file-tab-label[title="${other}"]`).waitForDisplayed();
+    await browser.$(".file-dock-group-menu").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+
+    await ide.$(`button[title="${note}"]`).click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Open in new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
+    const noteWindow = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(noteWindow);
+    const noteTab = browser.$(`.file-tab-label[title="${note}"]`);
+    await noteTab.waitForDisplayed();
+    const noteEditor = browser.$(`[aria-label="Markdown editor for ${note}"] .cm-line:first-child`);
+    await noteEditor.waitForDisplayed();
+    await noteEditor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("!");
+    await browser.waitUntil(async () => (await noteEditor.getText()).includes("Meeting notes!"));
+    await noteTab.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_markdown_draft", {
+      checkoutId: checkout.checkoutId, path: note,
+    }))?.markdown === "# Meeting notes!\n");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("filters actual Windows hidden attributes independently from dotfiles in Explorer", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Windows hidden items checkout");
+  git(scratch, "init", "-q", repo);
+  const hiddenFile = "hidden-note.md";
+  const hiddenFolder = "reports/private";
+  const ordinary = "reports/ordinary.md";
+  const dotfile = ".visible-dotfile";
+  await mkdir(join(repo, hiddenFolder), { recursive: true });
+  await writeFile(join(repo, hiddenFile), "A Windows Hidden file\n");
+  await writeFile(join(repo, hiddenFolder, "saved.md"), "An ordinary file under a Windows Hidden folder\n");
+  await writeFile(join(repo, ordinary), "A visible file\n");
+  await writeFile(join(repo, dotfile), "A dotfile without the Windows Hidden attribute\n");
+  for (const relative of [hiddenFile, hiddenFolder]) {
+    const markHidden = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$fixturePath = $env:OMNIAGENT_HIDDEN_ITEM_FIXTURE\n"
+      + "$attributes = [IO.File]::GetAttributes($fixturePath)\n"
+      + "[IO.File]::SetAttributes($fixturePath, ($attributes -bor [IO.FileAttributes]::Hidden))"], {
+      env: { ...process.env, OMNIAGENT_HIDDEN_ITEM_FIXTURE: join(repo, relative) }, encoding: "utf8", windowsHide: true,
+    });
+    if (markHidden.error) throw markHidden.error;
+    assert.equal(markHidden.status, 0, markHidden.stderr);
+  }
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    assert.deepEqual(await invoke(browser, "list_checkout_windows_hidden_items", { checkoutId: checkout.checkoutId, folder: "" }), [hiddenFile]);
+    assert.deepEqual(await invoke(browser, "list_checkout_windows_hidden_items", { checkoutId: checkout.checkoutId, folder: "reports" }), [hiddenFolder]);
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const row = (path) => ide.$(`[data-tree-item][title="${path}"]`);
+    await row(hiddenFile).waitForDisplayed();
+    await click(ide, '[data-tree-item][title="reports"]');
+    await row(hiddenFolder).waitForDisplayed();
+
+    await ide.$("button=Checkout root").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Hide Windows hidden items"]');
+    await row(ordinary).waitForDisplayed();
+    assert.equal(await row(hiddenFile).isExisting(), false);
+    assert.equal(await row(hiddenFolder).isExisting(), false);
+    await row(dotfile).waitForDisplayed();
+
+    await ide.$("button=Checkout root").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show Windows hidden items"]');
+    await row(hiddenFile).waitForDisplayed();
+    await row(hiddenFolder).waitForDisplayed();
+    await row(dotfile).waitForDisplayed();
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("opens OmniAgent file links in a running desktop and on cold launch", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "File link repository");
+  const linked = join(scratch, "Exact linked worktree");
+  const file = "Revisão #2.ts";
+  const original = "first\nsecond\nthird\n";
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, file), "Wrong worktree\n");
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Base file link checkout");
+  git(repo, "worktree", "add", "-q", "--detach", linked);
+  git(linked, "config", "core.autocrlf", "false");
+  await writeFile(join(linked, file), original);
+
+  const driver = startTestDriver(application);
+  let browser;
+  let cold;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const primary = await invoke(browser, "register_project", { directory: repo });
+    const target = await invoke(browser, "register_project", { directory: linked });
+    await selectCheckout(browser, primary);
+    const query = new URLSearchParams({ checkout: target.checkoutId, path: file, line: "2", column: "3" });
+    const link = `omniagent://open-file?${query}`;
+
+    await showTestApplication(browser, application, [link]);
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const editor = ide.$(".code-editor .view-lines");
+    await editor.waitForDisplayed();
+    assert.match(await editor.getText(), /second/);
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, primary.checkoutId);
+    await browser.waitUntil(() => browser.execute(() => {
+      const input = document.querySelector('.code-editor .monaco-editor [role="textbox"]');
+      if (!(input instanceof HTMLElement)) return false;
+      input.focus();
+      return input === document.activeElement;
+    }));
+    await browser.keys("X");
+    let draft;
+    await browser.waitUntil(async () => {
+      draft = await invoke(browser, "read_repository_source_draft", { checkoutId: target.checkoutId, path: file });
+      return draft?.markdown === "first\nseXcond\nthird\n";
+    }).catch(async (cause) => {
+      throw new Error(`The linked cursor did not apply the test edit (${JSON.stringify({
+        draft: draft?.markdown, editor: await editor.getText(),
+      })})`, { cause });
+    });
+    assert.equal(await readFile(join(linked, file), "utf8"), original);
+
+    killTestApplication(application);
+    await browser.deleteSession().catch(() => undefined);
+    browser = undefined;
+    // EdgeDriver treats launch arguments as switches. Start the fixture with a bare URI
+    // like the installed protocol handler does, then attach to its isolated WebView2.
+    const debuggerAddress = `127.0.0.1:${port + 2}`;
+    cold = spawn(application, [link], { stdio: "ignore", windowsHide: true,
+      env: { ...fixtureEnvironment(application), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port + 2}` } });
+    await new Promise((resolve, reject) => { cold.once("spawn", resolve); cold.once("error", reject); });
+    let debuggerReady = false;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      assert.equal(cold.exitCode, null, "Cold link fixture exited before we could attach");
+      try {
+        const response = await fetch(`http://${debuggerAddress}/json/list`, { signal: AbortSignal.timeout(500) });
+        debuggerReady = (await response.json()).some(({ url }) => new URL(url).origin === packagedOrigin);
+        if (debuggerReady) break;
+      } catch {
+        // The disposable WebView2 process can take time to expose its debug port.
+      }
+      await delay(200);
+    }
+    assert.ok(debuggerReady, "Cold link fixture never exposed its WebView2 debug port");
+    browser = await remote({ hostname: "127.0.0.1", port: port + 1, path: "/", logLevel: "warn",
+      connectionRetryCount: 0, connectionRetryTimeout: 15_000,
+      capabilities: { browserName: "webview2", "wdio:enforceWebDriverClassic": true,
+        "ms:edgeChromium": true, "ms:edgeOptions": { debuggerAddress } },
+    });
+    await waitForRuntime(browser, { startup: true });
+    assert.equal(await invoke(browser, "plugin:app|identifier"), testIdentifier(application));
+    const restored = browser.$('[aria-label="IDE workspace"] .code-editor .view-lines');
+    await restored.waitForDisplayed();
+    assert.match(await restored.getText(), /seXcond/);
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, primary.checkoutId);
+    assert.equal(await readFile(join(linked, file), "utf8"), original);
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    if (cold?.exitCode === null && cold.signalCode === null && cold.pid) {
+      const closed = new Promise((resolve) => cold.once("close", resolve));
+      cold.kill();
+      await closed;
+    }
     driver.kill();
   }
 });

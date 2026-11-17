@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::providers::configuration::{open_locked_local_file, plain_metadata};
 
 use super::super::{documents::lock_directories, isolated_git::IsolatedGit};
-use super::{GitPathStatus, LiveReview, validate_oid};
+use super::{
+    GitPathStatus, GitReviewHunk, GitReviewRevision, LiveReview, comments::GitReviewCommentScope,
+    hunks, validate_oid,
+};
 
 const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -51,29 +54,45 @@ impl GitFileSide {
 pub struct GitReviewDiff {
     pub path: String,
     pub source: GitDiffSource,
+    pub revision: GitReviewRevision,
     pub original: GitFileSide,
     pub modified: GitFileSide,
+    pub hunks: Vec<GitReviewHunk>,
+    pub comment_scope: Option<GitReviewCommentScope>,
 }
 
 pub(super) fn read_diff(
     review: &LiveReview,
-    path: String,
+    entry: &GitPathStatus,
     source: GitDiffSource,
 ) -> Result<GitReviewDiff> {
-    let index = read_index(review, &path)?;
+    let path = &entry.path;
+    let index = read_index(review, path)?;
     let (original, modified) = match source {
-        GitDiffSource::Working => (index, read_worktree(&review.root, &path)?),
-        GitDiffSource::Staged => (read_head(review, &path)?, index),
+        GitDiffSource::Working => (index, read_worktree(&review.root, path)?),
+        GitDiffSource::Staged => (read_head(review, path)?, index),
+    };
+    let hunks = if hunks::supports(entry, source)
+        && matches!(
+            (&original, &modified),
+            (GitFileSide::Text { .. }, GitFileSide::Text { .. })
+        ) {
+        hunks::read(review, path, source)?
+    } else {
+        Vec::new()
     };
     Ok(GitReviewDiff {
-        path,
+        path: path.clone(),
         source,
+        revision: review.revision.clone(),
         original,
         modified,
+        hunks,
+        comment_scope: None,
     })
 }
 
-fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     let bytes = review.view.read(&[
         "--literal-pathspecs",
         "ls-files",
@@ -104,7 +123,7 @@ fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     ))
 }
 
-fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     let Some(head) = review.revision.head.as_deref() else {
         return Ok(GitFileSide::Missing);
     };
@@ -128,7 +147,7 @@ pub(super) fn read_tree(view: &IsolatedGit, revision: &str, path: &str) -> Resul
     Ok(GitFileSide::Missing)
 }
 
-fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
+pub(super) fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
     if !matches!(mode, "100644" | "100755") {
         return Ok(GitFileSide::unavailable(
             "This Git entry is not an ordinary text file.",
@@ -146,28 +165,48 @@ fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
     Ok(classify(view.read(&["cat-file", "blob", oid])?))
 }
 
-fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
     let path: PathBuf = root.join(path).components().collect();
-    let file = match plain_metadata(&path) {
+    let directories = match plain_metadata(&path) {
         Ok(None) => return Ok(GitFileSide::Missing),
-        Ok(Some(metadata)) if metadata.is_file() => open_locked_local_file(&path),
+        Ok(Some(metadata)) if metadata.is_file() => {
+            lock_directories(path.parent().context("the checkout file has no parent")?)
+        }
         _ => {
             return Ok(GitFileSide::unavailable(
                 "This checkout entry is not an ordinary local file.",
             ));
         }
     };
-    match file {
-        Ok(file) => {
-            let mut bytes = Vec::new();
-            file.take(MAX_DIFF_SIDE_BYTES + 1).read_to_end(&mut bytes)?;
-            Ok(classify(bytes))
+    let _directories = match directories {
+        Ok(directories) => directories,
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(GitFileSide::Missing);
         }
+        Err(error) => {
+            return Ok(GitFileSide::unavailable(format!(
+                "The worktree file could not be opened safely: {error}"
+            )));
+        }
+    };
+    let file = open_locked_local_file(&path);
+    match file {
+        Ok(file) => read_locked_worktree(&file),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(GitFileSide::Missing),
         Err(error) => Ok(GitFileSide::unavailable(format!(
             "The worktree file could not be opened safely: {error}"
         ))),
     }
+}
+
+pub(super) fn read_locked_worktree(file: &File) -> Result<GitFileSide> {
+    let mut bytes = Vec::new();
+    file.take(MAX_DIFF_SIDE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(classify(bytes))
 }
 
 fn classify(bytes: Vec<u8>) -> GitFileSide {

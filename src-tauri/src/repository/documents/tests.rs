@@ -9,6 +9,149 @@ const EDIT: &str = "new first\nkeep LF\nnew last\nфинал";
 const RESULT: &str = "\u{feff}new first\r\nkeep LF\nnew last\rфинал";
 
 #[tokio::test]
+async fn records_local_saves_and_keeps_original_and_returned_versions_across_restart() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let profile = temp.path().join("history.sqlite");
+    let checkout;
+    let other;
+    {
+        let store = Store::open(profile.clone())?;
+        let root = init_repository(temp.path())?;
+        checkout = register(&store, root.clone()).await?.checkout_id;
+        let other_root = temp.path().join("alternate");
+        git_query(
+            &git_path()?,
+            &root,
+            &["worktree", "add", "--detach", other_root.to_str().unwrap()],
+        )?;
+        other = register(&store, other_root).await?.checkout_id;
+        let first = open_document(&store, &checkout, "Guide.md").await?;
+        let RepositoryDocumentSave::Saved { document: edited } = store
+            .save_repository_document(
+                checkout.clone(),
+                "Guide.md".into(),
+                first.revision.id.clone(),
+                EDIT.into(),
+            )
+            .await?
+        else {
+            anyhow::bail!("initial edit failed");
+        };
+        let RepositoryDocumentSave::Saved { document: restored } = store
+            .save_repository_document(
+                checkout.clone(),
+                "Guide.md".into(),
+                edited.revision.id.clone(),
+                first.markdown.clone(),
+            )
+            .await?
+        else {
+            anyhow::bail!("restoring original text failed");
+        };
+        assert_eq!(restored.revision.id, first.revision.id);
+        let noop = store
+            .save_repository_document(
+                checkout.clone(),
+                "Guide.md".into(),
+                restored.revision.id,
+                first.markdown,
+            )
+            .await?;
+        assert!(matches!(noop, RepositoryDocumentSave::Saved { .. }));
+
+        fs::write(root.join("Guide.md"), "External edit\n")?;
+        let conflict = store
+            .save_repository_document(
+                checkout.clone(),
+                "Guide.md".into(),
+                edited.revision.id,
+                "stale edit".into(),
+            )
+            .await?;
+        assert!(matches!(conflict, RepositoryDocumentSave::Conflict { .. }));
+        let external = open_document(&store, &checkout, "Guide.md").await?;
+        let saved = store
+            .save_repository_document(
+                checkout.clone(),
+                "Guide.md".into(),
+                external.revision.id,
+                "After external edit\n".into(),
+            )
+            .await?;
+        assert!(matches!(saved, RepositoryDocumentSave::Saved { .. }));
+
+        fs::write(root.join("example.rs"), "fn before() {}\n")?;
+        let RepositoryDocumentOpen::Document { document: source } = store
+            .open_repository_source_file(checkout.clone(), "example.rs".into())
+            .await?
+        else {
+            anyhow::bail!("source did not open");
+        };
+        let saved = store
+            .save_repository_source_file(
+                checkout.clone(),
+                "example.rs".into(),
+                source.revision.id,
+                "fn after() {}\n".into(),
+            )
+            .await?;
+        assert!(matches!(saved, RepositoryDocumentSave::Saved { .. }));
+    }
+
+    let store = Store::open(profile)?;
+    let history = store
+        .checkout_document_history(checkout.clone(), "Guide.md".into(), None)
+        .await?;
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .map(|entry| entry.origin.as_str())
+            .collect::<Vec<_>>(),
+        ["saved", "before_save", "saved", "saved", "before_save"]
+    );
+    assert_eq!(
+        history.entries[2].revision_id,
+        history.entries[4].revision_id
+    );
+    let initial = history.entries[4].position;
+    let text = store
+        .checkout_document_history_text(checkout.clone(), "Guide.md".into(), initial)
+        .await?;
+    assert_eq!(text.text, "first\nkeep LF\nlast CR\nфинал");
+    assert!(text.utf8_bom);
+    assert_eq!(text.line_endings, LineEndings::Mixed);
+    assert_eq!(
+        store
+            .checkout_document_history(checkout.clone(), "example.rs".into(), None)
+            .await?
+            .entries
+            .len(),
+        2
+    );
+    assert!(
+        store
+            .checkout_document_history_text(checkout.clone(), "example.rs".into(), initial)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .checkout_document_history_text(other, "Guide.md".into(), initial)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .checkout_document_history(checkout, "../Guide.md".into(), None)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn opens_and_saves_canonical_utf8_revisions_without_changing_untouched_bytes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = Store::open(temp.path().join("profile.sqlite"))?;

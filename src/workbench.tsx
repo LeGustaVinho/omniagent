@@ -11,6 +11,8 @@ import { ConversationMarkdown } from "@/conversation-markdown";
 import { previewPlan } from "@/conversation-preview-data";
 import { RealConversations, RealDiagnostics } from "@/desktop-dock";
 import { GitSimulationProvider } from "@/git-simulation";
+import { openWorkspaceFile } from "@/file-context-actions";
+import type { FileLinkTarget } from "@/file-links";
 import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
 import { InspectorTabs } from "@/inspector-tabs";
 import { PanelResizeScope } from "@/panel-resize";
@@ -120,11 +122,12 @@ function RailButton({ label, text = label, icon: Icon, current, pressed, onClick
   </ControlTooltip>;
 }
 
-export default function Workbench({ checkout, openRepository, onSelectCheckout, initialConversationId }: {
+export default function Workbench({ checkout, openRepository, onSelectCheckout, initialConversationId, fileTarget }: {
   checkout: ProjectCheckout;
   openRepository: ReactNode;
   onSelectCheckout: (checkout: ProjectCheckout, conversationId?: string) => Promise<void>;
   initialConversationId?: string;
+  fileTarget?: FileLinkTarget;
 }) {
   const lastAreaKey = "omniagent-workspace-area:" + checkout.checkoutId;
   const [realNavigation, setRealNavigation] = useState(() => {
@@ -158,6 +161,14 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   const queueDrawer = availableWidth < 900 || size.height < 600;
   const { error, reconnect } = useRunSubscription(checkout);
   const nav = preview?.navigation ?? realNavigation;
+
+  useEffect(() => {
+    if (!fileTarget) return;
+    setPreview(null);
+    setSettingsPage(undefined);
+    openWorkspaceFile((workspace, target) => setRealNavigation((prior) => show(workspace, target, prior)),
+      fileTarget.path, fileTarget.line ?? undefined, { column: fileTarget.column ?? undefined, repeat: true });
+  }, [fileTarget]);
 
   useEffect(() => {
     function shortcut(event: globalThis.KeyboardEvent) {

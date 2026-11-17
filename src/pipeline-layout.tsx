@@ -3,6 +3,7 @@ import { Background, Controls, ReactFlow, type Edge, type Node, type NodeChange,
 import { ArrowRight, CirclePlay, FileCode2, FileDiff, Layers3, PackageCheck, PanelRight, Puzzle, Workflow, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { ResizablePanel } from "@/panel-resize";
 import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
 import "@xyflow/react/dist/style.css";
@@ -45,19 +46,23 @@ export function PipelineRolesTemplatesHeading() {
     icon={<Layers3 size={20} aria-hidden />} />;
 }
 
-export function PipelineTemplateList({ entries, onOpen }: {
-  entries: { id: string; name: string; detail: string }[];
+export function PipelineTemplateList({ entries, onOpen, kind = "template" }: {
+  entries: { id: string; name: string; detail: string; menu?: MenuGroups }[];
   onOpen: (id: string) => void;
+  kind?: "template" | "run";
 }) {
+  const Icon = kind === "run" ? CirclePlay : FileCode2;
   return entries.length ? <ul className="pipeline-select-list">
-    {entries.map(({ id, name, detail }) => <li key={id}>
-      <button type="button" onClick={() => onOpen(id)}>
-        <FileCode2 size={15} aria-hidden />
-        <span>{name}<small>{detail}</small></span>
-        <ArrowRight size={14} className="pipeline-end" aria-hidden />
-      </button>
+    {entries.map(({ id, name, detail, menu }) => <li key={id}>
+      <ContextActions label={`${name} ${detail}`} groups={menu ?? []}>
+        <button className="pipeline-select-item" type="button" onClick={() => onOpen(id)}>
+          <Icon size={15} aria-hidden />
+          <span>{name}<small>{detail}</small></span>
+          <ArrowRight size={14} className="pipeline-end" aria-hidden />
+        </button>
+      </ContextActions>
     </li>)}
-  </ul> : <p className="text-muted-foreground">No saved templates.</p>;
+  </ul> : <p className="text-muted-foreground">{kind === "run" ? "No saved runs." : "No saved templates."}</p>;
 }
 
 export function PipelineMaintenanceLayout({ proposals, releases, inventory }: {

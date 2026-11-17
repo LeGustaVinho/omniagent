@@ -28,11 +28,11 @@ pub struct RepositoryMarkdownDraft {
 }
 
 #[derive(Serialize, Deserialize)]
-struct DraftPayload {
+pub(crate) struct DraftPayload {
     version: u8,
-    base_revision: String,
-    revision: String,
-    markdown: String,
+    pub(crate) base_revision: String,
+    pub(crate) revision: String,
+    pub(crate) markdown: String,
 }
 
 impl Store {
@@ -80,20 +80,7 @@ impl Store {
                     markdown,
                 });
             }
-            let draft = DraftPayload {
-                version: PAYLOAD_VERSION,
-                base_revision,
-                revision: Uuid::new_v4().to_string(),
-                markdown,
-            };
-            let protected = protection::protect(&serde_json::to_vec(&draft)?)?;
-            tx.execute(
-                "INSERT INTO drafts(kind, owner_id, document, payload)
-                 VALUES ('checkout_file', ?1, ?2, ?3)
-                 ON CONFLICT(kind, owner_id, document) DO UPDATE
-                 SET payload = excluded.payload, updated_at = unixepoch()",
-                params![checkout_id, base.relative_path, protected],
-            )?;
+            let draft = write_payload(&tx, &base, markdown)?;
             tx.commit()?;
             Ok(RepositoryMarkdownDraft {
                 base,
@@ -215,7 +202,7 @@ impl Store {
     }
 }
 
-fn stored_revision(
+pub(crate) fn stored_revision(
     db: &Connection,
     checkout_id: &str,
     revision: &str,
@@ -249,7 +236,29 @@ fn stored_revision(
     Ok(base)
 }
 
-fn load_payload(
+pub(crate) fn write_payload(
+    db: &Connection,
+    base: &RepositoryMarkdownRevision,
+    markdown: String,
+) -> Result<DraftPayload> {
+    let draft = DraftPayload {
+        version: PAYLOAD_VERSION,
+        base_revision: base.id.clone(),
+        revision: Uuid::new_v4().to_string(),
+        markdown,
+    };
+    let protected = protection::protect(&serde_json::to_vec(&draft)?)?;
+    db.execute(
+        "INSERT INTO drafts(kind, owner_id, document, payload)
+         VALUES ('checkout_file', ?1, ?2, ?3)
+         ON CONFLICT(kind, owner_id, document) DO UPDATE
+         SET payload = excluded.payload, updated_at = unixepoch()",
+        params![base.checkout_id, base.relative_path, protected],
+    )?;
+    Ok(draft)
+}
+
+pub(crate) fn load_payload(
     db: &Connection,
     checkout_id: &str,
     relative_path: &str,

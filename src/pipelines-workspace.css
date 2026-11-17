@@ -345,17 +345,20 @@
 .pipeline-data :is(dt, dd) { overflow-wrap: anywhere; }
 
 .pipeline-select-list { gap: 0.2rem; margin-block-start: 0.35rem; }
-.pipeline-select-list button {
+.pipeline-select-item {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   width: 100%;
+  min-width: 0;
   padding: 0.4rem 0.55rem;
   border-radius: 0.3rem;
   text-align: start;
 }
-.pipeline-select-list button:is(:hover, [aria-pressed="true"]) { background: var(--muted); }
+.pipeline-select-item:is(:hover, [aria-pressed="true"]) { background: var(--muted); }
+.pipeline-select-item span { overflow-wrap: anywhere; }
 .pipeline-select-list small { display: block; color: var(--muted-foreground); }
+.workflow-run-picker .workflow-execution-field { min-width: 0; }
 .pipeline-end { margin-inline-start: auto; flex: none; }
 
 .pipeline-attempts { padding-inline-start: 0.15rem; }

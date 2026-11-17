@@ -21,7 +21,7 @@ type Settings = {
 };
 type Draft = { description: string; settings: Settings | null; state: WorkflowStatus | null };
 type Editor = { title: string; placement: Placement; draft: Draft; branchLocked: boolean; version: string };
-export type ProjectEditorSelection = { kind: WorkKind; work?: AgileRow };
+export type ProjectEditorSelection = { kind: WorkKind; work?: AgileRow; parentId?: string; state?: WorkflowStatus; copyOf?: AgileRow };
 export type WorkspaceWorkInput = { title: string; placement: Placement; draft?: Draft } & ({ workId: string; expected: string; draft: Draft } | { workId?: undefined });
 
 function placementFor(kind: WorkKind, parentId: string): Placement {
@@ -36,28 +36,29 @@ export function ProjectWorkEditor({ checkout, selection, rows, busy, error, clos
   }) {
   const { projectId } = checkout;
   const workId = selection.work?.id;
+  const sourceId = workId ?? selection.copyOf?.id;
   const activator = useState(() => document.activeElement)[0];
   const [reloadCount, setReloadCount] = useState(0);
   const info = useQuery({
-    queryKey: ["project-tasks", projectId, workId, "editor"],
-    queryFn: () => invoke<Editor>("workspace_work_editor", { projectId, workId }),
-    refetchOnWindowFocus: false, refetchOnMount: "always", enabled: Boolean(workId),
+    queryKey: ["project-tasks", projectId, sourceId, "editor"],
+    queryFn: () => invoke<Editor>("workspace_work_editor", { projectId, workId: sourceId }),
+    refetchOnWindowFocus: false, refetchOnMount: "always", enabled: Boolean(sourceId),
   });
-  const loading = Boolean(workId && !info.data && info.isPending);
+  const loading = Boolean(sourceId && !info.data && info.isPending);
   async function reload() {
     resetError();
     const result = await info.refetch();
     if (result.isSuccess) setReloadCount((count) => count + 1);
   }
-  return <AgileWorkDialog title={workId ? `Edit ${workLabel(selection.kind).toLowerCase()}` : "New work"}
+  return <AgileWorkDialog title={workId ? `Edit ${workLabel(selection.kind).toLowerCase()}` : selection.copyOf ? "Duplicate work" : "New work"}
     description="Edit the work details, planned assignment, dependencies and criteria." closeLabel="Close work editor" busy={busy}
     onCloseAutoFocus={(event) => {
       if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
     }}>
     {loading && <p role="status">Loading work fields…</p>}
-    {workId && !info.data && info.error && <><p role="alert">{String(info.error)}</p><Button type="button" onClick={reload}>Reload saved work</Button></>}
-    {(!workId || info.data) && <ProjectWorkForm key={`${info.data?.version ?? "new"}:${reloadCount}`} checkout={checkout}
-      selection={selection} rows={rows} current={info.data} busy={busy || Boolean(workId && info.isFetching)}
+    {sourceId && !info.data && info.error && <><p role="alert">{String(info.error)}</p><Button type="button" onClick={reload}>Reload saved work</Button></>}
+    {(!sourceId || info.data) && <ProjectWorkForm key={`${info.data?.version ?? "new"}:${reloadCount}`} checkout={checkout}
+      selection={selection} rows={rows} current={info.data} busy={busy || Boolean(sourceId && info.isFetching)}
       error={error ?? info.error} close={close} save={save}
       reload={reload} />}
   </AgileWorkDialog>;
@@ -77,9 +78,10 @@ function ProjectWorkForm({ checkout, selection, rows, current, busy, error, clos
     const settings = current?.draft.settings;
     const saved = current?.placement;
     return {
-      title: current?.title ?? "", description: current?.draft.description ?? "",
-      parentId: saved?.kind === "subtask" ? saved.parentTaskId : saved?.kind === "task" ? saved.epicId ?? "" : "",
-      state: current?.draft.state ?? selection.work?.status ?? "backlog", priority: String(settings?.priority ?? 0),
+      title: selection.copyOf ? `${current?.title ?? selection.copyOf.title} copy` : current?.title ?? "", description: current?.draft.description ?? "",
+      parentId: saved?.kind === "subtask" ? saved.parentTaskId : saved?.kind === "task" ? saved.epicId ?? "" : selection.parentId ?? "",
+      state: selection.copyOf ? "backlog" : current?.draft.state ?? selection.work?.status ?? selection.state ?? "backlog",
+      priority: String(settings?.priority ?? 0),
       checklistMode: settings?.checklistMode ?? "", branchStrategy: settings?.branchStrategy ?? "",
       acceptanceCriteria: settings?.acceptanceCriteria.join("\n") ?? "", dependencies: settings?.prerequisites ?? [],
       blockers: settings?.blockers.join("\n") ?? "",
@@ -128,7 +130,7 @@ function ProjectWorkForm({ checkout, selection, rows, current, busy, error, clos
     setKind(next); setValues((values) => ({ ...values, parentId: "", state: "backlog" }));
   } : undefined} values={values} change={(patch) => setValues((values) => ({ ...values, ...patch }))}
     parents={parents} states={states} dependencies={dependencies} notes={notes} path={path}
-    branchLocked={current?.branchLocked} parentLocked={kind === "subtask" && current?.branchLocked}
+    branchLocked={Boolean(workId && current?.branchLocked)} parentLocked={kind === "subtask" && Boolean(workId && current?.branchLocked)}
     assignment={{ selected: model, options, loading, change: setAssignment, retained }}
     openNote={(link) => {
       const targets = resolveWiki(link, link.sourcePath ?? path, notes);

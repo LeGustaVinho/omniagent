@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { NoteSelection } from "@/knowledge-context";
 
 export type NoteRevision = {
   id: string;
@@ -8,19 +9,28 @@ export type NoteRevision = {
   sha256: string;
   baseCommit: string | null;
 };
-type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string };
+type LineEndings = "none" | "lf" | "crlf" | "cr" | "mixed";
+type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string; utf8Bom?: boolean; lineEndings?: LineEndings };
 export type DocumentOpen = { status: "document"; document: RepositoryDocument }
   | { status: "missing" | "unsupported_encoding"; relativePath?: string };
 type Recovery = { message: string; editedPath: string | null; displacedPath: string | null };
 type DocumentSave = { status: "saved"; document: RepositoryDocument }
   | { status: "conflict" | "recovery_required"; recovery: Recovery };
 type SavedDraft = { revision: string; base: NoteRevision; markdown: string };
+export type MergeRevision = { path: string; revisionId: string };
+export type SavedNoteMerge = { saved: string[]; pending: string[]; failure?: string };
+export type NoteExtractionDestination = { relativeDirectory: string; name: string; replaceWithLink: boolean };
+type NoteExtraction = {
+  path: string;
+  replacement: { markdown: string; draftRevision: string | null } | null;
+};
 
 export type NoteBuffer = {
   content: string;
   saved: string;
   revision: number | string;
   external?: string;
+  format?: { utf8Bom: boolean; lineEndings: LineEndings };
 };
 type RepositoryBuffer = NoteBuffer & {
   base: NoteRevision;
@@ -73,6 +83,7 @@ function loaded(document: RepositoryDocument, draftRevision: string | null): Rep
   return {
     base: document.revision, fileIdentity: document.fileIdentity,
     revision: document.revision.sha256.slice(0, 12), content: document.markdown, saved: document.markdown, draftRevision,
+    format: document.lineEndings === undefined ? undefined : { utf8Bom: Boolean(document.utf8Bom), lineEndings: document.lineEndings },
   };
 }
 
@@ -81,7 +92,7 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
 }
 
 export function useRepositorySourceBuffers(checkoutId: string, enabled: boolean) {
-  const { notes: files, getNote: getFile, ...buffers } =
+  const { notes: files, getNote: getFile, extractSelection: _extractSelection, mergeReviewed: _mergeReviewed, ...buffers } =
     useRepositoryFileBuffers<string>(checkoutId, enabled, sourceCommands, "file");
   return { ...buffers, files, getFile };
 }
@@ -95,6 +106,7 @@ function useRepositoryFileBuffers<CatalogEntry>(
   const [error, setError] = useState("");
   const current = useRef(state);
   const mounted = useRef(false);
+  const catalogRequest = useRef(0);
   const requests = useRef(new Map<string, Promise<string | undefined>>()).current;
   const writes = useRef(new Map<string, Promise<unknown>>()).current;
   const watches = useRef(new Map<string, Watch>()).current;
@@ -110,13 +122,23 @@ function useRepositoryFileBuffers<CatalogEntry>(
   const report = useCallback((failure: unknown) => {
     if (mounted.current) setError(String(failure));
   }, []);
-  const serialize = useCallback(<T,>(path: string, operation: () => Promise<T>) => {
-    const next = (writes.get(path) ?? Promise.resolve()).catch(() => undefined).then(operation);
-    writes.set(path, next);
-    const release = () => { if (writes.get(path) === next) writes.delete(path); };
+  const refreshCatalog = useCallback(async () => {
+    const request = ++catalogRequest.current;
+    const entries = await invoke<CatalogEntry[]>(commands.catalog, { checkoutId });
+    if (mounted.current && request === catalogRequest.current) setCatalog(entries);
+  }, [checkoutId, commands]);
+  const serializePaths = useCallback(<T,>(paths: readonly string[], operation: () => Promise<T>) => {
+    const previous = paths.map((path) => writes.get(path));
+    const next = Promise.allSettled(previous).then(operation);
+    for (const path of paths) writes.set(path, next);
+    const release = () => {
+      for (const path of paths) if (writes.get(path) === next) writes.delete(path);
+    };
     void next.then(release, release);
     return next;
   }, [writes]);
+  const serialize = useCallback(<T,>(path: string, operation: () => Promise<T>) =>
+    serializePaths([path], operation), [serializePaths]);
 
   const stopWatching = useCallback((path: string) => {
     const record = watches.get(path);
@@ -127,16 +149,16 @@ function useRepositoryFileBuffers<CatalogEntry>(
   useEffect(() => {
     mounted.current = true;
     if (enabled) {
-      void invoke<CatalogEntry[]>(commands.catalog, { checkoutId })
-        .then((entries) => { if (mounted.current) setCatalog(entries); }, report);
+      void refreshCatalog().catch(report);
       void invoke<string[]>(commands.drafts, { checkoutId })
         .then((paths) => { if (mounted.current) setDraftPaths(paths); }, report);
     }
     return () => {
       mounted.current = false;
+      catalogRequest.current += 1;
       for (const path of watches.keys()) stopWatching(path);
     };
-  }, [checkoutId, commands, enabled, report, stopWatching, watches]);
+  }, [checkoutId, commands, enabled, refreshCatalog, report, stopWatching, watches]);
 
   const load = useCallback((path: string): Promise<string | undefined> => {
     if (current.current.notes[path]) return Promise.resolve(path);
@@ -258,10 +280,32 @@ function useRepositoryFileBuffers<CatalogEntry>(
     void serialize(path, () => persist(path)).catch(report);
   }, [change, persist, report, serialize]);
 
-  const save = useCallback((path: string) => serialize(path, async () => {
+  const loadLocalRevision = useCallback((path: string, content: string) => serialize(path, async () => {
+    const previous = current.current.notes[path];
+    if (!previous || previous.sourceProblem) throw new Error(`Open an available ${noun} before loading a revision.`);
+    if (previous.content !== previous.saved || previous.incoming || previous.draftRevision) {
+      throw new Error(`Save or discard the current ${noun} draft before loading a revision.`);
+    }
+    if (previous.content === content) return;
+    const applied = { ...previous, content };
+    change(path, () => applied);
+    try { await persist(path); }
+    catch (failure) {
+      change(path, (note) => note === applied ? previous : note);
+      throw failure;
+    }
+  }), [change, noun, persist, serialize]);
+
+  const save = useCallback((path: string, reviewed?: SavedDraft, onFailure = report) => serialize(path, async () => {
     const note = current.current.notes[path];
-    if (!note) return false;
-    if (note.incoming || note.sourceProblem) return false;
+    if (!note || note.incoming || note.sourceProblem) {
+      if (reviewed) onFailure(path + " is no longer available at the reviewed revision.");
+      return false;
+    }
+    if (reviewed && (note.base.id !== reviewed.base.id || note.draftRevision !== reviewed.revision || note.content !== reviewed.markdown)) {
+      onFailure(path + " has a newer draft. Review it before saving.");
+      return false;
+    }
     if (note.content === note.saved) return true;
     await persist(path);
     const result = await invoke<DocumentSave>(commands.save, {
@@ -279,13 +323,15 @@ function useRepositoryFileBuffers<CatalogEntry>(
           return { ...current, incoming: observed.document, external: observed.document.markdown };
         });
       }
-      report([result.recovery.message, result.recovery.editedPath, result.recovery.displacedPath].filter(Boolean).join(" · "));
+      onFailure([result.recovery.message, result.recovery.editedPath, result.recovery.displacedPath].filter(Boolean).join(" · "));
       return false;
     }
     change(path, (current) => ({ ...loaded(result.document, current.draftRevision), content: current.content }));
     await persist(path);
-    return current.current.notes[path]?.content === current.current.notes[path]?.saved;
-  }).catch((failure: unknown) => { report(failure); return false; }), [change, checkoutId, commands, noun, persist, report, serialize]);
+    const saved = current.current.notes[path]?.content === current.current.notes[path]?.saved;
+    if (reviewed && !saved) onFailure(path + " was saved at the reviewed revision and has a newer draft.");
+    return saved;
+  }).catch((failure: unknown) => { onFailure(failure); return false; }), [change, checkoutId, commands, noun, persist, report, serialize]);
 
   const resolve = useCallback((path: string, keepLocal: boolean) => serialize(path, async () => {
     const note = current.current.notes[path];
@@ -312,6 +358,76 @@ function useRepositoryFileBuffers<CatalogEntry>(
     await persist(path);
   }), [change, checkoutId, commands, noun, persist, serialize]);
 
+  const extractSelection = useCallback((path: string, selection: NoteSelection, destination: NoteExtractionDestination) =>
+    serialize(path, async () => {
+      const verify = () => {
+        const note = current.current.notes[path];
+        if (!note || !note.fileIdentity || note.incoming || note.sourceProblem
+          || note.content.replace(/\r\n?/g, "\n") !== selection.source) {
+          throw new Error("The source note changed. Review it and select the passage again.");
+        }
+        return note;
+      };
+      verify();
+      await persist(path);
+      const source = verify();
+      const result = await invoke<NoteExtraction>("extract_repository_note_selection", {
+        checkoutId,
+        request: {
+          path, baseRevision: source.base.id, fileIdentity: source.fileIdentity, expectedDraftRevision: source.draftRevision,
+          from: selection.from, to: selection.to, selectedText: selection.text, ...destination,
+        },
+      });
+      const { replacement } = result;
+      if (replacement) change(path, (note) => ({
+        ...note,
+        content: note.content === source.content ? replacement.markdown : note.content,
+        draftRevision: replacement.draftRevision,
+      }));
+      return result.path;
+    }), [change, checkoutId, persist, serialize]);
+
+  const mergeReviewed = useCallback(async (previewId: string, files: readonly MergeRevision[], saveNow: boolean): Promise<SavedNoteMerge> => {
+    const drafts = await serializePaths(files.map(({ path }) => path), async () => {
+      for (const { path, revisionId } of files) {
+        const note = current.current.notes[path];
+        if (note && (note.base.id !== revisionId || note.content !== note.saved || note.incoming || note.sourceProblem || note.draftRevision)) {
+          throw new Error(path + " changed. Save or resolve it and review a new merge.");
+        }
+      }
+      const staged = await invoke<SavedDraft[]>("stage_markdown_merge", { checkoutId, previewId });
+      const { notes, failures } = current.current;
+      const updated = { ...notes };
+      for (const draft of staged) {
+        const path = draft.base.relativePath;
+        const note = updated[path];
+        if (note?.base.id === draft.base.id) updated[path] = {
+          ...note,
+          content: note.content === note.saved ? draft.markdown : note.content,
+          draftRevision: draft.revision,
+        };
+      }
+      publish({ notes: updated, failures });
+      if (mounted.current) setDraftPaths((before) => [...new Set([...before, ...staged.map(({ base }) => base.relativePath)])]);
+      return staged;
+    });
+    const saved: string[] = [];
+    let failure: string | undefined;
+    if (saveNow) {
+      for (const draft of drafts) {
+        const path = draft.base.relativePath;
+        const opened = await load(path);
+        if (opened !== path) {
+          failure = path + " could not be reopened at its reviewed path.";
+          break;
+        }
+        if (!await save(path, draft, (problem) => { failure = String(problem); })) break;
+        saved.push(path);
+      }
+    }
+    return { saved, pending: drafts.slice(saved.length).map(({ base }) => base.relativePath), failure };
+  }, [checkoutId, load, publish, save, serializePaths]);
+
   const getNote = useCallback((path: string) => current.current.notes[path], []);
   const forget = useCallback((path: string) => {
     stopWatching(path);
@@ -321,5 +437,5 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed };
 }

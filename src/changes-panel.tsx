@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { GitCheckoutChanges, useGitCheckoutReview } from "@/git-checkout-changes";
+import { openWorkspaceFile } from "@/file-context-actions";
 import { branchChanges, savedCandidate, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { GitDiffFrame, GitDiffReview } from "@/git-diff-view";
 import { SavedGitDiffs } from "@/git-saved-diffs";
@@ -34,7 +35,8 @@ export default function ChangesPanel(props: ChangesPanelProps) {
 function LiveChanges({ checkout, source, onClose, openWorkspace }: ChangesPanelProps & { source: "working" | "staged" }) {
   const review = useGitCheckoutReview(checkout.checkoutId);
   if (review.data && !review.error) return <GitCheckoutChanges review={review.data} onClose={onClose} initialSource={source}
-    openFile={(path) => openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path)} />;
+    openConversation={(id) => openWorkspace("conversations", id)}
+    openFile={(path, line) => openWorkspaceFile(openWorkspace, path, line)} />;
   return <GitDiffFrame source={source} title={sourceLabels[source]} onClose={onClose}>
     <div className="p-3">
       {review.error ? <InlineIssue>{String(review.error)}</InlineIssue>

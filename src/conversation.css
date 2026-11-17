@@ -217,7 +217,7 @@
   overflow-wrap: anywhere;
 }
 .conv-user { align-self: end; max-width: 88%; padding: .65rem .9rem; border: 1px solid var(--border); border-radius: .95rem; background: var(--muted); white-space: pre-wrap; }
-.conv-user > p { margin: 0; }
+.conv-user > p, .conv-message-body > p { margin: 0; }
 .conv-assistant, .conv-stream { padding-inline: .125rem; font-family: var(--response-font, inherit); }
 .conv-stream { margin-top: 1.35rem; }
 .conv-markdown { display: flow-root; max-width: var(--app-markdown-width, 720px); overflow-wrap: anywhere; }
@@ -232,6 +232,10 @@
 .conv-markdown code { font-family: var(--font-mono, monospace); font-size: .92em; }
 .conv-markdown :not(pre) > code { padding: .1em .25em; background: var(--muted); border-radius: .2rem; }
 .conv-markdown pre { overflow: auto; padding: .7rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); }
+.conv-code-block { margin-bottom: .65em; }
+.conv-code-context { display: block; }
+.conv-code-context pre { margin: 0; padding-inline-end: 2rem; }
+.conv-code-context > .context-actions-more { position: absolute; inset-block-start: .25rem; inset-inline-end: .25rem; }
 .conv-markdown .conv-table-scroll { overflow-x: auto; }
 .conv-markdown :where(td,th) { padding: .3rem .5rem; border: 1px solid var(--border); }
 .conv-link-destination { color: var(--muted-foreground); font-size: .9em; }
@@ -388,6 +392,8 @@
   .conv-header-menu > div { inset-inline: 0 auto; }
 }
 .conv-message-actions { margin-top: .35rem; white-space: normal; }
+.conv-message-context { display: block; padding-inline-end: 1.8rem; }
+.conv-message-context > .context-actions-more { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
 .conv-message-actions, .conv-message-action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem .25rem; }
 .conv-message-actions .conv-quiet-button { font-size: .7rem; min-height: 1.65rem; }
 .conv-message-actions .conv-quiet-button svg { width: .8rem; height: .8rem; }

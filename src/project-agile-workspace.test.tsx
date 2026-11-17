@@ -3,7 +3,7 @@
 import type { DndContext, DragEndEvent } from "@dnd-kit/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -88,7 +88,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
         const task = { id: scope.title.toLocaleLowerCase().replaceAll(" ", "-"), title: scope.title };
         if (scope.placement.kind === "epic") hierarchy.epics.push(task);
         else hierarchy.work.push({ task, placement: scope.placement });
-        states[task.id] = "backlog";
+        states[task.id] = scope.draft?.state ?? "backlog";
         if (scope.draft) edits.set(task.id, scope.draft);
         return task.id;
       }
@@ -200,10 +200,10 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   const table = within(screen.getByRole("table", { name: "Agile table" }));
   expect(table.getByRole("columnheader", { name: "Branch" })).toBeTruthy();
   expect(table.getByRole("columnheader", { name: "Commit" })).toBeTruthy();
-  expect(table.getByRole("button", { name: /Improve logging/ })).toBeTruthy();
+  expect(table.getByRole("button", { name: /^Improve logging\s*Task$/ })).toBeTruthy();
   await user.click(table.getByRole("button", { name: `Expand ${epic.title}` }));
   await user.click(table.getByRole("button", { name: `Expand ${parent.title}` }));
-  expect(table.getByRole("button", { name: /Proofread samples/ })).toBeTruthy();
+  expect(table.getByRole("button", { name: /^Proofread samples\s*Sub-Task$/ })).toBeTruthy();
   await user.click(table.getByRole("checkbox", { name: "Editorial review" }));
   await table.findByRole("checkbox", { name: "Editorial review", checked: true });
   expect(await table.findByText("1/1 checked")).toBeTruthy();
@@ -457,8 +457,28 @@ it("creates the hierarchy from the work form and keeps a direct checklist beside
   await user.click(table.getByRole("button", { name: "Expand New ship" }));
   await user.click(table.getByRole("button", { name: "Expand Prepare docs" }));
   expect(table.getByRole("checkbox", { name: "Check headings" })).toBeTruthy();
-  expect(table.getByRole("button", { name: /Proofread guide/ })).toBeTruthy();
-  expect(table.getByRole("button", { name: /Independent audit/ })).toBeTruthy();
+  expect(table.getByRole("button", { name: /^Proofread guide\s*Sub-Task$/ })).toBeTruthy();
+  expect(table.getByRole("button", { name: /^Independent audit\s*Task$/ })).toBeTruthy();
+});
+
+it("uses the clicked Kanban card for a new child and the clicked column for a new task", async () => {
+  const { user } = testWorkspace();
+  const ready = within(screen.getByRole("region", { name: "Ready" }));
+  fireEvent.contextMenu(await ready.findByRole("button", { name: parent.title }));
+  await user.click(await screen.findByRole("menuitem", { name: "Add sub-task…" }));
+  const childEditor = within(screen.getByRole("dialog", { name: "New work" }));
+  expect((childEditor.getByRole("combobox", { name: "Parent Task" }) as HTMLSelectElement).value).toBe(parent.id);
+  await user.type(childEditor.getByRole("textbox", { name: "Title" }), "Check examples");
+  await user.click(childEditor.getByRole("button", { name: "Create work" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_workspace_work", {
+    projectId, title: "Check examples", placement: { kind: "subtask", parentTaskId: parent.id },
+  }));
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "task");
+  await user.click(ready.getByRole("button", { name: "Actions for Ready column" }));
+  await user.click(await screen.findByRole("menuitem", { name: "New task here…" }));
+  const taskEditor = within(screen.getByRole("dialog", { name: "New work" }));
+  expect((taskEditor.getByRole("combobox", { name: "State" }) as HTMLSelectElement).value).toBe("ready");
 });
 
 it("opens the shared work editor and persists priority, criteria, dependencies and execution modes", async () => {

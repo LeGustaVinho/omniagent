@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { ILink, ILinkProvider } from "@xterm/xterm";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ManualTerminal } from "@/ide-terminal";
@@ -14,6 +15,8 @@ type FixtureTerminal = {
   focus: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   clear: ReturnType<typeof vi.fn>;
+  linkProvider?: ILinkProvider;
+  selected: string;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -21,6 +24,8 @@ const fixture = vi.hoisted(() => ({
   terminals: [] as FixtureTerminal[],
   dimensions: { cols: 96, rows: 25 },
   onResize: [] as (() => void)[],
+  findNext: vi.fn<(text: string) => boolean>(),
+  lines: [] as { text: string; isWrapped: boolean }[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -36,7 +41,33 @@ vi.mock("@xterm/xterm", () => ({
     focus = vi.fn();
     dispose = vi.fn();
     clear = vi.fn();
-    open = vi.fn();
+    element?: HTMLElement;
+    selected = "";
+    linkProvider?: ILinkProvider;
+    open(element: HTMLElement) {
+      this.element = element;
+      const screen = document.createElement("div");
+      screen.className = "xterm-screen";
+      element.appendChild(screen);
+    }
+    registerLinkProvider(provider: ILinkProvider) {
+      this.linkProvider = provider;
+      return { dispose: () => { this.linkProvider = undefined; } };
+    }
+    getSelection() { return this.selected; }
+    attachCustomKeyEventHandler = vi.fn();
+    onSelectionChange = () => ({ dispose: vi.fn() });
+    get buffer() {
+      return { active: { length: fixture.lines.length, viewportY: 0, getLine: (index: number) => {
+        const line = fixture.lines[index];
+        if (!line) return;
+        const cells = Array.from(line.text).flatMap((character) => character === "界" ? [{ string: character, width: 2 }, { string: "", width: 0 }] : [{ string: character, width: 1 }]);
+        return { length: cells.length, isWrapped: line.isWrapped,
+          translateToString: (trim: boolean) => trim ? line.text.trimEnd() : line.text,
+          getCell: (x: number) => cells[x] && { getChars: () => cells[x]!.string, getWidth: () => cells[x]!.width },
+        };
+      } } };
+    }
     constructor() { fixture.terminals.push(this); }
     loadAddon(addon: { activate: (terminal: FixtureTerminal) => void }) { addon.activate(this); }
     onData(callback: (value: string) => void) {
@@ -52,10 +83,17 @@ vi.mock("@xterm/addon-fit", () => ({
     fit() { if (this.terminal) Object.assign(this.terminal, fixture.dimensions); }
   },
 }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {
+  activate() {}
+  findNext = fixture.findNext;
+  findPrevious = vi.fn();
+  clearDecorations = vi.fn();
+} }));
 
 beforeEach(() => {
   fixture.terminals.length = 0;
   fixture.onResize.length = 0;
+  fixture.lines = [];
   fixture.dimensions = { cols: 96, rows: 25 };
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(768);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(420);
@@ -64,6 +102,26 @@ beforeEach(() => {
     observe() {}
     disconnect() {}
   });
+});
+
+it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {
+  vi.mocked(invoke).mockResolvedValue({ checkoutId: "checkout", terminalId: "terminal" });
+  fixture.findNext.mockReturnValue(true);
+  fixture.lines = [{ text: "Some ", isWrapped: false }, { text: "wrapped output  ", isWrapped: true }, { text: "", isWrapped: false }];
+  const add = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId="checkout" active autoStart onContextText={add} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = screen.getByLabelText("Manual PowerShell terminal");
+  fireEvent.contextMenu(terminal);
+  await user.click(await screen.findByRole("menuitem", { name: "Find in terminal" }));
+  await user.type(screen.getByRole("searchbox", { name: "Find in terminal" }), "output");
+  expect(fixture.findNext).toHaveBeenLastCalledWith("output", { incremental: true });
+  await user.click(screen.getByRole("button", { name: "Close find" }));
+  fireEvent.contextMenu(terminal);
+  await user.click(await screen.findByRole("menuitem", { name: "Add terminal output to conversation…" }));
+  expect(add).toHaveBeenCalledExactlyOnceWith("Some wrapped output");
+  expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 
@@ -149,4 +207,71 @@ it("closes a launch that returns after changing checkout and drops its late outp
   expect(original.write).not.toHaveBeenCalled();
   expect(invoke).toHaveBeenCalledTimes(2);
   unmount();
+});
+
+it("opens wrapped local file references with their location and offers a menu on the clicked cells", async () => {
+  fixture.dimensions = { cols: 26, rows: 10 };
+  const session = { checkoutId: "linked", terminalId: "session" };
+  const original = "\".\\revisão #1.ts\":12:5";
+  fixture.lines = [
+    { text: "界 Error at (\".\\revisão #1", isWrapped: false },
+    { text: ".ts\":12:5)", isWrapped: true },
+    { text: "https://example.com/a.ts", isWrapped: false },
+    { text: "C:\\check out\\a.ts:14:2", isWrapped: false },
+  ];
+  vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : "docs/revisão #1.ts");
+  const onOpenFile = vi.fn();
+  const user = userEvent.setup();
+  const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  let links: ILink[] | undefined;
+  terminal.linkProvider?.provideLinks(2, (provided) => { links = provided; });
+  expect(links).toHaveLength(1);
+  expect(links![0]).toMatchObject({ text: original, range: { start: { x: 14, y: 1 }, end: { x: 9, y: 2 } } });
+  links![0]!.activate(new MouseEvent("mouseup"), original);
+  expect(onOpenFile).not.toHaveBeenCalled();
+  await act(async () => { links![0]!.activate(new MouseEvent("mouseup", { ctrlKey: true }), original); });
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_file", { checkoutId: "linked", relativeDirectory: "docs", path: ".\\revisão #1.ts" });
+  expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("docs/revisão #1.ts", 12, 5);
+  terminal.linkProvider?.provideLinks(3, (provided) => { links = provided; });
+  expect(links).toBeUndefined();
+  terminal.linkProvider?.provideLinks(4, (provided) => { links = provided; });
+  expect(links?.map(({ text }) => text)).toEqual(["C:\\check out\\a.ts:14:2"]);
+
+  const grid = container.querySelector(".xterm-screen")!;
+  vi.spyOn(grid, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 260, 100));
+  fireEvent.contextMenu(grid, { clientX: 30, clientY: 11 });
+  await user.click(await screen.findByRole("menuitem", { name: "Copy printed file reference" }));
+  expect(await navigator.clipboard.readText()).toBe(original);
+  terminal.selected = "../notes.md:8";
+  fireEvent.keyDown(grid, { key: "F10", shiftKey: true });
+  await user.click(await screen.findByRole("menuitem", { name: "Copy printed path" }));
+  expect(await navigator.clipboard.readText()).toBe("../notes.md");
+});
+
+it("keeps an unverified reference and a late resolution from navigating", async () => {
+  const pending = deferred<string>();
+  fixture.lines = [{ text: "src/file.ts:1", isWrapped: false }];
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "terminal" };
+    if (command === "resolve_manual_terminal_file") throw new Error("No file in this checkout.");
+    return undefined;
+  });
+  const onOpenFile = vi.fn();
+  const view = (active: boolean) => <ManualTerminal checkoutId="checkout" active={active} autoStart onOpenFile={onOpenFile} />;
+  const { rerender } = render(view(true));
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const activate = () => fixture.terminals[0]?.linkProvider?.provideLinks(1, (links) => {
+    links?.[0]?.activate(new MouseEvent("mouseup", { ctrlKey: true }), "src/file.ts:1");
+  });
+  act(activate);
+  expect((await screen.findByRole("alert")).textContent).toContain("No file in this checkout.");
+  expect(onOpenFile).not.toHaveBeenCalled();
+  vi.mocked(invoke).mockImplementationOnce(async () => pending.promise);
+  act(activate);
+  rerender(view(false));
+  rerender(view(true));
+  await act(async () => { pending.resolve("src/file.ts"); });
+  expect(onOpenFile).not.toHaveBeenCalled();
 });

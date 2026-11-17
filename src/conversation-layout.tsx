@@ -1,9 +1,11 @@
 import { MessageSquare, PanelLeftClose, Plus, Search } from "lucide-react";
 import { Dialog } from "radix-ui";
+import { useRef, useState } from "react";
 import type { KeyboardEventHandler, ReactNode, Ref, UIEventHandler } from "react";
 import type { MessageRole } from "@/bindings/MessageRole";
 import { ResizablePanel } from "@/panel-resize";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import "./conversation.css";
 
 export function ConversationWorkspaceLayout({ navigation, controls, children }: {
@@ -121,15 +123,32 @@ export function ConversationTranscript({ historyRef, contentRef, onScroll, child
   </div>;
 }
 
-export function ConversationMessage({ role, actions, children }: {
+export function ConversationMessage({ role, actions, menu = [], selectionMenu, children }: {
   role: MessageRole;
   actions: ReactNode;
+  menu?: MenuGroups;
+  selectionMenu?: (text: string) => MenuGroups;
   children: ReactNode;
 }) {
-  return <li className={role === "user" ? "conv-user" : "conv-assistant"}>
+  const body = useRef<HTMLDivElement>(null);
+  const [selectedText, setSelectedText] = useState("");
+  function captureSelection() {
+    if (!selectionMenu) return;
+    const selection = window.getSelection();
+    setSelectedText(selection && body.current?.contains(selection.anchorNode) && body.current.contains(selection.focusNode) ? selection.toString() : "");
+  }
+  return <li className={role === "user" ? "conv-user" : "conv-assistant"} onContextMenuCapture={captureSelection}
+    onPointerDownCapture={(event) => {
+      if (event.target instanceof Element && event.target.closest(".context-actions-more")) captureSelection();
+    }} onKeyDownCapture={(event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) captureSelection();
+    }}>
     <p className="sr-only">{role === "user" ? "You" : "Assistant"}</p>
-    {children}
-    <div className="conv-message-actions">{actions}</div>
+    <ContextActions label={role === "user" ? "your message" : "assistant message"} className="conv-message-context"
+      groups={selectedText.trim() && selectionMenu ? [...selectionMenu(selectedText), ...menu] : menu}>
+      <div ref={body} className="conv-message-body min-w-0">{children}</div>
+      <div className="conv-message-actions">{actions}</div>
+    </ContextActions>
   </li>;
 }
 

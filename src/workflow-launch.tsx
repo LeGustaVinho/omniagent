@@ -33,16 +33,17 @@ export function preferredWorkflowRevision(draft: { base?: Version | null; public
   return draft.publication?.workflow ?? draft.base;
 }
 
-export function WorkflowLaunchPicker({ projectId, checkoutId, pinnedDocumentRevisionId, workId, preferred, openWorkspace }: {
+export function WorkflowLaunchPicker({ projectId, checkoutId, pinnedDocumentRevisionId, workId, preferred, openWorkspace, initiallyExpanded = false }: {
   projectId: string;
   checkoutId: string;
   pinnedDocumentRevisionId?: string;
   workId?: string;
   preferred?: Version | null;
+  initiallyExpanded?: boolean;
   openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
   const client = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const [selected, setSelected] = useState("");
   const inFlight = useRef<{ key: string; requestId: string } | null>(null);
   const pinned = pinnedDocumentRevisionId !== undefined;

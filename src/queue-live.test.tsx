@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobInspection } from "@/bindings/JobInspection";
@@ -58,6 +58,20 @@ afterEach(() => {
 });
 
 describe("project queue", () => {
+  it("operates on the job under the context menu while another job is selected", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => command === "project_job_queue"
+      ? { settings: { paused: false, capacity: 3 }, active: 1, jobs: [queuedJob, runningJob] } : undefined);
+    const user = userEvent.setup();
+    renderQueue();
+    await user.click(await screen.findByRole("button", { name: "Agent job" }));
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Conversation turn" }));
+    const menu = within(await screen.findByRole("menu", { name: "Conversation turn job-2" }));
+    expect(menu.queryByRole("menuitem", { name: "Interrupt attempt" })).toBeNull();
+    await user.click(menu.getByRole("menuitem", { name: "Pause job" }));
+    expect(invoke).toHaveBeenCalledWith("set_pending_job_state", { projectId, jobId: queuedJob.job.id, state: "paused" });
+    expect(within(screen.getByRole("complementary", { name: "Selected job" })).getByRole("heading", { name: "Agent job" })).toBeTruthy();
+  });
+
   it("moves keyboard focus between a job, its details, and the active filter", async () => {
     vi.mocked(invoke).mockResolvedValue({ settings: { paused: false, capacity: 3 }, active: 1, jobs: [queuedJob, runningJob] });
     const user = userEvent.setup();

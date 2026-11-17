@@ -182,6 +182,15 @@ pub enum ResolvedPackageReference {
     },
 }
 
+impl From<ResolvedPackageReference> for PackageReference {
+    fn from(reference: ResolvedPackageReference) -> Self {
+        match reference {
+            ResolvedPackageReference::Published { version } => Self::Published { version },
+            ResolvedPackageReference::Parameter { name, kind } => Self::Parameter { name, kind },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedPackageArtifact {

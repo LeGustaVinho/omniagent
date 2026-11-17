@@ -86,11 +86,12 @@ function DeliveryRow({ item, conversationId, runId, live }: {
   </li>;
 }
 
-export function ConversationDeliveries({ input, conversationId, runId, live }: {
+export function ConversationDeliveries({ input, conversationId, runId, live, checkoutId }: {
   input: ConversationInput;
   conversationId: string;
   runId: string;
   live: boolean;
+  checkoutId?: string;
 }) {
   return <>
     <p className="break-all text-xs text-muted-foreground">Turn {input.turnId}</p>
@@ -100,7 +101,7 @@ export function ConversationDeliveries({ input, conversationId, runId, live }: {
     </p> : input.removedAttachmentCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">
       Exact input is unavailable after attachment history was deleted.
     </p> : <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>}
-    <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} />
+    <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} checkoutId={checkoutId} />
     {Boolean(input.conversationReferences?.length) && <details className="mt-2">
       <summary>Conversation references</summary>
       {input.conversationReferences?.map(({ messageRevisionId, reference }) =>

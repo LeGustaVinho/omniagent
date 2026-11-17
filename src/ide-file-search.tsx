@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { Search } from "lucide-react";
-import { useState } from "react";
+import { ChevronRight, FileText, Search } from "lucide-react";
+import { useId, useState } from "react";
 import type { FileSearchResult } from "@/ide-knowledge-data";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 
 export type RipgrepStatus = {
   configuredExecutable: string | null;
@@ -13,22 +14,40 @@ export type RipgrepStatus = {
 
 type ProjectSearch = { status: "results"; matches: FileSearchResult[]; truncated: boolean }
   | { status: "unavailable"; reason: string };
-type OpenMatch = (path: string, line: number) => void;
+type OpenMatch = (path: string, line: number, column?: number) => void;
+type MatchActions = (match: FileSearchResult) => MenuGroups;
+type FileActions = (matches: readonly FileSearchResult[]) => MenuGroups;
+export type FileSearchScope = { kind: "file" | "folder"; path: string };
+
+export function matchReference({ path, line, columns }: FileSearchResult, column = columns?.[0]) {
+  return column === undefined ? `${path}:${line}` : `${path}:${line}:${column}`;
+}
 
 export const ripgrepStatusKey = ["ripgrep-status"] as const;
 const noteLinePrefix = "omni-note-line:";
+const folderSearchPrefix = "omni-folder-search:";
 
-export function noteSearchTarget(path: string, line: number, request: number) {
-  return noteLinePrefix + encodeURIComponent(JSON.stringify([path, line, request]));
+export function folderSearchTarget(path: string) {
+  return folderSearchPrefix + path;
 }
 
-export function readNoteSearchTarget(target: string): { path: string; line?: number } | undefined {
+export function readFolderSearchTarget(target?: string) {
+  if (target?.startsWith(folderSearchPrefix)) return target.slice(folderSearchPrefix.length);
+}
+
+export function noteSearchTarget(path: string, line: number | undefined, request: number, side = false) {
+  return noteLinePrefix + encodeURIComponent(JSON.stringify(side ? [path, line, request, true] : [path, line, request]));
+}
+
+export function readNoteSearchTarget(target: string): { path: string; line?: number; side?: boolean } | undefined {
   if (!target.startsWith(noteLinePrefix)) return { path: target };
   try {
     const parts: unknown = JSON.parse(decodeURIComponent(target.slice(noteLinePrefix.length)));
-    if (!Array.isArray(parts) || parts.length !== 3) return;
-    const [path, line] = parts;
-    if (typeof path === "string" && typeof line === "number" && Number.isSafeInteger(line) && line > 0) return { path, line };
+    if (!Array.isArray(parts) || (parts.length !== 3 && (parts.length !== 4 || parts[3] !== true))) return;
+    const [path, line, , side] = parts;
+    if (typeof path === "string" && (line === null || typeof line === "number" && Number.isSafeInteger(line) && line > 0)) {
+      return { path, line: line ?? undefined, ...(side ? { side: true } : {}) };
+    }
   } catch {
     return undefined;
   }
@@ -43,16 +62,47 @@ export function useRipgrepStatus() {
   });
 }
 
-function FileSearchResults({ results, onOpen }: { results: readonly FileSearchResult[]; onOpen: OpenMatch }) {
-  if (!results.length) return null;
-  return <ul className="file-search-results">
-    {results.map(({ path, line, excerpt }, index) => <li key={`${path}:${line}:${index}`}>
-      <button type="button" onClick={() => onOpen(path, line)} title={`${path} · Line ${line}`}>
-        <strong>{path} <span>· {line}</span></strong>
-        <span>{excerpt}</span>
+function FileSearchGroup({ path, matches, onOpen, actions, fileActions }: {
+  path: string; matches: readonly FileSearchResult[]; onOpen: OpenMatch; actions: MatchActions; fileActions: FileActions;
+}) {
+  const id = useId();
+  const [expanded, setExpanded] = useState(true);
+  const occurrences = matches.reduce((total, match) => total + (match.occurrences ?? 1), 0);
+  const count = `${occurrences} ${occurrences === 1 ? "match" : "matches"}`;
+  return <li>
+    <ContextActions label={`matches in ${path}`} groups={fileActions(matches)}>
+      <button type="button" className="file-search-group" aria-expanded={expanded} aria-controls={id}
+        aria-label={`${path}, ${count}`} onClick={() => setExpanded(!expanded)} title={path}>
+        <ChevronRight size={13} className="file-search-chevron" aria-hidden /><FileText size={14} aria-hidden />
+        <strong>{path}</strong><small>{count}</small>
       </button>
-    </li>)}
-  </ul>;
+    </ContextActions>
+    <ul id={id} className="file-search-hits" hidden={!expanded}>
+      {matches.map((match, index) => <li key={`${matchReference(match)}:${index}`}>
+        <ContextActions label={matchReference(match)} groups={actions(match)}>
+          <button type="button" className="file-search-match" onClick={() => onOpen(path, match.line, match.columns?.[0])}
+            title={matchReference(match)} aria-label={`${path} · ${match.line}${match.columns?.length ? `:${match.columns[0]}` : ""} ${match.excerpt}`}>
+            <strong>{match.line}{match.columns?.length ? `:${match.columns[0]}` : ""}</strong>
+            <span>{match.excerpt}</span>
+          </button>
+        </ContextActions>
+      </li>)}
+    </ul>
+  </li>;
+}
+
+function FileSearchResults({ results, onOpen, actions, fileActions }: {
+  results: readonly FileSearchResult[]; onOpen: OpenMatch; actions: MatchActions; fileActions: FileActions;
+}) {
+  if (!results.length) return null;
+  const grouped = new Map<string, FileSearchResult[]>();
+  for (const match of results) {
+    const matches = grouped.get(match.path);
+    if (matches) matches.push(match);
+    else grouped.set(match.path, [match]);
+  }
+  return <ul className="file-search-results">{Array.from(grouped, ([path, matches]) =>
+    <FileSearchGroup key={path} path={path} matches={matches} onOpen={onOpen} actions={actions} fileActions={fileActions} />)}</ul>;
 }
 
 function FileSearchField({ label, query, onChange }: { label: string; query: string; onChange: (query: string) => void }) {
@@ -63,27 +113,43 @@ function FileSearchField({ label, query, onChange }: { label: string; query: str
   </label>;
 }
 
-export function ExampleFileSearch({ query, setQuery, results, onOpen }: {
+function ScopeLabel({ scope, onClear }: { scope?: FileSearchScope; onClear?: () => void }) {
+  if (!scope?.path) return null;
+  return <div className="file-search-scope">
+    <p className="file-help">Search in {scope.path}</p>
+    {onClear && <button type="button" className="fw-btn" onClick={onClear}>Search entire worktree</button>}
+  </div>;
+}
+
+export function ExampleFileSearch({ query, setQuery, results, onOpen, actions, fileActions, scope, onClear }: {
   query: string;
   setQuery: (query: string) => void;
   results: readonly FileSearchResult[];
   onOpen: OpenMatch;
+  actions: MatchActions;
+  fileActions: FileActions;
+  scope?: FileSearchScope;
+  onClear?: () => void;
 }) {
   return <div className="file-search">
+    <ScopeLabel scope={scope} onClear={onClear} />
     <FileSearchField label="Search files and content" query={query} onChange={setQuery} />
     {query.trim() && <p className="file-help" role="status">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
-    <FileSearchResults results={results} onOpen={onOpen} />
+    <FileSearchResults results={results} onOpen={onOpen} actions={actions} fileActions={fileActions} />
   </div>;
 }
 
-export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; onOpen: OpenMatch }) {
+export function ProjectFileSearch({ checkoutId, onOpen, scope, onClear, actions = () => [], fileActions = () => [] }: {
+  checkoutId: string; onOpen: OpenMatch; scope?: FileSearchScope; onClear?: () => void; actions?: MatchActions; fileActions?: FileActions;
+}) {
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState<{ checkoutId: string; query: string; sequence: number }>();
   const ripgrep = useRipgrepStatus();
   const request = submitted?.checkoutId === checkoutId ? submitted : undefined;
   const results = useQuery({
-    queryKey: ["project-file-search", checkoutId, request?.sequence, request?.query],
-    queryFn: () => invoke<ProjectSearch>("search_repository_files", { checkoutId, query: request!.query }),
+    queryKey: ["project-file-search", checkoutId, scope?.kind, scope?.path, request?.sequence, request?.query],
+    queryFn: () => invoke<ProjectSearch>("search_repository_files", { checkoutId, query: request!.query,
+      ...(scope?.kind === "file" ? { relativeFile: scope.path } : scope?.path ? { relativeDirectory: scope.path } : {}) }),
     enabled: request !== undefined,
     retry: false,
     staleTime: Infinity,
@@ -97,6 +163,7 @@ export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; 
     if (!query || !ripgrep.data?.executable || results.isFetching) return;
     setSubmitted({ checkoutId, query, sequence: (submitted?.sequence ?? 0) + 1 });
   }}>
+    <ScopeLabel scope={scope} onClear={onClear} />
     <FileSearchField label="Search file contents" query={query} onChange={setQuery} />
     <button type="submit" className="fw-btn fw-outlined" disabled={!query || !ripgrep.data?.executable || results.isFetching}>Search</button>
     {ripgrep.isPending && <p className="file-help" role="status">Checking ripgrep…</p>}
@@ -109,7 +176,7 @@ export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; 
         {found.matches.length === 0 && !found.truncated ? "No matching lines." : `${found.matches.length} matching lines.`}
         {found.truncated && " Search stopped early. Narrow the query for more complete results."}
       </p>
-      <FileSearchResults results={found.matches} onOpen={onOpen} />
+      <FileSearchResults results={found.matches} onOpen={onOpen} actions={actions} fileActions={fileActions} />
     </>}
   </form>;
 }

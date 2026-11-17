@@ -164,6 +164,9 @@ export interface FileSearchResult {
   path: string;
   line: number;
   excerpt: string;
+  columns?: readonly number[];
+  occurrences?: number;
+  lineText?: string | null;
 }
 
 export function findFileText(files: readonly ExampleFile[], query: string, content: boolean): FileSearchResult[] {
@@ -174,7 +177,8 @@ export function findFileText(files: readonly ExampleFile[], query: string, conte
     if (file.path.toLowerCase().includes(term)) output.push({ path: file.path, line: 1, excerpt: file.path });
     if (!content) continue;
     for (const [index, line] of file.content.split("\n").entries()) {
-      if (line.toLowerCase().includes(term)) output.push({ path: file.path, line: index + 1, excerpt: line.trim() });
+      const position = line.toLowerCase().indexOf(term);
+      if (position >= 0) output.push({ path: file.path, line: index + 1, excerpt: line.trim(), columns: [position + 1], lineText: line });
       if (output.length >= 100) return output;
     }
   }

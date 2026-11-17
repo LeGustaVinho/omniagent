@@ -18,7 +18,10 @@ use super::{
 };
 
 mod links;
-pub use links::replace_wiki_note_reference;
+pub(super) use links::markdown_link;
+pub use links::{
+    replace_markdown_note_reference, replace_wiki_note_reference, replace_wiki_note_reference_at,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +217,7 @@ impl Store {
                     &destination,
                     &documents,
                     &mut warnings,
+                    None,
                 );
                 (files, identities, warnings)
             })
@@ -435,7 +439,20 @@ async fn rewrite_checked(
     }
 }
 
-fn replace_ranges(mut text: String, edits: &[MarkdownRenameEdit]) -> Option<String> {
+pub(super) fn planned_merge_references(
+    root: &std::path::Path,
+    source: &str,
+    destination: &str,
+    documents: &[RepositoryDocument],
+    warnings: &mut Vec<MarkdownRenameWarning>,
+    combined: &str,
+    redirect: &str,
+) -> Vec<MarkdownRenameFile> {
+    let merged = links::MergedNoteTexts { combined, redirect };
+    links::planned_references(root, source, destination, documents, warnings, Some(merged)).0
+}
+
+pub(super) fn replace_ranges(mut text: String, edits: &[MarkdownRenameEdit]) -> Option<String> {
     let mut right = text.len();
     for edit in edits.iter().rev() {
         let range = edit.byte_start..edit.byte_end;

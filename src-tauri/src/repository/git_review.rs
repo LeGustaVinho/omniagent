@@ -23,11 +23,21 @@ use super::{
     verify_checkout, with_managed_worktree_writer,
 };
 
+mod comments;
 mod commit;
 mod comparison;
+mod conflicts;
 mod content;
+mod history;
+mod hunks;
+mod permalink;
+pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
+pub use conflicts::GitConflictReview;
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
+pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
+pub use hunks::GitReviewHunk;
+pub use permalink::GitPermalinkLines;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +53,15 @@ pub struct GitPathStatus {
     pub path: String,
     pub staged: Option<char>,
     pub working: Option<char>,
+}
+
+impl GitPathStatus {
+    fn unmerged(&self) -> bool {
+        matches!(
+            (self.staged, self.working),
+            (Some('U'), _) | (_, Some('U')) | (Some('A'), Some('A')) | (Some('D'), Some('D'))
+        )
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -230,15 +249,23 @@ impl Store {
         tokio::task::spawn_blocking(move || {
             let review = LiveReview::open(&scope)?;
             validate_path(&path)?;
-            ensure!(
-                review
-                    .status()?
-                    .iter()
-                    .any(|entry| entry.path == path && source.contains(entry)),
-                "the selected path is no longer in this comparison"
-            );
-            let diff = content::read_diff(&review, path, source)?;
+            let entry = review
+                .status()?
+                .into_iter()
+                .find(|entry| entry.path == path && source.contains(entry))
+                .context("the selected path is no longer in this comparison")?;
+            let mut diff = content::read_diff(&review, &entry, source)?;
             review.verify()?;
+            diff.comment_scope = comments::GitReviewCommentScope::from_comparison(
+                &scope.id,
+                &path,
+                comments::GitReviewCommentSource::Checkout {
+                    source,
+                    revision: diff.revision.clone(),
+                },
+                (&path, &diff.original),
+                (&path, &diff.modified),
+            )?;
             Ok(diff)
         })
         .await?
@@ -262,6 +289,28 @@ impl Store {
         let write = move || stage_path(&scope, &path, staged, &expected);
         match managed {
             Some((project, task)) => {
+                with_managed_worktree_writer(self, project, checkout, task, move |_| write()).await
+            }
+            None => tokio::task::spawn_blocking(write).await?,
+        }
+    }
+
+    pub async fn set_git_hunk_staged(
+        &self,
+        checkout: String,
+        path: String,
+        source: GitDiffSource,
+        expected: GitReviewRevision,
+        hunk_id: String,
+    ) -> Result<()> {
+        validate_path(&path)?;
+        let scope = self.git_review_scope(checkout).await?;
+        let owner = scope.owner.clone();
+        let project = scope.project.clone();
+        let checkout = scope.id.clone();
+        let write = move || hunks::stage(&scope, &path, source, &expected, &hunk_id);
+        match owner {
+            Some(task) => {
                 with_managed_worktree_writer(self, project, checkout, task, move |_| write()).await
             }
             None => tokio::task::spawn_blocking(write).await?,
@@ -391,20 +440,17 @@ fn stage_path(
         .into_iter()
         .find(|entry| entry.path == path)
         .context("the reviewed path no longer has a change")?;
+    ensure!(
+        !status.unmerged(),
+        "review the conflict before changing this path's index"
+    );
     if staged {
         ensure!(
             status.working.is_some(),
             "the path has no working change to stage"
         );
         if let Some(_locks) = content::lock_staging_file(&scope.root, path)? {
-            review.view.read(&[
-                "-c",
-                "core.splitIndex=false",
-                "--literal-pathspecs",
-                "add",
-                "--",
-                path,
-            ])?;
+            stage_existing_file(&review, path)?;
         } else {
             review.view.read(&[
                 "-c",
@@ -439,7 +485,24 @@ fn stage_path(
             ])?;
         }
     }
-    let mut replacement = tempfile::NamedTempFile::new_in(index_parent)?;
+    install_index(&review, &index)
+}
+
+fn stage_existing_file(review: &LiveReview, path: &str) -> Result<()> {
+    review.view.read(&[
+        "-c",
+        "core.splitIndex=false",
+        "--literal-pathspecs",
+        "add",
+        "--",
+        path,
+    ])?;
+    Ok(())
+}
+
+fn install_index(review: &LiveReview, index: &Path) -> Result<()> {
+    let mut replacement =
+        tempfile::NamedTempFile::new_in(index.parent().context("the index has no parent")?)?;
     std::io::copy(
         &mut open_locked_local_file(&review.view.index_path())?,
         replacement.as_file_mut(),

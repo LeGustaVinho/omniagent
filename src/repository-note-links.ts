@@ -21,10 +21,11 @@ export type IndexedNoteRelationships = {
 };
 
 function linkQuery(link: NoteTarget, path: string) {
-  return { sourcePath: link.sourcePath ?? path, target: link.target, anchor: link.anchor ?? null };
+  return { sourcePath: link.sourcePath ?? path, target: link.target, anchor: link.anchor ?? null,
+    ...(link.syntax === "markdown" ? { syntax: "markdown" as const } : {}) };
 }
 type LinkQuery = ReturnType<typeof linkQuery>;
-const key = (query: LinkQuery) => JSON.stringify([query.sourcePath, query.target, query.anchor]);
+const key = (query: LinkQuery) => JSON.stringify([query.sourcePath, query.target, query.anchor, query.syntax ?? "wiki"]);
 
 export async function resolveRepositoryLink(checkoutId: string, link: NoteTarget, path: string) {
   const results = await invoke<IndexedLinkResolution[]>("resolve_repository_note_links", { checkoutId, queries: [linkQuery(link, path)] });

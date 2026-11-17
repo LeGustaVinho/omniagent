@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
@@ -88,9 +88,16 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
     }
   });
   openSettings({ initialPage: "providers", simulation: null });
-  await userEvent.setup().click(await screen.findByRole("button", { name: "Check CLI" }));
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Check CLI" }));
   expect((await screen.findByText("Effective CLI permissions")).nextElementSibling?.textContent).toContain("plan");
   expect(screen.getByText("Windows command sandbox").nextElementSibling?.textContent).toBe("Unsupported for this CLI on the Windows host");
+  fireEvent.contextMenu(screen.getByRole("heading", { name: "Claude Code" }));
+  await user.click(screen.getByRole("menuitem", { name: "Copy provider ID" }));
+  expect(await navigator.clipboard.readText()).toBe("claude");
+  await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "executable paths");
+  await user.click(screen.getByRole("button", { name: "Executable paths in Providers" }));
+  expect(document.activeElement).toBe(screen.getByLabelText("Executable path"));
 });
 
 it("stages the verified backup only after confirmation and reports the pending restart", async () => {

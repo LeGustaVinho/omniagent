@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { SettingRow } from "@/settings-controls";
 import type { ConversationMode } from "@/conversation-mode";
 import { ForkCheckoutReview, useForkCheckoutReview } from "@/conversation-fork-checkout";
-import { ConversationLibraryNavigation } from "@/conversation-library";
+import { ConversationLibraryNavigation } from "@/conversation-library-navigation";
 
 const policies = {
   review: "Pause for review",
@@ -202,6 +202,7 @@ type HistoryProps = {
   openFork: (conversation: Conversation) => void;
   requestedAction?: ConversationMessageHistoryAction;
   onRequestedActionClose?: () => void;
+  standaloneAction?: boolean;
 };
 
 export function ConversationHistoryControls(props: HistoryProps) {
@@ -220,9 +221,9 @@ export function ConversationHistoryControls(props: HistoryProps) {
     if (next) setOpen(true);
     else if (!pending) close();
   }}>
-    <Dialog.Trigger type="button" className="conv-quiet-button" title="Conversation history controls" disabled={!props.history}>
+    {!props.standaloneAction && <Dialog.Trigger type="button" className="conv-quiet-button" title="Conversation history controls" disabled={!props.history}>
       <History aria-hidden /> History
-    </Dialog.Trigger>
+    </Dialog.Trigger>}
     {showing && props.history && <Dialog.Portal>
       <Dialog.Overlay className="conv-dialog-scrim" />
       <Dialog.Content className="conv-dialog conv-dialog-layout conv-history-dialog" aria-describedby={undefined}>
@@ -238,7 +239,7 @@ export function ConversationHistoryControls(props: HistoryProps) {
   </Dialog.Root>;
 }
 
-function HistoryActionForm({ conversationId, title, history, disabled, mode, selection, effort, openFork, requestedAction, close, onArchivedAction }:
+function HistoryActionForm({ conversationId, title, history, disabled, mode, selection, effort, openFork, requestedAction, standaloneAction, close, onArchivedAction }:
   HistoryProps & { history: ConversationHistory; close: () => void; onArchivedAction: (action: ConversationMessageHistoryAction) => void }) {
   const [baseId] = useState(history.contextId);
   const [kind, setKind] = useState<ConversationMessageHistoryAction["kind"] | "clear">(requestedAction?.kind ?? "clear");
@@ -259,6 +260,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
   const policy = useQuery({
     queryKey: key,
     queryFn: () => invoke<QueueHistorySettings>("conversation_queue_history_policy", { conversationId }),
+    enabled: !fork,
   });
   const save = useMutation({
     mutationKey,
@@ -315,7 +317,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
 
   return <>
       <div className="conv-dialog-body conv-dialog-form conv-history-form">
-          {requestedAction?.kind !== "edit" && !sourceContextId && <label>Action
+          {!standaloneAction && requestedAction?.kind !== "edit" && !sourceContextId && <label>Action
             <select value={kind} disabled={lock} onChange={(event) => {
               const next = event.currentTarget.value as "clear" | "rewind" | "fork";
               setKind(next);
@@ -347,7 +349,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
           {kind !== "clear" && <details className="conv-history-details"><summary className="conv-history-disclosure"><History size={15} aria-hidden /> Preview · {prefix.length} messages <ChevronRight size={14} aria-hidden /></summary>
             <div className="conv-history-details-body">{prefix.length ? <HistoryMessages messages={kind === "edit" ? prefix.map((entry) => entry.revisionId === selected ? { ...entry, text: edit } : entry) : prefix} /> : <p>The fork starts with empty dialogue.</p>}</div>
           </details>}
-          {(!fork || !requestedAction) && <details className="conv-history-details" onToggle={(event) => setOptionsOpen(event.currentTarget.open)}>
+          {!standaloneAction && (!fork || !requestedAction) && <details className="conv-history-details" onToggle={(event) => setOptionsOpen(event.currentTarget.open)}>
             <summary className="conv-history-disclosure"><SlidersHorizontal size={15} aria-hidden /> Options <ChevronRight size={14} aria-hidden /></summary>
             {optionsOpen && <div className="conv-history-details-body">
               {!fork && <><label>Queued work after context changes
@@ -361,11 +363,11 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
               {!requestedAction && <HistoryDeletionGate conversationId={conversationId} history={history} disabled={disabled || lock} />}
             </div>}
           </details>}
-          <details className="conv-history-details" onToggle={(event) => setEarlierOpen(event.currentTarget.open)}>
+          {!standaloneAction && <details className="conv-history-details" onToggle={(event) => setEarlierOpen(event.currentTarget.open)}>
             <summary className="conv-history-disclosure"><History size={15} aria-hidden /> Inspect earlier context <ChevronRight size={14} aria-hidden /></summary>
             {earlierOpen && <div className="conv-history-details-body"><ConversationPreviousRevisions conversationId={conversationId}
               openConversation={(source) => { close(); openFork(source); }} onArchivedAction={!disabled && !lock && !changed ? onArchivedAction : undefined} /></div>}
-          </details>
+          </details>}
           {disabled && <p role="status">Wait for the active turn to stop before changing history.</p>}
           {changed && <p role="alert">The conversation context changed. Reopen History to review the current messages.</p>}
           {(policy.error || save.error || change.error || archive.error) && <p className="conv-alert" role="alert">{String(policy.error || save.error || change.error || archive.error)}</p>}

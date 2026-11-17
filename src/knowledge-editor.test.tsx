@@ -56,6 +56,38 @@ it("reveals a formatted source range when the cursor enters and keeps the editor
   expect(props.onChange).not.toHaveBeenCalled();
 });
 
+it("opens context on the exact concealed link and quotes the live selection with its source range", async () => {
+  const source = "# Launch\n\nSee [[Plan#Ready|Plan details]].\n\nReview only\nthese lines.\n";
+  const from = source.indexOf("[[");
+  const to = source.indexOf("]]", from) + 2;
+  const selected = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (_command, args) => ({
+    bufferRevision: (args as { bufferRevision: string }).bufferRevision,
+    nodes: [{ kind: "wikilink", range: { from, to }, target: "Plan", anchor: "Ready", alias: "Plan details" }],
+  }));
+  const { container } = render(<MarkdownEditor {...props} mode="live" source={source} analyze
+    contextActions={(hit) => [[{ label: "Use note context", run: () => selected(hit) }]]} />);
+  const link = await waitFor(() => {
+    const widget = container.querySelector(".cm-note-link");
+    expect(widget?.textContent).toBe("Plan details");
+    return widget!;
+  });
+  fireEvent.contextMenu(link);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Use note context" }));
+  expect(selected).toHaveBeenCalledWith(expect.objectContaining({ link: expect.objectContaining({
+    raw: "Plan#Ready|Plan details", target: "Plan", sourcePath: props.path, sourceLine: 3, syntax: "wiki",
+  }) }));
+
+  const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  select(view, source.indexOf("Review only"), source.length - 1);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Use note context" }));
+  expect(selected).toHaveBeenLastCalledWith(expect.objectContaining({ excerpt: {
+    path: props.path, language: "markdown", text: "Review only\nthese lines.", startLine: 5, endLine: 6,
+  } }));
+});
+
 function openSource(source: string) {
   const onChange = vi.fn();
   function Controlled() {

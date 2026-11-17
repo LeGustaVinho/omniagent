@@ -1,6 +1,7 @@
 import { Search } from "lucide-react";
 import { Tooltip } from "radix-ui";
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ContextActions, type MenuAction } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
 
 export type KnowledgeLocation = {
@@ -32,6 +33,7 @@ export type KnowledgeOutgoingLink = {
 
 type OpenNote = (location: KnowledgeLocation) => void;
 type RepairLink = (link: KnowledgeOutgoingLink) => void;
+type LocationActions = (location: KnowledgeLocation) => readonly MenuAction[];
 type NavigationState = { pending?: boolean; error?: string | null };
 
 function openLocation(open: OpenNote, { path, line, anchor }: KnowledgeLocation) {
@@ -140,18 +142,23 @@ export function KnowledgeSearch({
   </div>;
 }
 
-export function KnowledgeOutline({ entries, onOpen, pending, error }: NavigationState & {
+export function KnowledgeOutline({ entries, onOpen, actions, pending, error }: NavigationState & {
   entries: readonly KnowledgeOutlineEntry[];
   onOpen: OpenNote;
+  actions?: LocationActions;
 }) {
   return <section aria-label="Outline">
     <h3>Outline</h3>
     <NavigationMessage pending={pending} error={error} loading="Loading outline…">
       {entries.length ? <ul>
         {entries.map((entry) => <li key={locationLabel(entry)}>
-          <button type="button" title={locationLabel(entry)}
-            style={{ paddingInlineStart: 5 + Math.min(Math.max(entry.level - 1, 0), 5) * 12 }}
-            onClick={() => openLocation(onOpen, entry)}>{entry.label}</button>
+          <ContextActions label={locationLabel(entry)} groups={actions ? [[
+            { label: "Go to heading", run: () => openLocation(onOpen, entry) }, ...actions(entry),
+          ]] : []}>
+            <button type="button" title={locationLabel(entry)}
+              style={{ paddingInlineStart: 5 + Math.min(Math.max(entry.level - 1, 0), 5) * 12 }}
+              onClick={() => openLocation(onOpen, entry)}>{entry.label}</button>
+          </ContextActions>
         </li>)}
       </ul> : <p className="file-help">No headings in this note.</p>}
     </NavigationMessage>
@@ -211,34 +218,54 @@ export function KnowledgeLinkPreview({ link, onOpen, onRepair, className, childr
   </PreviewButton>;
 }
 
-export function KnowledgeLinks({ outgoing, backlinks, onOpen, onRepair, pending, error }: NavigationState & {
+export function KnowledgeLinks({ outgoing, backlinks, onOpen, onRepair, actions, copyReference, pending, error }: NavigationState & {
   outgoing: readonly KnowledgeOutgoingLink[];
   backlinks: readonly KnowledgeBacklink[];
   onOpen: OpenNote;
   onRepair?: RepairLink;
+  actions?: LocationActions;
+  copyReference?: (text: string) => void;
 }) {
   return <NavigationMessage pending={pending} error={error} loading="Loading note links…">
     <section aria-label="Outgoing links">
       <h3>Outgoing links</h3>
       {outgoing.length ? <ul>
-        {outgoing.map((link, index) => <li key={`${locationLabel(link.source)}:${link.rawTarget}:${index}`}>
-          <KnowledgeLinkPreview link={link} onOpen={onOpen} onRepair={onRepair} />
-          {link.resolution.kind === "ambiguous" && <details className="px-2 text-xs">
-            <summary className="cursor-pointer">Candidate notes</summary>
-            <ul>{link.resolution.candidates.map((candidate) => <li key={locationLabel(candidate)}>
-              <PreviewButton title={locationLabel(candidate)} preview={<TargetDescription location={candidate} />}
-                onClick={() => openLocation(onOpen, candidate)}>{candidate.path}</PreviewButton>
-            </li>)}</ul>
-          </details>}
-        </li>)}
+        {outgoing.map((link, index) => {
+          const target = link.resolution.kind === "resolved" ? link.resolution.target : undefined;
+          return <li key={`${locationLabel(link.source)}:${link.rawTarget}:${index}`}>
+            <ContextActions label={link.label} groups={actions ? [[
+              ...(target ? [{ label: "Open target", run: () => openLocation(onOpen, target) }, ...actions(target)] : []),
+              { label: "Go to link in source", run: () => openLocation(onOpen, link.source) },
+              ...(!target && onRepair ? [{ label: "Repair link…", run: () => onRepair(link) }] : []),
+              ...(copyReference ? [{ label: "Copy raw link target", run: () => copyReference(link.rawTarget) }] : []),
+            ]] : []}>
+              <KnowledgeLinkPreview link={link} onOpen={onOpen} onRepair={onRepair} />
+            </ContextActions>
+            {link.resolution.kind === "ambiguous" && <details className="px-2 text-xs">
+              <summary className="cursor-pointer">Candidate notes</summary>
+              <ul>{link.resolution.candidates.map((candidate) => <li key={locationLabel(candidate)}>
+                <ContextActions label={locationLabel(candidate)} groups={actions ? [[
+                  { label: "Open candidate", run: () => openLocation(onOpen, candidate) }, ...actions(candidate),
+                ]] : []}>
+                  <PreviewButton title={locationLabel(candidate)} preview={<TargetDescription location={candidate} />}
+                    onClick={() => openLocation(onOpen, candidate)}>{candidate.path}</PreviewButton>
+                </ContextActions>
+              </li>)}</ul>
+            </details>}
+          </li>;
+        })}
       </ul> : <p className="file-help">No outgoing links.</p>}
     </section>
     <section aria-label="Backlinks">
       <h3>Backlinks</h3>
       {backlinks.length ? <ul>
         {backlinks.map(({ source, label }, index) => <li key={`${locationLabel(source)}:${index}`}>
-          <PreviewButton title={locationLabel(source)} preview={<TargetDescription location={source} />}
-            onClick={() => openLocation(onOpen, source)}>{label || source.title || fileName(source.path)}</PreviewButton>
+          <ContextActions label={locationLabel(source)} groups={actions ? [[
+            { label: "Open backlink source", run: () => openLocation(onOpen, source) }, ...actions(source),
+          ]] : []}>
+            <PreviewButton title={locationLabel(source)} preview={<TargetDescription location={source} />}
+              onClick={() => openLocation(onOpen, source)}>{label || source.title || fileName(source.path)}</PreviewButton>
+          </ContextActions>
         </li>)}
       </ul> : <p className="file-help">No incoming links.</p>}
     </section>

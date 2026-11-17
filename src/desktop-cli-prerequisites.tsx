@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, CircleAlert } from "lucide-react";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ripgrepStatusKey } from "@/ide-file-search";
 
 export const desktopCliPrerequisitesKey = ["desktop-cli-prerequisites"] as const;
@@ -25,40 +26,57 @@ export function useDesktopCliPrerequisites() {
   });
 }
 
-export function ExecutableInstallation({ status, compact }: { status: CliPrerequisite; compact?: boolean }) {
-  const needsAttention = Boolean(status.issue || !status.executable || !status.version);
+export function ExecutableInstallation({ status, label, provider, refresh, compact }: { status: CliPrerequisite; label: string;
+  provider?: Provider; refresh?: () => void; compact?: boolean }) {
+  const { feedback, run, copy } = useContextActionFeedback();
+  const { executable, version, issue } = status;
+  const summary = [label, version, executable, issue].filter(Boolean).join("\n");
   return <>
-    <span className="executable-status" data-attention={needsAttention}>
-      {needsAttention ? <CircleAlert size={14} aria-hidden="true" /> : <CheckCircle2 size={14} aria-hidden="true" />}
-      {status.version ?? (status.executable ? "Version unverified" : "Unavailable")}
-    </span>
-    {status.executable && (compact
-      ? <details><summary>Executable path</summary><code className="block break-all">{status.executable}</code></details>
-      : <code className="block break-all">{status.executable}</code>)}
-    {status.issue && <p className="settings-result settings-result-error">{status.issue}</p>}
+    <ContextActions label={`${label} installation`} groups={[[
+      ...(executable ? [{ label: "Show executable in File Explorer", run: () => void run(() =>
+        invoke("reveal_desktop_cli_executable", { provider: provider ?? null, expected: executable })) }] : []),
+      ...(refresh ? [{ label: "Check installed executables", run: refresh }] : []),
+    ], [
+      ...(executable ? [{ label: "Copy executable path", run: () => copy(executable) }] : []),
+      ...(version ? [{ label: "Copy version", run: () => copy(version) }] : []),
+      { label: "Copy installation details", run: () => copy(summary) },
+    ]]}>
+      <div className="min-w-0">
+        <span className="executable-status" data-attention={Boolean(issue || !executable || !version)}>
+          {issue || !executable || !version ? <CircleAlert size={14} aria-hidden /> : <CheckCircle2 size={14} aria-hidden />}
+          {version ?? (executable ? "Version unverified" : "Unavailable")}
+        </span>
+        {executable && (compact
+          ? <details><summary>Executable path</summary><code className="block break-all">{executable}</code></details>
+          : <code className="block break-all">{executable}</code>)}
+        {issue && <p className="settings-result settings-result-error">{issue}</p>}
+      </div>
+    </ContextActions>
+    {feedback && <p className="settings-result" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </>;
 }
 
 export function DesktopCliPrerequisites() {
   const status = useDesktopCliPrerequisites();
   const client = useQueryClient();
-  const entries = status.data && [
-    { label: "Git for Windows", status: status.data.git },
-    ...status.data.providers.map(({ provider, status }) => ({ label: providerExecutableLabels[provider], status })),
-  ].sort((a, b) => Number(Boolean(b.status.issue || !b.status.version)) - Number(Boolean(a.status.issue || !a.status.version)));
+  function refresh() {
+    void client.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
+    void client.invalidateQueries({ queryKey: ripgrepStatusKey });
+  }
   return <section aria-label="Desktop CLI installation">
     {status.isPending && <p role="status">Checking installed executables…</p>}
     {status.error && <p role="alert">{String(status.error)}</p>}
-    {entries && <dl className="settings-facts">
-      {entries.map(({ label, status }) => <ExecutableRow key={label} label={label} status={status} />)}
+    {status.data && <dl className="settings-facts">
+      <dt>Git for Windows</dt><dd><ExecutableInstallation status={status.data.git} label="Git for Windows" refresh={refresh} /></dd>
+      {status.data.providers.map(({ provider, status: executable }) => {
+        const label = providerExecutableLabels[provider];
+        return <ExecutableRow key={provider} label={label} status={executable} provider={provider} refresh={refresh} />;
+      })}
     </dl>}
-    <Button type="button" variant="outline" disabled={status.isFetching} onClick={() => {
-      void client.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
-      void client.invalidateQueries({ queryKey: ripgrepStatusKey });
-    }}>Check installed executables</Button>
+    <Button type="button" variant="outline" disabled={status.isFetching} onClick={refresh}>Check installed executables</Button>
   </section>;
 }
 
-function ExecutableRow({ label, status }: { label: string; status: CliPrerequisite }) {
-  return <><dt>{label}</dt><dd><ExecutableInstallation status={status} compact /></dd></>;
+function ExecutableRow(props: Parameters<typeof ExecutableInstallation>[0]) {
+  return <><dt>{props.label}</dt><dd><ExecutableInstallation {...props} compact /></dd></>;
 }

@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { QualificationMatrix } from "@/qualification-matrix";
@@ -39,6 +39,12 @@ it("loads the recorded dispatch scope on demand and distinguishes a fixture from
   expect(within(table).getByText("side request · Fixture passed")).toBeTruthy();
   expect(within(table).getByText("workspace write · Reported")).toBeTruthy();
   expect(within(table).queryByText(/Verified in provider run/)).toBeNull();
+  fireEvent.contextMenu(within(table).getByText("side request · Fixture passed"));
+  await user.click(screen.getByRole("menuitem", { name: "Copy capability assessment" }));
+  expect(await navigator.clipboard.readText()).toBe("side request · Fixture passed\nExact checkout\nAuthenticated fixture · succeeded · 2026-01-01T00:00:00Z");
+  fireEvent.contextMenu(within(table).getByText("Codex"));
+  await user.click(screen.getByRole("menuitem", { name: "Copy qualification run ID" }));
+  expect(await navigator.clipboard.readText()).toBe(cursor.runId);
   await user.click(screen.getByRole("button", { name: "Older" }));
   expect(await screen.findByText("No submitted dispatch profiles have been recorded.")).toBeTruthy();
   expect(invoke).toHaveBeenLastCalledWith("desktop_capability_qualifications", { cursor, validationCheckoutId: null });

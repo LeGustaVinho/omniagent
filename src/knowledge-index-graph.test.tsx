@@ -142,7 +142,7 @@ function queryClient() {
 }
 
 const paths = () => within(screen.getByRole("list", { name: "Graph notes" }))
-  .getAllByRole("button").map((button) => button.getAttribute("title"));
+  .getAllByRole("button", { name: (name) => !name.startsWith("Actions for ") }).map((button) => button.getAttribute("title"));
 
 function currentGraph() {
   const graph = instances.at(-1);
@@ -186,7 +186,7 @@ it("uses a checkout's indexed edges to focus a canonical tab and keeps identitie
   await act(async () => { reference.target().emit("tap"); });
   await waitFor(() => expect(screen.queryByRole("list", { name: "Graph notes" })).toBeNull());
   expect(screen.getAllByRole("button", { name: "Close Guia.md" })).toHaveLength(1);
-  await user.click(fileTree.getByText("planos", { selector: "summary" }));
+  await user.click(fileTree.getByRole("button", { name: "planos" }));
   expect(fileTree.getByRole("button", { name: "Guia.md" }).getAttribute("aria-current")).toBe("page");
   expect(invoke).toHaveBeenCalledWith("open_repository_document", { checkoutId: alpha, path: guide });
 

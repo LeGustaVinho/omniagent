@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { ArrowUpRight, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
+import { ContextActions, PositionedContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineTemplateList, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
@@ -24,6 +25,7 @@ import {
 } from "@/workflow-execution-model";
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
+type ExecutionTarget = { kind: "node" | "edge"; id: string };
 
 function ExecutionNodeCard({ data, selected }: NodeProps<ExecutionNode>) {
   const node = data.pinned;
@@ -76,6 +78,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
   const [selectedUnit, setSelectedUnit] = useState<string>();
   const [subflowPath, setSubflowPath] = useState("");
   const [theme, setTheme] = useState(readTheme);
+  const [menu, setMenu] = useState<{ target: ExecutionTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement }>();
+  const { copy, feedback } = useContextActionFeedback();
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(readTheme()));
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme"] });
@@ -122,6 +126,45 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       target: wire.to.node, targetHandle: wire.to.port, markerEnd: { type: MarkerType.ArrowClosed, color },
       style: { stroke: color, strokeDasharray: control ? "5 4" : undefined }, ariaLabel: `${wire.from.node}.${wire.from.port} to ${wire.to.node}.${wire.to.port}` };
   });
+  function openMenu(event: MouseEvent, target: ExecutionTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    const origin = event.currentTarget;
+    setMenu({ target, point: { x: event.clientX, y: event.clientY },
+      origin: origin instanceof HTMLElement || origin instanceof SVGElement ? origin : undefined });
+  }
+  function canvasActions(target: ExecutionTarget): { label: string; groups: MenuGroups } | undefined {
+    if (target.kind === "edge") {
+      const wire = graph.wires.find((wire) => wireKey(wire) === target.id);
+      if (!wire) return;
+      const label = `${wire.from.node}.${wire.from.port} → ${wire.to.node}.${wire.to.port}`;
+      return { label, groups: [[
+        { label: "Inspect source stage", run: () => viewStage(wire.from.node) },
+        { label: "Inspect destination stage", run: () => viewStage(wire.to.node) },
+        { label: "Copy connection", run: () => copy(label) },
+      ]] };
+    }
+    const stage = stages.find(({ node }) => node.instance.id === target.id);
+    if (!stage) return;
+    const queueLink = navigation.openQueueJob;
+    const isScoped = snapshot.unitNodeIds.includes(target.id);
+    const jobs = snapshot.jobs.filter(({ nodeId, unitId, job }) => nodeId === target.id && (isScoped
+      ? unit && unitId === unit.unit.id && (job.pipeline?.planRevision == null || job.pipeline.planRevision === unit.planRevision)
+      : unitId === null && (job.pipeline?.planRevision == null || job.pipeline.planRevision === run.planRevision)));
+    const attempts = jobs.flatMap(({ attempts }) => attempts);
+    return { label: stage.node.definition.title, groups: [[
+      { label: stage.pending ? "Review pending decision" : "Inspect stage", run: () => viewStage(target.id) },
+      ...(attempts.length ? [{ label: "Inspect attempt", items: attempts.map((attempt) => ({
+        label: `Attempt ${attempt.ordinal} · ${attempt.runId}`, run: () => navigation.openActivity(attempt.runId, attempt.conversationId ?? undefined),
+      })) }] : []),
+      ...(queueLink && jobs.length ? [{ label: "Inspect queue job", items: jobs.map(({ job }) => ({ label: job.id, run: () => queueLink(job.id) })) }] : []),
+    ], [
+      { label: "Copy stage ID", run: () => copy(target.id) },
+      { label: "Copy pinned stage revision", run: () => copy(stage.node.revision) },
+      ...(stage.detail.reason ? [{ label: "Copy stage status details", run: () => copy(stage.detail.reason!) }] : []),
+    ]] };
+  }
+  const context = menu && canvasActions(menu.target);
   return <section className="pipeline-view" aria-label="Pinned workflow execution">
     <PipelineToolbar>
       <div className="workflow-run-selectors">
@@ -154,6 +197,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     {comparisonHandoff && !review && !snapshot.jobs.some(({ nodeId, inputs }) =>
       nodeId === comparisonHandoff.nodeId && inputs?.plan === comparisonHandoff.planRevision) &&
       <p className="pipeline-banner" role="status">The selected plan review changed. Choose a current destination from Compare models.</p>}
+    {feedback && <p className="pipeline-banner" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     <header className="workflow-run-summary">
       <div><h2>{definition.name}</h2>
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
@@ -179,13 +223,26 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       </details>}
     </header>
     <PipelineCanvasFrame className="workflow-run-frame" canvasLabel="Workflow execution graph" inspectorLabel="Execution node evidence" inspectorRequest={inspectorRequest}
-      canvas={<PipelineGraphCanvas<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
+      canvas={<div className="workflow-graph-canvas" onKeyDown={(event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        if (!(event.target instanceof Element)) return;
+        const origin = event.target.closest(".react-flow__node, .react-flow__edge");
+        const id = origin?.getAttribute("data-id");
+        if (!id || !(origin instanceof HTMLElement || origin instanceof SVGElement)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = origin.getBoundingClientRect();
+        setMenu({ target: { kind: origin.classList.contains("react-flow__edge") ? "edge" : "node", id },
+          point: { x: rect.left + 8, y: rect.top + 8 }, origin });
+      }}><PipelineGraphCanvas<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
         nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
+        onNodeContextMenu={(event, node) => openMenu(event, { kind: "node", id: node.id })}
+        onEdgeContextMenu={(event, edge) => openMenu(event, { kind: "edge", id: edge.id })}
         onNodeClick={(_, node) => setSelected(node.id)} onNodesChange={(changes) => {
           const selectedNode = changes.find((change) => change.type === "select" && change.selected);
           if (selectedNode?.type === "select") setSelected(selectedNode.id);
         }} colorMode={theme}
-        fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} />}
+        fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} /></div>}
       inspector={<>
         <PipelineInspectorHeader detail="Execution details" title={active?.node.definition.title ?? "No stage selected"}>
           <label className="workflow-execution-field">Inspect execution node
@@ -234,6 +291,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
             control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
         </div>}
       </>} />
+    {menu && context && <PositionedContextActions {...context} point={menu.point} onClose={() => setMenu(undefined)}
+      restoreFocus={() => { if (menu.origin?.isConnected && menu.origin.tabIndex >= 0) menu.origin.focus(); }} />}
   </section>;
 }
 
@@ -245,16 +304,44 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
     enabled: Boolean(runId),
     refetchInterval: ({ state }) => needsExecutionRefresh(state.data) ? 900 : false,
   });
+  const [clipboard, setClipboard] = useState<{ message: string; failed: boolean }>();
   const loadError = execution.error ?? runs.error;
-  const runPicker = <label className="workflow-execution-field">Saved workflow run
-    <select value={runId ?? ""} onChange={(event) => openWorkspace("pipelines", event.currentTarget.value ? workflowRunTarget(event.currentTarget.value) : "runs")}>
+  function goToRun(id: string) {
+    openWorkspace("pipelines", id ? workflowRunTarget(id) : "runs");
+  }
+  function copy(text: string) {
+    setClipboard(undefined);
+    void Promise.resolve().then(() => navigator.clipboard.writeText(text)).then(
+      () => setClipboard({ message: "Copied to the clipboard.", failed: false }),
+      () => setClipboard({ message: "Could not copy to the clipboard.", failed: true }),
+    );
+  }
+  function actions(run: WorkflowRun): MenuGroups {
+    const origin = execution.data?.run.id === run.id ? execution.data.launch?.origin : undefined;
+    const workId = origin && origin.kind !== "editor" ? origin.workId : undefined;
+    const plan = run.planRevision;
+    return [[
+      { label: "Open execution graph", run: () => goToRun(run.id) },
+      { label: "Open delivery controls", run: () => openWorkspace("pipelines", run.id) },
+      ...(workId ? [{ label: "Open linked work", run: () => openWorkspace("tasks", workId) }] : []),
+    ], [
+      { label: "Copy workflow run ID", run: () => copy(run.id) },
+      { label: "Copy pinned workflow revision", run: () => copy(run.version.revision) },
+      ...(plan ? [{ label: "Copy plan revision", run: () => copy(plan) }] : []),
+    ]];
+  }
+  const activeRun = execution.data?.run ?? runs.data?.find(({ id }) => id === runId);
+  const runPicker = <ContextActions label={activeRun?.id ?? "Workflow run"} className="workflow-run-picker"
+    groups={activeRun ? actions(activeRun) : []}><label className="workflow-execution-field">Saved workflow run
+    <select value={runId ?? ""} onChange={(event) => goToRun(event.currentTarget.value)}>
       <option value="">Select a workflow run</option>
       {runId && !runs.data?.some(({ id }) => id === runId) && <option value={runId}>{runId}</option>}
       {runs.data?.map(({ id, version }) => <option key={id} value={id}>{id} · {version.revision.slice(0, 12)}</option>)}
     </select>
-  </label>;
+  </label></ContextActions>;
   return <section className="pipeline-view" aria-label="Workflow runs">
     {loadError && <p className="pipeline-banner" role="alert">{String(loadError)}</p>}
+    {clipboard && <p className="pipeline-banner" role={clipboard.failed ? "alert" : "status"}>{clipboard.message}</p>}
     {execution.data ? <WorkflowExecutionCanvas key={workflowRunTarget(execution.data.run.id, runFocus)}
       snapshot={execution.data} navigation={props} runPicker={runPicker} runFocus={runFocus} comparisonHandoff={props.comparisonHandoff} /> : <>
       <PipelineToolbar><div className="workflow-run-selectors">{runPicker}</div></PipelineToolbar>
@@ -265,7 +352,11 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
           {runId && execution.isPending && <p role="status">Loading workflow execution…</p>}
           {!runId && runs.isPending && <p role="status">Loading workflow runs…</p>}
           {execution.data === null && <p>The requested execution is unavailable in this project.</p>}
-          {!runId && runs.data && <p>Select a saved workflow run to inspect its graph and evidence.</p>}
+          {!runId && !!runs.data?.length && <section aria-label="Saved workflow runs" className="pipeline-stack">
+            <PipelineTemplateList kind="run" onOpen={goToRun} entries={runs.data.map((run) => ({
+              id: run.id, name: run.id, detail: `Workflow revision ${run.version.revision.slice(0, 12)}`, menu: actions(run),
+            }))} />
+          </section>}
         </div>
       )}
     </>}

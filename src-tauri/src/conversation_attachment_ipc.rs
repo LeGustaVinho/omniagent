@@ -142,6 +142,32 @@ pub async fn pick_conversation_attachments(
 }
 
 #[tauri::command]
+pub async fn add_checkout_files_to_conversation(
+    store: State<'_, Store>,
+    conversation_id: String,
+    checkout_id: String,
+    paths: Vec<String>,
+) -> Result<AttachmentDraft, String> {
+    store
+        .add_conversation_checkout_paths(conversation_id, checkout_id, paths)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn append_checkout_context_to_conversation(
+    store: State<'_, Store>,
+    conversation_id: String,
+    checkout_id: String,
+    context: String,
+) -> Result<(), String> {
+    store
+        .append_checkout_context_to_conversation(conversation_id, checkout_id, context)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
 pub async fn accept_conversation_attachment_drop(
     window: WebviewWindow,
     receipts: State<'_, AttachmentDropReceipts>,

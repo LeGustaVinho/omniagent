@@ -142,6 +142,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125-workflow-integrated-checks.sql"),
     include_str!("../migrations/126-workflow-unit-actions.sql"),
     include_str!("../migrations/127-workflow-github-source-sync.sql"),
+    include_str!("../migrations/128-checkout-document-history.sql"),
+    include_str!("../migrations/129-git-review-comments.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -152,6 +154,7 @@ pub struct Store {
     pub(crate) event_signal: watch::Sender<()>,
     pub(crate) job_signal: watch::Sender<()>,
     pub(crate) note_index_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    pub(crate) document_write_locks: Arc<Mutex<HashMap<(String, String), Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 pub enum DraftKey {
@@ -171,6 +174,31 @@ impl DraftKey {
                 relative_path,
             } => ("checkout_file", checkout_id, relative_path),
         }
+    }
+
+    pub(crate) fn read(&self, db: &Connection) -> Result<Option<Vec<u8>>> {
+        let (kind, owner, document) = self.parts();
+        let payload: Option<Vec<u8>> = db.query_row(
+            "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
+            params![kind, owner, document],
+            |row| row.get(0),
+        ).optional()?;
+        payload
+            .map(|bytes| protection::unprotect(&bytes))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn write(&self, db: &Connection, contents: &[u8]) -> Result<()> {
+        let (kind, owner, document) = self.parts();
+        let payload = protection::protect(contents)?;
+        db.execute(
+            "INSERT INTO drafts(kind, owner_id, document, payload) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, owner_id, document) DO UPDATE
+             SET payload = excluded.payload, updated_at = unixepoch()",
+            params![kind, owner, document, payload],
+        )?;
+        Ok(())
     }
 }
 
@@ -200,6 +228,7 @@ impl Store {
             event_signal: watch::channel(()).0,
             job_signal: watch::channel(()).0,
             note_index_locks: Arc::default(),
+            document_write_locks: Arc::default(),
         })
     }
 
@@ -220,34 +249,11 @@ impl Store {
     }
 
     pub async fn save_draft(&self, key: DraftKey, contents: Vec<u8>) -> Result<()> {
-        self.execute(move |db| {
-            let (kind, owner, document) = key.parts();
-            let payload = protection::protect(&contents)?;
-            db.execute(
-                "INSERT INTO drafts(kind, owner_id, document, payload) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(kind, owner_id, document) DO UPDATE
-                 SET payload = excluded.payload, updated_at = unixepoch()",
-                params![kind, owner, document, payload],
-            )?;
-            Ok(())
-        })
-        .await
+        self.execute(move |db| key.write(db, &contents)).await
     }
 
     pub async fn load_draft(&self, key: DraftKey) -> Result<Option<Vec<u8>>> {
-        self.execute(move |db| {
-            let (kind, owner, document) = key.parts();
-            let payload: Option<Vec<u8>> = db.query_row(
-                "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
-                params![kind, owner, document],
-                |row| row.get(0),
-            ).optional()?;
-            payload
-                .map(|bytes| protection::unprotect(&bytes))
-                .transpose()
-                .map_err(Into::into)
-        })
-        .await
+        self.execute(move |db| key.read(db)).await
     }
 
     pub async fn delete_draft(&self, key: DraftKey) -> Result<()> {
@@ -322,14 +328,32 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
     if version as usize > MIGRATIONS.len() {
         bail!("SQLite schema {version} is newer than this build");
     }
+    if matches!(version, 118 | 119)
+        && target >= 128
+        && has_table(&tx, "checkout_document_history")?
+        && !has_table(&tx, "workflow_automatic_runs")?
+    {
+        // The context-menu branch used 118 and 119 before the pipeline migrations.
+        for (index, script) in MIGRATIONS.iter().enumerate().take(version as usize).skip(117) {
+            tx.execute_batch(script)
+                .with_context(|| format!("reconcile branch schema migration {}", index + 1))?;
+        }
+    }
     for (index, script) in MIGRATIONS
         .iter()
         .take(target)
         .enumerate()
         .skip(version as usize)
     {
-        tx.execute_batch(script)
-            .with_context(|| format!("apply schema migration {}", index + 1))?;
+        let already_applied = match index + 1 {
+            128 => has_table(&tx, "checkout_document_history")?,
+            129 => has_table(&tx, "git_review_comments")?,
+            _ => false,
+        };
+        if !already_applied {
+            tx.execute_batch(script)
+                .with_context(|| format!("apply schema migration {}", index + 1))?;
+        }
         if index + 1 == 25 {
             crate::repository::writers::migrate_writer_evidence(&tx)?;
         }
@@ -348,9 +372,77 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
     Ok(())
 }
 
+fn has_table(db: &Connection, name: &str) -> Result<bool> {
+    Ok(db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1")?.exists([name])?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_history_migration_links_earlier_editor_captures_without_rewriting_bodies() -> Result<()> {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&mut db, 117)?;
+        db.execute_batch(
+            "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
+             INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');",
+        )?;
+        let protected = protection::protect(b"prior bytes")?;
+        for (id, at) in [("editor-later", 200), ("source-earlier", 100), ("workflow-input", 300)] {
+            db.execute(
+                "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
+                 VALUES ('checkout', ?1, 'note.md', ?2, ?3, ?4)",
+                params![id, "0".repeat(64), protected, at],
+            )?;
+        }
+        migrate(&mut db, 128)?;
+        let entries = db.prepare(
+            "SELECT history.revision_id, history.origin, history.recorded_at, revision.body
+             FROM checkout_document_history history JOIN repository_markdown_revisions revision
+             ON revision.checkout_id = history.checkout_id AND revision.id = history.revision_id
+             ORDER BY history.position",
+        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(entries, vec![
+            ("source-earlier".into(), "captured".into(), 100, protected.clone()),
+            ("editor-later".into(), "captured".into(), 200, protected),
+        ]);
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        Ok(())
+    }
+
+    #[test]
+    fn reconciles_context_menu_database_versions_with_the_pipeline_schema() -> Result<()> {
+        for version in [118, 119] {
+            let mut db = Connection::open_in_memory()?;
+            db.pragma_update(None, "foreign_keys", "ON")?;
+            migrate(&mut db, 117)?;
+            db.execute_batch(
+                "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
+                 INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');
+                 INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
+                 VALUES ('checkout', 'editor-saved', 'note.md', 'fixture', x'01', 10);",
+            )?;
+            db.execute_batch(MIGRATIONS[127])?;
+            if version == 119 {
+                db.execute_batch(MIGRATIONS[128])?;
+                db.execute_batch("INSERT INTO git_review_comments (id, checkout_id, surface, path, payload)
+                    VALUES ('comment', 'checkout', 'working', 'note.md', x'0102')")?;
+            }
+            db.pragma_update(None, "user_version", version)?;
+            migrate(&mut db, MIGRATIONS.len())?;
+            migrate(&mut db, MIGRATIONS.len())?;
+            assert!(has_table(&db, "workflow_automatic_agents")?);
+            assert!(has_table(&db, "workflow_backlog_tasks")?);
+            assert_eq!(db.query_row("SELECT count(*) FROM checkout_document_history WHERE revision_id = 'editor-saved'", [], |row| row.get::<_, i64>(0))?, 1);
+            let comment: Option<Vec<u8>> = db.query_row("SELECT payload FROM git_review_comments WHERE id = 'comment'", [], |row| row.get(0)).optional()?;
+            assert_eq!(comment, (version == 119).then_some(vec![1, 2]));
+            assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn iteration_migration_preserves_workflow_artifacts_and_completion_inputs() -> Result<()> {
