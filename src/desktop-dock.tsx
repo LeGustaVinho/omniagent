@@ -146,7 +146,7 @@ function Dock({
 }
 
 export function RealConversations({
-  checkout, sidebar, onSidebarChange, compact, target, onOpenOtherCheckout,
+  checkout, sidebar, onSidebarChange, compact, target, onOpenOtherCheckout, onOpenCheckoutInIde,
 }: {
   checkout: ProjectCheckout;
   sidebar: boolean;
@@ -154,6 +154,7 @@ export function RealConversations({
   compact: boolean;
   target?: string;
   onOpenOtherCheckout?: OpenLibraryConversation;
+  onOpenCheckoutInIde?: (checkout: ProjectCheckout) => Promise<void>;
 }) {
   const dock = useDesktopDock(checkout, "conversations");
   const activeScope = useRef<{ api?: DockviewApi; checkoutId: string }>(null);
@@ -217,6 +218,7 @@ export function RealConversations({
   const contents = dock.ready
     ? <ConversationLibrary checkout={checkout} onOpen={openLibraryConversation} activeId={dock.activeId}
       onOpenBeside={dock.hasPanels ? (source, id) => openLibraryConversation(source, id, true) : undefined}
+      onOpenCheckoutInIde={onOpenCheckoutInIde}
       onStart={() => start.mutate()} startPending={start.isPending} startError={start.error} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (

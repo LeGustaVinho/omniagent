@@ -95,6 +95,7 @@ function repository(archiveMessages: MessageRevision[] = []) {
       case "subscribe_events": return `subscription-${input.checkoutId}`;
       case "unsubscribe_events": return;
       case "registered_checkouts": return [selected, other];
+      case "open_checkout_item_in_shell": return;
       case "workbench_layout": return layouts.get(layoutKey) ?? null;
       case "save_workbench_layout":
         layouts.set(layoutKey, input.layout!);
@@ -685,6 +686,26 @@ it("opens an all-project result in its own worktree from the actual application 
   expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: other.checkoutId });
   expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: other.checkoutId, conversationId: externalId });
   expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: externalId });
+});
+
+it("opens the clicked conversation's worktree folder and navigates to its IDE", async () => {
+  repository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByRole("region", { name: "Conversation library" }, { timeout: 8_000 });
+  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
+  fireEvent.contextMenu(await library().findByRole("button", { name: "Audit details" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree folder in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: other.checkoutId, relativePath: "", action: "open" });
+  expect(invoke).not.toHaveBeenCalledWith("select_active_checkout", expect.anything());
+
+  fireEvent.keyDown(library().getByRole("button", { name: "Audit details" }), { key: "F10", shiftKey: true });
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree in IDE" }));
+  await screen.findByRole("region", { name: "IDE workspace" });
+  expect(screen.getByRole("button", { name: "Switch repository or worktree" }).textContent).toContain("Audit / audit-review");
+  expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: other.checkoutId });
+  expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: other.checkoutId, conversationId: externalId });
 });
 
 it("opens saved conversations from the compact library and returns space to the transcript", async () => {

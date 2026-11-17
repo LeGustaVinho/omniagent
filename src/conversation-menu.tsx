@@ -1,9 +1,9 @@
-import { Activity, Archive, ChevronRight, Clipboard, Columns2, Download, Ellipsis, Eye, GitFork, Link, ListChecks, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
+import { Activity, Archive, ChevronRight, Clipboard, Columns2, Download, Ellipsis, Eye, FolderOpen, GitBranch, GitFork, Link, ListChecks, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
 import { useRef, useState, type ReactNode } from "react";
 
 export type ConversationAction =
-  | "open" | "open-beside" | "activity" | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
+  | "open" | "open-beside" | "open-worktree" | "open-worktree-folder" | "activity" | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
   | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "export-markdown" | "archive" | "delete" | "select-to-move";
 
 export type ConversationMenuProps = {
@@ -28,6 +28,8 @@ function readActions(props: ConversationMenuProps) {
     { action: "open", label: "Open conversation", icon: <MessageSquare /> },
     { action: "open-beside", label: "Open conversation to the side", icon: <Columns2 /> },
     { action: "activity", label: "Inspect latest attempt", icon: <Activity /> },
+    { action: "open-worktree", label: "Open worktree in IDE", icon: <GitBranch /> },
+    { action: "open-worktree-folder", label: "Open worktree folder in File Explorer", icon: <FolderOpen /> },
   ];
   const organize: ItemDescription[] = [
     { action: "rename", label: "Rename", icon: <Pencil /> },
@@ -58,7 +60,8 @@ function readActions(props: ConversationMenuProps) {
 function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & { variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
   const { navigation, organize, section, fork, copy, exportTranscript, retain } = readActions(props);
-  const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? !["open-beside", "select-to-move"].includes(action));
+  const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ??
+    !["open-beside", "open-worktree", "open-worktree-folder", "select-to-move"].includes(action));
   const retentionItems = availableItems(retain);
   const navigationItems = availableItems(navigation);
 

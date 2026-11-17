@@ -333,7 +333,7 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
   onSidebarChange: (visible: boolean) => void;
   compact: boolean;
   openSystem?: () => void;
-  onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
+  onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId?: string, destination?: WorkspaceDestination) => Promise<void>;
 }) {
   return Object.entries(nav.visited).map(([id, state]) => {
     const workspace = id as WorkspaceId;
@@ -345,7 +345,11 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
         {workspace === "conversations" ? context.simulation
           ? <ConversationsPreview {...context} target={target} compact={compact} />
           : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
-            compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} />
+            compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} onOpenCheckoutInIde={async (source) => {
+              if (source.checkoutId === context.checkout.checkoutId) context.openWorkspace("ide");
+              else if (onOpenOtherCheckout) await onOpenOtherCheckout(source, undefined, { workspace: "ide" });
+              else throw new Error("This worktree cannot be opened from the current workspace.");
+            }} />
           : workspace === "diagnostics" ? context.simulation
             ? <SimulationDiagnostics {...context} openSystem={openSystem} />
             : <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />

@@ -239,7 +239,7 @@ function SectionNameDialog({ title, description, initialName = "", busy, error, 
   </Dialog.Root>;
 }
 
-export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen, onOpenBeside }: {
+export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen, onOpenBeside, onOpenCheckoutInIde }: {
   checkout: ProjectCheckout;
   activeId?: string;
   startPending: boolean;
@@ -247,6 +247,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   onStart: () => void;
   onOpen: OpenLibraryConversation;
   onOpenBeside?: OpenLibraryConversation;
+  onOpenCheckoutInIde?: (checkout: ProjectCheckout) => Promise<void>;
 }) {
   const client = useQueryClient();
   const inspector = useContext(RunInspectorNavigation);
@@ -270,6 +271,12 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const open = useMutation({
     mutationFn: ({ entry, beside }: { entry: ConversationLibraryEntry; beside?: boolean }) =>
       openEntry(beside && onOpenBeside ? onOpenBeside : onOpen, entry),
+  });
+  const openWorktree = useMutation({
+    mutationFn: async ({ source, folder }: { source: ProjectCheckout; folder: boolean }) => {
+      if (folder) await invoke<void>("open_checkout_item_in_shell", { checkoutId: source.checkoutId, relativePath: "", action: "open" });
+      else await onOpenCheckoutInIde?.(source);
+    },
   });
   const openFork = useMutation({ mutationFn: ({ source, id }: { source: ProjectCheckout; id: string }) => onOpen(source, id) });
   const inspect = useMutation({
@@ -320,7 +327,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const projects = new Map([checkout, ...(registered.data ?? [])].map((item) => [
     item.projectId, item.repositoryRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? item.repositoryRoot,
   ]));
-  const error = open.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
+  const error = open.error ?? openWorktree.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
     (!sectionConversation ? organize.error : undefined) ?? (!renamingSection ? organizeSection.error : undefined);
   const groups = libraryGroups(list.data ?? [], sections.data ?? [], projects, projectId === null, archived, !query.trim() && !archived);
 
@@ -375,6 +382,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     const { conversation, organization } = entry;
     if (action === "open") open.mutate({ entry });
     if (action === "open-beside" && onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId) open.mutate({ entry, beside: true });
+    if (action === "open-worktree" && onOpenCheckoutInIde) openWorktree.mutate({ source: entry.checkout, folder: false });
+    if (action === "open-worktree-folder") openWorktree.mutate({ source: entry.checkout, folder: true });
     if (action === "activity") inspect.mutate(entry);
     if (action === "fork") setForking(entry);
     if (action === "export-markdown") exportTranscript.mutate(conversation);
@@ -436,6 +445,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                 available={(action) => ["rename", "copy-title", "copy-id", "copy-worktree"].includes(action) ||
                   (action === "open" && !open.isPending) ||
                   (action === "open-beside" && !open.isPending && Boolean(onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId)) ||
+                  (action === "open-worktree" && !openWorktree.isPending && Boolean(onOpenCheckoutInIde)) ||
+                  (action === "open-worktree-folder" && !openWorktree.isPending) ||
                   (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
                   (action === "fork" && !openFork.isPending) ||
                   (action === "export-markdown" && !exportTranscript.isPending) ||
