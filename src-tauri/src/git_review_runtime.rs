@@ -2,9 +2,9 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
-        GitPermalinkLines, GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface,
-        GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
+        GitConflictProposal, GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion,
+        GitFileVersionComparison, GitPermalinkLines, GitReviewComment, GitReviewCommentRequest,
+        GitReviewCommentSurface, GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
     repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
     store::Store,
@@ -142,6 +142,20 @@ pub async fn git_mark_conflict_resolved(
 ) -> Result<(), String> {
     store
         .git_mark_conflict_resolved(checkout_id, path, expected)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_apply_conflict_resolution(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    expected: String,
+    proposal: GitConflictProposal,
+) -> Result<(), String> {
+    store
+        .git_apply_conflict_resolution(checkout_id, path, expected, proposal)
         .await
         .map_err(review_error)
 }

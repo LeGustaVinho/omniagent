@@ -509,6 +509,7 @@ fn main() {
             git_review_runtime::git_discard_changes,
             git_review_runtime::git_conflict_review,
             git_review_runtime::git_mark_conflict_resolved,
+            git_review_runtime::git_apply_conflict_resolution,
             git_review_runtime::git_branch_comparison,
             git_review_runtime::git_branch_comparison_diff,
             git_review_runtime::git_review_comments,

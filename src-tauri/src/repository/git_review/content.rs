@@ -15,7 +15,7 @@ use super::{
     hunks, validate_oid,
 };
 
-const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
+pub(super) const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -43,7 +43,8 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
     fs::write(root.join("unrelated.txt"), "unrelated base\n")?;
     commit_fixture(&root, "Base")?;
     git(&root, &["checkout", "--quiet", "-b", "incoming"])?;
-    fs::write(root.join(path), "incoming\n")?;
+    let incoming = "incoming α\r\n";
+    fs::write(root.join(path), incoming)?;
     fs::remove_file(root.join(deleted))?;
     commit_fixture(&root, "Incoming")?;
     git(&root, &["checkout", "--quiet", "main"])?;
@@ -74,7 +75,7 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
     let details = serde_json::to_value(&original)?;
     assert_eq!(details["base"]["file"]["content"], "base\n");
     assert_eq!(details["local"]["file"]["content"], "local\n");
-    assert_eq!(details["incoming"]["file"]["content"], "incoming\n");
+    assert_eq!(details["incoming"]["file"]["content"], incoming);
     assert!(
         details["working"]["content"]
             .as_str()
@@ -82,6 +83,7 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
             .contains("<<<<<<<")
     );
     assert!(original.resolution_blocked.is_some());
+    assert!(original.proposal_blocked.is_none());
     let deleted_before = git(&root, &["ls-files", "--unmerged", "--", deleted])?;
     let missing = serde_json::to_value(
         store
@@ -90,6 +92,12 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
     )?;
     assert_eq!(missing["incoming"], serde_json::Value::Null);
     assert_eq!(missing["local"]["file"]["content"], "updated locally\n");
+    let object_id = |view: &serde_json::Value, side: &str| -> Result<String> {
+        Ok(view[side]["objectId"]
+            .as_str()
+            .context("reviewed conflict object ID")?
+            .to_owned())
+    };
     assert!(
         store
             .git_conflict_review(checkout.clone(), "unrelated.txt".into())
@@ -127,7 +135,139 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
     );
 
     let merged = "checked and combined\n";
-    fs::write(root.join(path), merged)?;
+    let unmerged_before = git(
+        &root,
+        &["--literal-pathspecs", "ls-files", "--unmerged", "--", path],
+    )?;
+    let local = GitConflictProposal::Local {
+        object_id: object_id(&details, "local")?,
+    };
+    let incoming_choice = || -> Result<GitConflictProposal> {
+        Ok(GitConflictProposal::Incoming {
+            object_id: object_id(&details, "incoming")?,
+        })
+    };
+    store
+        .git_apply_conflict_resolution(
+            checkout.clone(),
+            path.into(),
+            original_snapshot.clone(),
+            local,
+        )
+        .await?;
+    assert_eq!(fs::read_to_string(root.join(path))?, "local\n");
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                path.into(),
+                original_snapshot.clone(),
+                incoming_choice()?
+            )
+            .await
+            .is_err()
+    );
+    let local_view = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?
+        .snapshot
+        .context("applied local snapshot")?;
+    store
+        .git_apply_conflict_resolution(
+            checkout.clone(),
+            path.into(),
+            local_view,
+            incoming_choice()?,
+        )
+        .await?;
+    assert_eq!(fs::read(root.join(path))?, incoming.as_bytes());
+    let incoming_view = store
+        .git_conflict_review(checkout.clone(), path.into())
+        .await?
+        .snapshot
+        .context("applied incoming snapshot")?;
+    store
+        .git_apply_conflict_resolution(
+            checkout.clone(),
+            path.into(),
+            incoming_view,
+            GitConflictProposal::Combined {
+                content: merged.into(),
+            },
+        )
+        .await?;
+    assert_eq!(fs::read_to_string(root.join(path))?, merged);
+    assert_eq!(
+        git(
+            &root,
+            &["--literal-pathspecs", "ls-files", "--unmerged", "--", path]
+        )?,
+        unmerged_before
+    );
+    assert_eq!(
+        store
+            .git_checkout_review(checkout.clone())
+            .await?
+            .revision
+            .index,
+        original.revision.index
+    );
+
+    let deleted_snapshot = missing["snapshot"]
+        .as_str()
+        .context("modify/delete snapshot")?
+        .to_owned();
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                deleted.into(),
+                deleted_snapshot,
+                GitConflictProposal::Incoming {
+                    object_id: object_id(&details, "incoming")?
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(root.join(deleted))?, "updated locally\n");
+    fs::remove_file(root.join(deleted))?;
+    let absent = store
+        .git_conflict_review(checkout.clone(), deleted.into())
+        .await?;
+    assert_eq!(absent.working, GitFileSide::Missing);
+    let absent_snapshot = absent.snapshot.context("missing working result snapshot")?;
+    let restore = || -> Result<GitConflictProposal> {
+        Ok(GitConflictProposal::Local {
+            object_id: object_id(&missing, "local")?,
+        })
+    };
+    fs::write(root.join(deleted), "new file from outside the review\n")?;
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                deleted.into(),
+                absent_snapshot.clone(),
+                restore()?
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(deleted))?,
+        "new file from outside the review\n"
+    );
+    fs::remove_file(root.join(deleted))?;
+    store
+        .git_apply_conflict_resolution(
+            checkout.clone(),
+            deleted.into(),
+            absent_snapshot,
+            restore()?,
+        )
+        .await?;
+    assert_eq!(fs::read_to_string(root.join(deleted))?, "updated locally\n");
     assert!(
         store
             .git_mark_conflict_resolved(checkout.clone(), path.into(), original_snapshot)
@@ -143,9 +283,21 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
         checkout_id: checkout.clone(),
         relative_path: path.to_uppercase(),
     };
-    store
-        .save_draft(draft(), b"unsaved edit".to_vec())
-        .await?;
+    store.save_draft(draft(), b"unsaved edit".to_vec()).await?;
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                path.into(),
+                snapshot.clone(),
+                GitConflictProposal::Combined {
+                    content: "different working result".into()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(root.join(path))?, merged);
     assert!(
         store
             .git_conflict_review(checkout.clone(), path.into())
