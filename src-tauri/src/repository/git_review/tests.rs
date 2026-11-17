@@ -28,6 +28,147 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("file-history");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old_path = "previous name.md";
+    let path = "read me [a].md";
+    fs::write(root.join(old_path), "original\n")?;
+    let original = commit_fixture(&root, "Create the note")?;
+    git(&root, &["mv", old_path, path])?;
+    let renamed = commit_fixture(&root, "Rename the note")?;
+    fs::write(root.join(path), "staged\n")?;
+    git(&root, &["--literal-pathspecs", "add", "--", path])?;
+    fs::write(root.join(path), "unsaved to Git\n")?;
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let page = store
+        .git_checkout_file_history(checkout.clone(), path.into(), None, None, 0)
+        .await?;
+    assert_eq!(page.head.as_deref(), Some(renamed.as_str()));
+    assert_eq!(page.entries.len(), 2);
+    assert_eq!(page.entries[0].status, 'R');
+    assert_eq!(page.entries[0].previous_path.as_deref(), Some(old_path));
+    assert_eq!(page.entries[1].sha, original);
+    assert_eq!(page.entries[1].path, old_path);
+    assert_eq!(page.entries[1].parent, None);
+
+    let next = store
+        .git_checkout_file_history(checkout.clone(), path.into(), None, page.head, 1)
+        .await?;
+    assert_eq!(next.entries.len(), 1);
+    assert_eq!(next.entries[0].path, old_path);
+    let staged = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(GitFileVersion::Commit {
+                sha: original.clone(),
+                path: old_path.into(),
+            }),
+            GitFileVersion::Index,
+        )
+        .await?;
+    assert_eq!(
+        staged.original,
+        GitFileSide::Text {
+            content: "original\n".into()
+        }
+    );
+    assert_eq!(
+        staged.modified,
+        GitFileSide::Text {
+            content: "staged\n".into()
+        }
+    );
+    let disk = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(GitFileVersion::Head),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert_eq!(disk.original, staged.original);
+    assert_eq!(
+        disk.modified,
+        GitFileSide::Text {
+            content: "unsaved to Git\n".into()
+        }
+    );
+    git(
+        &root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:some-owner/example.git",
+        ],
+    )?;
+    let line = |text: &str| GitPermalinkLines {
+        start_line: 1,
+        end_line: 1,
+        text: text.to_owned(),
+    };
+    assert_eq!(
+        store
+            .git_file_permalink(checkout.clone(), path.into(), None, Some(line("original")))
+            .await?,
+        format!(
+            "https://github.com/some-owner/example/blob/{renamed}/read%20me%20%5Ba%5D.md?plain=1#L1"
+        )
+    );
+    assert!(
+        store
+            .git_file_permalink(
+                checkout.clone(),
+                path.into(),
+                None,
+                Some(line("unsaved to Git"))
+            )
+            .await
+            .is_err()
+    );
+    git(
+        &root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://test-token@gitlab.com/subgroup/example.git",
+        ],
+    )?;
+    assert_eq!(
+        store
+            .git_file_permalink(checkout.clone(), old_path.into(), Some(original), None)
+            .await?,
+        format!(
+            "https://gitlab.com/subgroup/example/-/blob/{}/previous%20name.md",
+            next.entries[0].sha
+        )
+    );
+    assert!(
+        store
+            .git_compare_file_versions(
+                checkout,
+                path.into(),
+                None,
+                GitFileVersion::Commit {
+                    sha: "main".into(),
+                    path: old_path.into(),
+                }
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("hunks");

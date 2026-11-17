@@ -10,7 +10,7 @@ import {
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { folderSearchTarget, readNoteSearchTarget } from "@/ide-file-search";
-import { containingFolder, fileContextActions, readNoteRenameTarget, readOpenNotesTarget, terminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { containingFolder, fileContextActions, fileHistoryTarget, readNoteRenameTarget, readOpenNotesTarget, terminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
@@ -352,7 +352,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   };
 
   const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
-  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path], copy: menu.copy, report: setProblem });
+  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path],
+    copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)) });
   async function openSelected(paths: readonly string[]) {
     const request = ++lastOpen.current;
     const loaded = simulated ? paths : await Promise.all(paths.map(loadNote));

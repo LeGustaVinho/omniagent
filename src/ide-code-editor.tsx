@@ -1,6 +1,7 @@
 import type { editor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
+import type { GitPermalinkLines } from "@/git-file-versions";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 
 export interface CodeProblem {
@@ -16,7 +17,7 @@ export interface CodeModel {
   synchronizing: boolean;
 }
 
-export function CodeEditor({ scope, path, content, models, update, problems, jump, onCopy, onExcerpt }: {
+export function CodeEditor({ scope, path, content, models, update, problems, jump, onCopy, onExcerpt, onPermalink }: {
   scope: string;
   path: string;
   content: string;
@@ -26,13 +27,16 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   jump?: { line: number; column?: number; token: number };
   onCopy?: (text: string, status: string) => void;
   onExcerpt?: (selection: EditorExcerpt, instruction?: string) => void;
+  onPermalink?: (path: string, lines: GitPermalinkLines) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
-  const fresh = useRef({ content, update, problems, jump, onCopy, onExcerpt });
+  const fresh = useRef({ content, update, problems, jump, onCopy, onExcerpt, onPermalink });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
-  useEffect(() => { fresh.current = { content, update, problems, jump, onCopy, onExcerpt }; }, [content, update, problems, jump, onCopy, onExcerpt]);
+  useEffect(() => {
+    fresh.current = { content, update, problems, jump, onCopy, onExcerpt, onPermalink };
+  }, [content, update, problems, jump, onCopy, onExcerpt, onPermalink]);
 
   useEffect(() => {
     if (!mount.current) return;
@@ -94,6 +98,19 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
           run: () => { const range = excerpt(false); if (range) fresh.current.onCopy?.(markdownExcerpt(range), "Copied Markdown code block"); },
         });
       }
+      if (fresh.current.onPermalink) codeEditor.addAction({
+        id: "omniagent.copy-committed-line-link", label: "Copy committed line permalink",
+        contextMenuGroupId: "9_omniagent-copy", contextMenuOrder: 3,
+        run: () => {
+          const range = excerpt(true);
+          const model = codeEditor.getModel();
+          if (!range || !model) return;
+          const { startLine, endLine } = range;
+          const text = model.getValueInRange({ startLineNumber: startLine, startColumn: 1,
+            endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) });
+          fresh.current.onPermalink?.(path, { startLine, endLine, text });
+        },
+      });
       if (fresh.current.onExcerpt) {
         const agentActions = [
           { id: "quote", label: "Add selection to conversation…" },

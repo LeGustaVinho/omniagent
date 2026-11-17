@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
+import { fileHistoryTarget } from "@/file-context-actions";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -79,6 +80,40 @@ it("compares two tracked refs in the shared text diff without reading the worktr
     checkoutId: checkout.checkoutId, range, expected: revisions, path: "notes.md",
   });
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("opens file history at the selected worktree and compares a renamed file to its former path", async () => {
+  const path = "notes/current.md";
+  const previousPath = "notes/old.md";
+  const renamed = { sha: "a".repeat(40), parent: "b".repeat(40), path, previousPath, status: "R", subject: "Rename note",
+    author: "Author", committedAt: "2026-11-17T11:15:52-03:00" };
+  const original = { ...renamed, sha: renamed.parent, parent: null, path: previousPath, previousPath: null, status: "A", subject: "Create note" };
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { offset?: number; base?: { path?: string }; revised?: { kind?: string } };
+    if (command === "git_checkout_review") return { checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: { ...originalRevision, head: renamed.sha }, changes: [] };
+    if (command === "git_checkout_file_history") return { head: renamed.sha, entries: args.offset ? [original] : [renamed], hasMore: !args.offset };
+    if (command === "git_compare_file_versions") return {
+      original: args.base?.path === previousPath ? { status: "text", content: "old path content" } : { status: "missing" },
+      modified: { status: "text", content: args.revised?.kind === "index" ? "staged content" : "saved commit content" },
+    };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: fileHistoryTarget(path), openWorkspace });
+  const history = within(await screen.findByRole("region", { name: "File history" }));
+  expect((await history.findByRole("region", { name: "Base file" })).textContent).toContain("old path content");
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", { checkoutId: checkout.checkoutId, path,
+    base: { path: previousPath, sha: renamed.parent, kind: "commit" }, revised: { path, sha: renamed.sha, kind: "commit" } });
+  fireEvent.contextMenu(history.getByRole("button", { name: /^Rename note/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with staged index" }));
+  expect(await history.findByText("staged content")).toBeTruthy();
+  await user.click(history.getByRole("button", { name: "Load older revisions" }));
+  expect(await history.findByRole("button", { name: /^Create note/ })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_checkout_file_history", { checkoutId: checkout.checkoutId, path, branch: null, offset: 1, pinnedHead: renamed.sha });
+  await user.click(history.getByRole("button", { name: "Open working file" }));
+  expect(openWorkspace).toHaveBeenCalledWith("knowledge", path);
 });
 
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {

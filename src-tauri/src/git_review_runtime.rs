@@ -2,7 +2,8 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitDiffSource, GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
+        GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison, GitPermalinkLines,
+        GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
     repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
     store::Store,
@@ -32,6 +33,49 @@ pub async fn git_checkout_history(
 ) -> Result<Vec<GitReviewCommit>, String> {
     store
         .git_checkout_history(checkout_id, branch)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_checkout_file_history(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    branch: Option<String>,
+    pinned_head: Option<String>,
+    offset: u32,
+) -> Result<GitFileHistory, String> {
+    store
+        .git_checkout_file_history(checkout_id, path, branch, pinned_head, offset)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_file_versions(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    base: Option<GitFileVersion>,
+    revised: GitFileVersion,
+) -> Result<GitFileVersionComparison, String> {
+    store
+        .git_compare_file_versions(checkout_id, path, base, revised)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_file_permalink(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    sha: Option<String>,
+    lines: Option<GitPermalinkLines>,
+) -> Result<String, String> {
+    store
+        .git_file_permalink(checkout_id, path, sha, lines)
         .await
         .map_err(review_error)
 }

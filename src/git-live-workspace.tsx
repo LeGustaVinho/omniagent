@@ -6,18 +6,19 @@ import { Button } from "@/components/ui/button";
 import { ContextActions } from "@/components/ui/context-actions";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { GitCheckoutChanges, useGitCheckoutReview, type CheckoutReview, type Worktree } from "@/git-checkout-changes";
+import { GitFileHistoryView } from "@/git-file-history";
 import { SavedGitDiffs } from "@/git-saved-diffs";
 import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
 import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
-import { fileContextActions, readWorkingDiffTarget } from "@/file-context-actions";
+import { fileContextActions, readFileHistoryTarget, readWorkingDiffTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
 
 const tabs = ["Changes", "Worktrees", "History", "Saved attempts"] as const;
 type Tab = typeof tabs[number];
-const tabFor = (target?: string): Tab => target === "worktrees" ? "Worktrees" : target === "history" ? "History"
+const tabFor = (target?: string): Tab => target === "worktrees" ? "Worktrees" : target === "history" || readFileHistoryTarget(target) ? "History"
   : target === "saved" || target?.startsWith("attempt:") ? "Saved attempts" : "Changes";
 
 export function LiveGitWorkspace(props: WorkspaceProps) {
@@ -27,13 +28,16 @@ export function LiveGitWorkspace(props: WorkspaceProps) {
 function GitCheckoutWorkspace(props: WorkspaceProps) {
   const [checkoutId, setCheckout] = useState(props.checkout.checkoutId);
   const [requestedFile, setRequestedFile] = useState(() => readWorkingDiffTarget(props.target));
+  const [historyPath, setHistoryPath] = useState(() => readFileHistoryTarget(props.target));
   const [tab, setTab] = useState<Tab>(() => tabFor(props.target));
   const [creating, setCreating] = useState(false);
   useEffect(() => {
     setTab(tabFor(props.target));
     const file = readWorkingDiffTarget(props.target);
+    const history = readFileHistoryTarget(props.target);
     setRequestedFile(file);
-    if (file !== undefined) setCheckout(props.checkout.checkoutId);
+    setHistoryPath(history);
+    if (file !== undefined || history !== undefined) setCheckout(props.checkout.checkoutId);
   }, [props.checkout.checkoutId, props.target]);
   const review = useGitCheckoutReview(checkoutId, tab !== "Saved attempts");
   const trees = review.data?.worktrees.filter((tree): tree is Worktree & { checkoutId: string } => tree.checkoutId !== null) ?? [];
@@ -65,11 +69,13 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
         {tab === "Worktrees" && <WorktreeTable review={review.data} project={props.checkout} select={(id, view) => {
           setRequestedFile(undefined);
           setCheckout(id);
-          if (view) setTab(view);
+          if (view) { setHistoryPath(undefined); setTab(view); }
         }} />}
         {tab === "Worktrees" && creating && <CreateGitWorktree projectId={props.checkout.projectId} review={review.data}
           select={(id) => { setCreating(false); setCheckout(id); }} close={() => setCreating(false)} />}
-        {tab === "History" && <CommitHistory key={checkoutId} review={review.data} />}
+        {tab === "History" && (historyPath ? <GitFileHistoryView key={JSON.stringify([checkoutId, historyPath])} review={review.data} path={historyPath}
+          openFile={activeCheckout ? () => props.openWorkspace(/\.(md|markdown)$/i.test(historyPath) ? "knowledge" : "ide", historyPath) : undefined}
+          clear={() => setHistoryPath(undefined)} /> : <CommitHistory key={checkoutId} review={review.data} />)}
       </>}
     </>}
   </GitWorkspaceFrame>;

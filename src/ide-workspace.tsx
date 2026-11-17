@@ -8,7 +8,7 @@ import {
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget } from "@/ide-file-search";
-import { containingFolder, fileContextActions, noteRenameTarget, openNotesTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
 import { ContextActions } from "@/components/ui/context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -255,7 +255,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => {
     const note = simulated && exampleNotes.find((entry) => entry.path === path);
     return files[path] ?? (note ? { content: note.content, saved: note.content } : undefined);
-  }, copy: menu.copy, report: setProblem });
+  }, copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)) });
   async function openSelected(paths: readonly string[]) {
     const request = ++openRequest.current;
     const code = paths.filter((path) => !markdownPath(path));
@@ -387,7 +387,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
                   <Suspense fallback={<p role="status" className="file-help">Loading source editor…</p>}>
                     <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]}
-                      onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt} />
+                      onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
+                      onPermalink={simulated ? undefined : menu.copyPermalink} />
                   </Suspense>
                 </div>
               );

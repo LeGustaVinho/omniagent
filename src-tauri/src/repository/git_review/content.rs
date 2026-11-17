@@ -87,7 +87,7 @@ pub(super) fn read_diff(
     })
 }
 
-fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     let bytes = review.view.read(&[
         "--literal-pathspecs",
         "ls-files",
@@ -118,7 +118,7 @@ fn read_index(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     ))
 }
 
-fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> {
     let Some(head) = review.revision.head.as_deref() else {
         return Ok(GitFileSide::Missing);
     };
@@ -160,17 +160,35 @@ fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
     Ok(classify(view.read(&["cat-file", "blob", oid])?))
 }
 
-fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
+pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
     let path: PathBuf = root.join(path).components().collect();
-    let file = match plain_metadata(&path) {
+    let directories = match plain_metadata(&path) {
         Ok(None) => return Ok(GitFileSide::Missing),
-        Ok(Some(metadata)) if metadata.is_file() => open_locked_local_file(&path),
+        Ok(Some(metadata)) if metadata.is_file() => {
+            lock_directories(path.parent().context("the checkout file has no parent")?)
+        }
         _ => {
             return Ok(GitFileSide::unavailable(
                 "This checkout entry is not an ordinary local file.",
             ));
         }
     };
+    let _directories = match directories {
+        Ok(directories) => directories,
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(GitFileSide::Missing);
+        }
+        Err(error) => {
+            return Ok(GitFileSide::unavailable(format!(
+                "The worktree file could not be opened safely: {error}"
+            )));
+        }
+    };
+    let file = open_locked_local_file(&path);
     match file {
         Ok(file) => {
             let mut bytes = Vec::new();

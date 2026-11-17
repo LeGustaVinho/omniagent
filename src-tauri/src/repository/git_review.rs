@@ -26,10 +26,14 @@ use super::{
 mod commit;
 mod comparison;
 mod content;
+mod history;
 mod hunks;
+mod permalink;
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
+pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
 pub use hunks::GitReviewHunk;
+pub use permalink::GitPermalinkLines;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

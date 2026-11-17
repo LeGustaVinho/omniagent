@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useRef, useState } from "react";
 import type { MenuAction } from "@/components/ui/context-actions";
 import type { GitTextComparison } from "@/git-diff-view";
+import { compareGitFileVersions, gitFileText, type GitFileVersion } from "@/git-file-versions";
 import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
@@ -9,12 +10,13 @@ type TextState = { content: string; saved: string; external?: string };
 type Comparison = { labels: [string, string]; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 
-export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report }: {
+export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report, openHistory }: {
   checkoutId: string;
   simulated: boolean;
   bufferAt: (path: string) => TextState | undefined;
   copy: (text: string, message: string) => void;
   report: (message: string) => void;
+  openHistory?: (path: string) => void;
 }) {
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState<Comparison>();
@@ -46,6 +48,17 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
     void compare([left, right], [read(left), read(right)], right);
   }
 
+  function compareDisk(path: string, base: GitFileVersion, revised: GitFileVersion, labels: [string, string]) {
+    const comparison = compareGitFileVersions(checkoutId, path, base, revised);
+    void compare(labels, [comparison.then(({ original }) => gitFileText(original)), comparison.then(({ modified }) => gitFileText(modified))], path);
+  }
+
+  function compareDraft(path: string, base: "head" | "index", content: string) {
+    const version = compareGitFileVersions(checkoutId, path, null, { kind: base });
+    void compare([base === "head" ? "HEAD" : "Git index", `${path} · Editor`],
+      [version.then(({ modified }) => gitFileText(modified)), Promise.resolve(content)], path);
+  }
+
   function actions(path: string): MenuAction[] {
     const local = bufferAt(path);
     const name = fileName(path);
@@ -56,6 +69,19 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
       ...(local && local.content !== local.saved ? [{ label: "Compare with saved version", run: () => {
         void compare([`${path} · Saved`, `${path} · Editor`], [Promise.resolve(local.saved), Promise.resolve(local.content)], path);
       } }] : []),
+      ...(local?.external !== undefined ? [{ label: "Compare editor with file on disk", run: () => {
+        void compare([`${path} · Disk`, `${path} · Editor`], [Promise.resolve(local.external!), Promise.resolve(local.content)], path);
+      } }] : []),
+      ...(!simulated ? [{ label: "Compare Git versions", items: [
+        { label: "HEAD with staged index", run: () => compareDisk(path, { kind: "head" }, { kind: "index" }, ["HEAD", "Git index"]) },
+        { label: "HEAD with file on disk", run: () => compareDisk(path, { kind: "head" }, { kind: "worktree" }, ["HEAD", `${path} · Disk`]) },
+        { label: "Staged index with file on disk", run: () => compareDisk(path, { kind: "index" }, { kind: "worktree" }, ["Git index", `${path} · Disk`]) },
+        ...(local ? [
+          { label: "HEAD with editor", run: () => compareDraft(path, "head", local.content) },
+          { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content) },
+        ] : []),
+      ] }] : []),
+      ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
     ];
   }
 

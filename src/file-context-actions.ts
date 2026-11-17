@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { MenuGroups } from "@/components/ui/context-actions";
+import { gitFilePermalink, type GitPermalinkLines } from "@/git-file-versions";
 import { fileName } from "@/ide-knowledge-data";
 import type { FileTreeTarget } from "@/ide-file-workspace";
 
@@ -9,6 +10,7 @@ const noteRenamePrefix = "omni-rename-note:";
 const openNotesPrefix = "omni-open-notes:";
 let noteNavigationRequest = 0;
 const workingDiffPrefix = "omni-working-diff:";
+const fileHistoryPrefix = "omni-file-history:";
 
 export function workingDiffTarget(path: string) {
   return workingDiffPrefix + path;
@@ -16,6 +18,14 @@ export function workingDiffTarget(path: string) {
 
 export function readWorkingDiffTarget(target?: string) {
   if (target?.startsWith(workingDiffPrefix)) return target.slice(workingDiffPrefix.length);
+}
+
+export function fileHistoryTarget(path: string) {
+  return fileHistoryPrefix + path;
+}
+
+export function readFileHistoryTarget(target?: string) {
+  if (target?.startsWith(fileHistoryPrefix)) return target.slice(fileHistoryPrefix.length) || undefined;
 }
 
 export function noteRenameTarget(path: string) {
@@ -69,6 +79,12 @@ export function fileContextActions({ checkout, simulated, status, report }: {
     report("");
     void invoke("open_checkout_item_in_shell", { checkoutId: checkout.checkoutId, relativePath, action }).catch((error: unknown) => report(String(error)));
   };
+  const copyPermalink = (path: string, lines?: GitPermalinkLines) => {
+    report("");
+    void gitFilePermalink(checkout.checkoutId, path, undefined, lines).then(
+      (url) => copy(url, "Copied committed permalink"), (error: unknown) => report(String(error)),
+    );
+  };
   function location(target: FileTreeTarget): MenuGroups {
     const { path } = target;
     const absolute = (path ? `${checkout.checkoutRoot.replace(/[\\/]+$/, "")}/${path}` : checkout.checkoutRoot).replaceAll("/", "\\");
@@ -83,7 +99,8 @@ export function fileContextActions({ checkout, simulated, status, report }: {
         { label: "Name", run: () => copy(fileName(path), "Copied name") },
       ] : []),
       ...(!simulated ? [{ label: "Absolute path", run: () => copy(absolute, "Copied absolute path") }] : []),
+      ...(!simulated && target.kind === "file" ? [{ label: "Committed file permalink", run: () => copyPermalink(path) }] : []),
     ], disabled: !path && simulated }]];
   }
-  return { copy, location, reveal: (path: string) => shell(path, "reveal") };
+  return { copy, copyPermalink, location, reveal: (path: string) => shell(path, "reveal") };
 }
