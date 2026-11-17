@@ -421,9 +421,13 @@ mod tests {
             migrate(&mut db, 117)?;
             db.execute_batch(
                 "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
-                 INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');
-                 INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
-                 VALUES ('checkout', 'editor-saved', 'note.md', 'fixture', x'01', 10);",
+                 INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');",
+            )?;
+            let protected = protection::protect(b"saved editor revision")?;
+            db.execute(
+                "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
+                 VALUES ('checkout', 'editor-saved', 'note.md', ?1, ?2, 10)",
+                params!["0".repeat(64), protected],
             )?;
             db.execute_batch(MIGRATIONS[127])?;
             if version == 119 {
@@ -437,6 +441,12 @@ mod tests {
             assert!(has_table(&db, "workflow_automatic_agents")?);
             assert!(has_table(&db, "workflow_backlog_tasks")?);
             assert_eq!(db.query_row("SELECT count(*) FROM checkout_document_history WHERE revision_id = 'editor-saved'", [], |row| row.get::<_, i64>(0))?, 1);
+            let body: Vec<u8> = db.query_row(
+                "SELECT body FROM repository_markdown_revisions WHERE checkout_id = 'checkout' AND id = 'editor-saved'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(body, protected);
             let comment: Option<Vec<u8>> = db.query_row("SELECT payload FROM git_review_comments WHERE id = 'comment'", [], |row| row.get(0)).optional()?;
             assert_eq!(comment, (version == 119).then_some(vec![1, 2]));
             assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
