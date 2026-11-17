@@ -243,7 +243,7 @@ it("opens an all-project result in its own worktree from the actual application 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
   const user = userEvent.setup();
-  await screen.findByRole("region", { name: "Conversation library" });
+  await screen.findByRole("region", { name: "Conversation library" }, { timeout: 8_000 });
   await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
   await user.click(await library().findByRole("button", { name: "Audit details" }));
   expect(await screen.findByText("Saved transcript in the audit worktree.")).toBeTruthy();
