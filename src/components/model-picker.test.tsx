@@ -24,7 +24,10 @@ const unavailable: ModelOption = {
 };
 const options = [luna, unknown, unavailable];
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.removeItem("omniagent:composer-model-order");
+});
 
 it("shows the same model ratings in the compact menu and selects by keyboard", async () => {
   function Form() {
@@ -72,4 +75,31 @@ it("toggles models without closing the multi-select menu or accepting unavailabl
   await user.keyboard("{Escape}");
   expect(screen.queryByRole("menu")).toBeNull();
   expect(screen.getByRole("button", { name: "Models · 1 selected" })).toBeDefined();
+});
+
+it("sorts one catalog across services and preserves the exact model selection and order preference", async () => {
+  const claude: ModelOption = { ...luna, name: "Claude Sonnet", selection: { provider: "claude", profileId: "work", modelId: "sonnet" },
+    rating: { intelligenceTenths: 730, apiReferenceCents: 230, priceScore: 40 } };
+  const gemini: ModelOption = { ...luna, name: "Gemini Pro", selection: { provider: "antigravity", profileId: "personal", modelId: "pro" },
+    rating: { intelligenceTenths: 810, apiReferenceCents: 180, priceScore: 70 } };
+  const catalog = [unknown, luna, claude, gemini];
+  function Form() {
+    const [selected, onChange] = useState<ModelSelection | null>(null);
+    return <ModelPicker label="Model" options={catalog} combinedCatalog selection={{ mode: "single", selected, onChange }} />;
+  }
+  const user = userEvent.setup();
+  render(<Form />);
+  await user.click(screen.getByRole("button", { name: "Model · Choose model" }));
+  const menu = await screen.findByRole("menu", { name: "Model" });
+  const list = within(menu.querySelector<HTMLElement>(".model-picker-list")!);
+  const names = () => list.getAllByRole("menuitemradio").map((row) => row.getAttribute("aria-label"));
+  expect(names()).toEqual(["Gemini Pro", "Claude Sonnet", "GPT‑6 Luna", "Other model"]);
+  expect(within(menu).getByText("Claude Code")).toBeTruthy();
+  expect(within(menu).getByText("Gemini · Antigravity")).toBeTruthy();
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Price, lowest first" }));
+  expect(names()).toEqual(["GPT‑6 Luna", "Gemini Pro", "Claude Sonnet", "Other model"]);
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Gemini Pro" }));
+  await user.click(screen.getByRole("button", { name: "Model · Gemini Pro" }));
+  expect(screen.getByRole("menuitemradio", { name: "Price, lowest first" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("menuitemradio", { name: "Gemini Pro" }).getAttribute("aria-checked")).toBe("true");
 });

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { CircleCheck, CircleMinus, LoaderCircle, ShieldCheck, ShieldQuestion, Terminal } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { DispatchProfileEvidence } from "@/conversation-profile";
@@ -35,17 +36,22 @@ export function ModelCapabilityPreview({ option, scope, openEvidence }: {
   for (const { status } of assessment?.capabilities ?? []) {
     statuses.set(status, (statuses.get(status) ?? 0) + 1);
   }
+  const source = `CLI inventory · ${option.selection.profileId}`;
+  const availability = option.selectable ? "Selectable" : option.unavailableReason ?? "Unavailable";
+  const recordedStatus = assessment ? [dispatch?.profile.cliVersion && `CLI ${dispatch.profile.cliVersion}`,
+    ...Array.from(statuses, ([status, count]) => `${count} ${status}`)].filter(Boolean).join(" · ") || "Capability evidence recorded"
+    : recorded.isPending ? "Loading recorded capability evidence" : "No recorded capability evidence for this model";
 
-  return <div className="model-picker-rating grid gap-1 text-xs" aria-label="Model capability details">
-    <p>Model source · CLI inventory</p>
-    <p className="break-all">Profile · {option.selection.profileId}</p>
-    <p>Availability · {option.selectable ? "Selectable" : option.unavailableReason ?? "Unavailable"}</p>
-    {scope && recorded.isPending && <p>Loading recorded capability evidence…</p>}
-    {scope && !recorded.isPending && !assessment && <p>Recorded capability assessment unavailable for this model.</p>}
-    {assessment && <>
-      <p>Recorded CLI · {dispatch?.profile.cliVersion}</p>
-      {statuses.size > 0 && <p>Recorded capability status · {Array.from(statuses, ([status, count]) => `${count} ${status}`).join(" · ")}</p>}
-      {openEvidence && <DropdownMenu.Item className="model-picker-item" onSelect={openEvidence}>Inspect capability evidence</DropdownMenu.Item>}
-    </>}
+  return <div className="model-capability-icons" role="group" aria-label="Model capability details">
+    <span role="img" aria-label={source} title={source}><Terminal size={14} aria-hidden /></span>
+    <span role="img" data-selectable={option.selectable} aria-label={availability} title={availability}>
+      {option.selectable ? <CircleCheck size={14} aria-hidden /> : <CircleMinus size={14} aria-hidden />}
+    </span>
+    {scope && (assessment && openEvidence
+      ? <DropdownMenu.Item className="model-capability-evidence" aria-label="Inspect capability evidence" aria-description={recordedStatus}
+        title={recordedStatus} onSelect={openEvidence}><ShieldCheck size={15} aria-hidden /></DropdownMenu.Item>
+      : <span role="img" aria-label={recordedStatus} title={recordedStatus}>
+        {assessment ? <ShieldCheck size={14} aria-hidden /> : recorded.isPending ? <LoaderCircle size={14} aria-hidden /> : <ShieldQuestion size={14} aria-hidden />}
+      </span>)}
   </div>;
 }

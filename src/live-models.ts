@@ -18,12 +18,19 @@ export function liveModelsQuery(provider: Provider, modelId?: string) {
 
 export function useLiveModelOptions(providers: readonly Provider[] = LIVE_MODEL_PROVIDERS, enabled = true) {
   const queries = useQueries({ queries: providers.map((provider) => ({ ...liveModelsQuery(provider), enabled })) });
-  const models = queries.flatMap(({ data }) => data ?? []);
+  const unique = new Map<string, LiveModel>();
+  for (const { data } of queries) for (const model of data ?? []) {
+    const { provider, profileId, modelId } = model.option.selection;
+    const key = JSON.stringify([provider, profileId, modelId]);
+    if (!unique.has(key)) unique.set(key, model);
+  }
+  const models = [...unique.values()];
   return {
     models,
     options: models.map(({ option }) => option),
     loading: queries.some(({ isLoading }) => isLoading),
     errors: queries.flatMap(({ error }) => error ? [error] : []),
+    retryFailed: () => Promise.all(queries.filter(({ isError }) => isError).map(({ refetch }) => refetch())),
   };
 }
 

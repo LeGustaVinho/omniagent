@@ -148,9 +148,10 @@ it("opens capability evidence only for the model and profile shown in the picker
   </QueryClientProvider>);
   await user.click(screen.getByRole("button", { name: "Model · Luna" }));
   const menu = within(await screen.findByRole("menu", { name: "Model" }));
-  expect(await menu.findByText("Recorded capability status · 1 reported · 1 blocked")).toBeTruthy();
+  const evidence = await menu.findByRole("menuitem", { name: "Inspect capability evidence" });
+  expect(evidence.getAttribute("aria-description")).toContain("1 reported · 1 blocked");
   await user.hover(menu.getByRole("menuitemradio", { name: alternative.name }));
-  expect(await menu.findByText("Recorded capability assessment unavailable for this model.")).toBeTruthy();
+  expect(await menu.findByRole("img", { name: "No recorded capability evidence for this model" })).toBeTruthy();
   expect(menu.queryByRole("menuitem", { name: "Inspect capability evidence" })).toBeNull();
   await user.hover(menu.getByRole("menuitemradio", { name: model.name }));
   await user.click(await menu.findByRole("menuitem", { name: "Inspect capability evidence" }));
