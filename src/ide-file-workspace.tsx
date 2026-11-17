@@ -7,7 +7,7 @@ import {
 import { FileCode2, FileText, Folder, FolderOpen, FolderTree, Hash, Link2, PanelLeftClose, Pin, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
-import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
+import { ContextActions, PositionedContextActions, type MenuAction, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
 import { checkoutFavoriteKey, isNoteFavorite, maxFavoriteGroupName, moveCheckoutFavorites, saveCheckoutFavoriteGroup,
   setCheckoutFavorites, useCheckoutFavorites, type CheckoutFavorite, type CheckoutFavoriteGroup,
@@ -39,10 +39,12 @@ type FileDockCommands = {
   dirty: (path: string) => boolean;
   requestClose: CloseTab;
   loadClosedFile: ReopenFile;
+  save: (path: string, ownerPanel: FilePanelApi) => Promise<boolean>;
 };
 
 type ClosedTab = { sequence: number; id: string; params: FilePanelParams; groupId: string; index: number };
 type CloseBatch = { ids: string[]; savedOnly: boolean };
+type GroupOption = { id: string; label: string };
 
 export interface FileDockContextValue {
   renderFile: (path: string, view: FileView, panelId: string) => ReactNode;
@@ -135,7 +137,7 @@ export function FileDock({ context, onReady }: { context: FileDockContextValue; 
 
 export function focusFile(dock: DockviewApi, path: string, view: FileView = "editor", home?: DockGroup) {
   const id = `${view}:${path}`;
-  const existing = dock.panels.find((panel) => panel.params?.path === path && panel.params?.view === view);
+  const existing = (home?.panels ?? dock.panels).find((panel) => panel.params?.path === path && panel.params?.view === view);
   if (existing) {
     existing.api.setActive();
     if (existing.group.api.location.type === "popout") existing.api.getWindow().focus();
@@ -143,6 +145,11 @@ export function focusFile(dock: DockviewApi, path: string, view: FileView = "edi
   }
   return dock.addPanel({ id: unusedPanelId(dock, id), component: "file", params: { path, view }, title: fileName(path),
     position: home ? { referenceGroup: home } : undefined });
+}
+
+function groupName(dock: DockviewApi, group: DockGroup) {
+  const path = (group.activePanel?.params as FilePanelParams | undefined)?.path;
+  return `Group ${dock.groups.indexOf(group) + 1}${path ? ` · ${fileName(path)}` : ""}`;
 }
 
 function unusedPanelId(dock: DockviewApi, preferred: string) {
@@ -184,9 +191,12 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
   const [error, setError] = useState("");
   const [closed, setClosed] = useState<ClosedTab[]>([]);
   const [reopening, setReopening] = useState(false);
+  const [groupOptions, setGroupOptions] = useState<GroupOption[]>([]);
+  const [savingGroup, setSavingGroup] = useState(false);
   const closeSequence = useRef(0);
   const pendingClose = useRef<CloseBatch>(null);
   const reopenPending = useRef(false);
+  const savePending = useRef(false);
   const detaching = useRef(false);
   const liveDock = useRef<DockviewApi | null>(null);
   const initialPathRef = useRef(initialPath);
@@ -218,8 +228,13 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       timer = window.setTimeout(flush, 80);
     };
     const updateFile = () => setFile(api.activePanel?.params as FilePanelParams | undefined);
-    const activeChange = api.onDidActivePanelChange(() => { updateFile(); save(); });
-    const layoutChange = api.onDidLayoutChange(save);
+    const updateGroups = () => {
+      const next = api.groups.filter((group) => group.api.isVisible).map((group) => ({ id: group.id, label: groupName(api, group) }));
+      setGroupOptions((previous) => next.length === previous.length &&
+        next.every(({ id, label }, index) => previous[index]?.id === id && previous[index]?.label === label) ? previous : next);
+    };
+    const activeChange = api.onDidActivePanelChange(() => { updateFile(); updateGroups(); save(); });
+    const layoutChange = api.onDidLayoutChange(() => { updateGroups(); save(); });
     const cleanupPopouts = new Map<Window, () => void>();
     const addPopout = api.onDidAddPopoutGroup(({ group, window: popup }) => {
       popup.document.querySelector(".dv-dockview")?.classList.add("file-dock");
@@ -248,6 +263,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
           loaded = true;
           if (initialPathRef.current) focusFile(api, initialPathRef.current);
           updateFile();
+          updateGroups();
           setReady(true);
         }
       }
@@ -268,7 +284,30 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     };
   }, [api, checkoutId, simulated, workspace]);
 
-  const open = useCallback((file: string) => { if (api && ready) focusFile(api, file); }, [api, ready]);
+  const open = useCallback((file: string, groupId?: string) => {
+    if (!api || !ready) return;
+    const group = groupId === undefined ? undefined : api.groups.find((group) => group.id === groupId && group.api.isVisible);
+    if (groupId !== undefined && !group) {
+      setError("The selected editor group is no longer available.");
+      return;
+    }
+    if (group) {
+      if (api.panels.some((panel) => panel.params?.path === file && panel.group !== group)) {
+        setError("The file is already open in another editor group.");
+        return;
+      }
+      setError("");
+    }
+    focusFile(api, file, "editor", group);
+  }, [api, ready]);
+
+  function openGroupActions(path: string, openFile: (groupId: string) => void): MenuAction[] {
+    if (groupOptions.length < 2 || api?.panels.some((panel) => panel.params?.path === path)) return [];
+    return [{ label: "Open in editor group", items: groupOptions.map(({ id, label }) => ({
+      label, run: () => openFile(id),
+    })) }];
+  }
+
   const detach = useCallback(async (target: DockTab | DockGroup) => {
     if (!api || !ready || detaching.current) return;
     detaching.current = true;
@@ -293,7 +332,8 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       detached.api.getWindow().focus();
       return;
     }
-    const home = api.groups.find((group) => group.api.location.type === "grid");
+    const home = api.panels.find((panel) => panel.params?.path === path && panel.params?.view === view)?.group
+      ?? api.groups.find((group) => group.api.location.type === "grid");
     const panel = focusFile(api, path, view, home);
     void detach(panel);
   }, [api, detach, ready]);
@@ -353,12 +393,6 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     }
   }
 
-  function groupName(group: DockGroup) {
-    const index = api?.groups.indexOf(group) ?? -1;
-    const path = (group.activePanel?.params as FilePanelParams | undefined)?.path;
-    return `Group ${index + 1}${path ? ` · ${fileName(path)}` : ""}`;
-  }
-
   function reopenActions(commands: FileDockCommands, groupId?: string) {
     const latest = closed[0];
     if (!latest) return [];
@@ -379,6 +413,8 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     if (!group || !api) return [reopenActions(commands)];
     const unpinned = group.panels.filter((panel) => !panel.params?.pinned);
     const saved = unpinned.filter((panel) => !commands.dirty(String(panel.params?.path)));
+    const dirtyEditors = group.panels.some(({ params }) =>
+      params?.view === "editor" && typeof params.path === "string" && commands.dirty(params.path));
     const others = api.groups.filter((other) => other.id !== group.id);
     const focused = group.activePanel;
     const current = focused?.params as FilePanelParams | undefined;
@@ -393,15 +429,38 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
         { label: "Move group to new window", disabled: !group.panels.length, run: () => void detach(group) },
       ]),
       ...(others.length ? [{ label: "Merge this group into", items: others.map((other) => ({
-        label: groupName(other), run: () => mergeGroups(group, other),
+        label: groupName(api, other), run: () => mergeGroups(group, other),
       })) }, { label: "Merge all groups here", run: () => {
         for (const other of others) mergeGroups(other, group);
       } }] : []),
     ], [
+      { label: "Save all tabs in group", disabled: savingGroup || !dirtyEditors, run: () => void saveGroup(group, commands) },
       { label: "Close saved tabs in group", disabled: !saved.length, run: () => closeTabs(saved, commands, true) },
       { label: unpinned.length === group.panels.length ? "Close editor group" : "Close unpinned tabs in group",
         disabled: !unpinned.length, run: () => closeTabs(unpinned, commands) },
     ], reopenActions(commands, group.id)];
+  }
+
+  async function saveGroup(group: DockGroup, { dirty, save }: FileDockCommands) {
+    if (!api?.groups.includes(group) || savePending.current) return;
+    const panels = [...group.panels];
+    const attempted = new Set<string>();
+    savePending.current = true;
+    setSavingGroup(true);
+    try {
+      for (const panel of panels) {
+        if (liveDock.current !== api) break;
+        const params = panel.params as FilePanelParams | undefined;
+        if (api.getPanel(panel.id) !== panel || !params || params.view !== "editor" || attempted.has(params.path) || !dirty(params.path)) continue;
+        attempted.add(params.path);
+        if (!await save(params.path, panel.api)) break;
+      }
+    } catch (failure) {
+      if (liveDock.current === api) setError(String(failure));
+    } finally {
+      savePending.current = false;
+      if (liveDock.current === api) setSavingGroup(false);
+    }
   }
 
   function mergeGroups(source: DockGroup, target: DockGroup) {
@@ -411,24 +470,25 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
   }
 
   function layoutActions(tab: FilePanelApi, commands: FileDockCommands): MenuGroups {
+    if (!api) return [];
     const { group } = tab;
     const index = group.panels.findIndex(({ id }) => id === tab.id);
     const otherTabs = group.panels.filter((panel) => panel.id !== tab.id && !panel.params?.pinned);
     const right = index === -1 ? [] : group.panels.slice(index + 1).filter((panel) => !panel.params?.pinned);
     const saved = otherTabs.filter((panel) => !commands.dirty(String(panel.params?.path)));
-    const others = api?.groups.filter((other) => other.id !== group.id) ?? [];
+    const others = api.groups.filter((other) => other.id !== group.id);
     const main = others.find((other) => other.api.location.type === "grid" && other.panels.length);
     return [[
       { label: "Move tab", items: [
         { label: "New group to the right", disabled: group.panels.length < 2, run: () => tab.moveTo({ group, position: "right" }) },
         { label: "New group below", disabled: group.panels.length < 2, run: () => tab.moveTo({ group, position: "bottom" }) },
-        ...others.map((other) => ({ label: groupName(other), run: () => tab.moveTo({ group: other, position: "center" }) })),
+        ...others.map((other) => ({ label: groupName(api, other), run: () => tab.moveTo({ group: other, position: "center" }) })),
       ] },
       ...(group.api.location.type === "popout" ? [
         ...(main && group.panels.length > 1 ? [{ label: "Move tab to main window", run: () => tab.moveTo({ group: main, position: "center" }) }] : []),
         { label: "Return editor window to main window", run: () => group.api.getWindow().close() },
       ] : [{ label: "Move tab to new window", run: () => {
-        const selected = api?.getPanel(tab.id);
+        const selected = api.getPanel(tab.id);
         if (selected) void detach(selected);
       } }]),
     ], [
@@ -461,7 +521,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     return reopened;
   };
 
-  return { api, error, onReady, open, openInWindow, path: file?.path, view: file?.view, ready, split, reconcilePaths,
+  return { api, error, onReady, open, openGroupActions, openInWindow, path: file?.path, view: file?.view, ready, split, reconcilePaths,
     closeTab, cancelCloseBatch, resumeCloseBatch, groupActions, layoutActions };
 }
 
@@ -682,6 +742,12 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
   }
 
   const rootActions: MenuGroups = [...actions({ kind: "root", path: "" }), [
+      { label: "Reveal active file", disabled: !active, run: () => {
+        if (!active) return;
+        const reveal = { path: active };
+        setManualReveal(reveal);
+        setVisibilityOverride(reveal);
+      } },
       { label: "Expand all folders", run: () => setSubtree("", false) },
       { label: "Collapse all folders", run: () => setSubtree("", true) },
     ], [

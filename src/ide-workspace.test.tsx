@@ -10,6 +10,7 @@ import IdeWorkspace from "@/ide-workspace";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
 import type { FileFormat } from "@/source-file-format";
+import { readNoteSearchTarget } from "@/ide-file-search";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 
@@ -378,6 +379,37 @@ it("moves the clicked tab to a new group and merges groups without changing the 
   expect(selected().closest(".dv-groupview")).toBe(screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview"));
   expect(await screen.findByLabelText("Pinned")).toBeTruthy();
   expect(service.drafts.get(main)?.markdown).toBe("fn draft_before_move() {}");
+});
+
+it("opens a closed source in the chosen existing group and routes Markdown to a Knowledge split", async () => {
+  fixture({ "src/other.rs": "fn other() {}", "src/closed.rs": "fn closed() {}" });
+  const props = propsFor(alternate);
+  render(<IdeWorkspace {...props} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "review.rs" }));
+  await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.click(screen.getByRole("button", { name: "other.rs" }));
+  await screen.findByRole("textbox", { name: "Source editor for src/other.rs" });
+  const groupOf = (name: string) => screen.getByRole("button", { name: `Close ${name}` }).closest(".dv-groupview");
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Close other.rs" }).closest(".file-tab-label")!);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move tab" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New group to the right" }));
+  expect(groupOf("review.rs")).not.toBe(groupOf("other.rs"));
+  expect(groupOf("other.rs")?.classList.contains("dv-active-group")).toBe(true);
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "closed.rs" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Open in editor group" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: /Group \d+ · review\.rs/ }));
+  await screen.findByRole("textbox", { name: "Source editor for src/closed.rs" });
+  expect(groupOf("closed.rs")).toBe(groupOf("review.rs"));
+  expect(groupOf("closed.rs")).not.toBe(groupOf("other.rs"));
+
+  fireEvent.click(screen.getByRole("button", { name: "docs" }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Guide.md" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Open to the side" }));
+  const target = vi.mocked(props.openWorkspace).mock.lastCall?.[1];
+  expect(props.openWorkspace).toHaveBeenLastCalledWith("knowledge", expect.any(String));
+  expect(readNoteSearchTarget(target!)).toEqual({ path: "docs/Guide.md", line: 1, side: true });
 });
 
 it("reveals the breadcrumb folder and reopens the last tab from the empty group", async () => {

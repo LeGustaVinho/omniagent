@@ -70,7 +70,7 @@ type KnowledgeDialog =
   | { kind: "extract"; path: string; selection: NoteSelection; ownerPanel?: FilePanelApi }
   | { kind: "merge"; source: string; destination?: string; ownerPanel?: FilePanelApi }
   | { kind: "tagRename"; tag: string; ownerPanel?: FilePanelApi }
-  | { kind: "conflict"; path: string; external: string }
+  | { kind: "conflict"; path: string; external: string; ownerPanel?: FilePanelApi }
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "launch"; source: NoteRevision }
@@ -228,11 +228,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     label: link.label ?? undefined,
   }));
 
-  const open = useCallback((path: string, line?: number, anchor?: string, presentation?: NoteMode | "side" | "window") => {
+  const open = useCallback((path: string, line?: number, anchor?: string, presentation?: NoteMode | "side" | "window" | { groupId: string }) => {
     const focus = (file: string, targetLine?: number) => {
       if (targetLine || anchor) setJumps((before) => ({ ...before, [file]: { line: targetLine, anchor, token: (before[file]?.token ?? 0) + 1 } }));
       setGraph(false);
-      if (presentation === "window") dock.openInWindow(file);
+      if (typeof presentation === "object") dock.open(file, presentation.groupId);
+      else if (presentation === "window") dock.openInWindow(file);
       else if (presentation === "side") {
         if (mode === "reading") setEditAlongsideReading((before) => new Set(before).add(file));
         dock.split(file, "reading");
@@ -305,11 +306,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       return current && current.content !== content ? { ...before, [path]: { ...current, content } } : before;
     });
   };
-  const save = async (path: string) => {
+  const save = async (path: string, ownerPanel?: FilePanelApi) => {
     const external = (simulated ? notes[path] : getNote(path))?.external;
     if (external !== undefined) {
       dock.cancelCloseBatch();
-      setDialog({ kind: "conflict", path, external });
+      setDialog({ kind: "conflict", path, external, ownerPanel });
       return false;
     }
     if (!simulated) {
@@ -319,7 +320,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         const incoming = getNote(path)?.external;
         if (incoming !== undefined) {
           dock.cancelCloseBatch();
-          setDialog({ kind: "conflict", path, external: incoming });
+          setDialog({ kind: "conflict", path, external: incoming, ownerPanel });
         }
       }
       return saved;
@@ -364,7 +365,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     setDialog({ kind: "close", path, api });
     return false;
   };
-  const dockCommands = { dirty: dirtyNote, requestClose: close, loadClosedFile: async (path: string) => {
+  const dockCommands = { dirty: dirtyNote, requestClose: close, save, loadClosedFile: async (path: string) => {
     if (simulated) return notes[path] ? path : undefined;
     const canonical = await loadNote(path);
     if (canonical) watchNote(canonical);
@@ -508,6 +509,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     return [[
       { label: "Open", run: () => open(path) },
       { label: "Open to the side", run: () => open(path, undefined, undefined, "side") },
+      ...dock.openGroupActions(path, (groupId) => open(path, undefined, undefined, { groupId })),
       { label: "Open in new window", run: () => open(path, undefined, undefined, "window") },
       { label: "Open as", items: [
         { label: "Source", run: () => open(path, undefined, undefined, "source") },
@@ -1041,7 +1043,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         </div>
         {problem && <p role="alert">{problem}</p>}
       </FileDialog>}
-      {dialog?.kind === "conflict" && <FileDialog title="Note revision conflict" description={`Review the local and external versions of ${dialog.path}.`} onClose={closeDialog}>
+      {dialog?.kind === "conflict" && <FileDialog title="Note revision conflict" description={`Review the local and external versions of ${dialog.path}.`}
+        ownerPanel={dialog.ownerPanel} onClose={closeDialog}>
         <div className="file-dialog-comparison">
           <div><h3>Local buffer</h3><pre>{notes[dialog.path]?.content}</pre></div>
           <div><h3>External version</h3><pre>{dialog.external}</pre></div>

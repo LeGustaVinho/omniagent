@@ -35,7 +35,7 @@ const WorktreeTerminal = lazy(() => import("@/ide-terminal").then(({ ManualTermi
 type IdeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
   | { kind: "format"; path: string; change: SourceFormatChange }
-  | { kind: "conflict"; path: string };
+  | { kind: "conflict"; path: string; ownerPanel?: FilePanelApi };
 
 const markdownPath = (path: string) => /\.(?:md|markdown)$/i.test(path);
 const editorText = (content: string) => content.replace(/\r\n?/g, "\n");
@@ -122,8 +122,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
   }, [files, models]);
 
-  const openFile = useCallback((path: string, line?: number, split = false, column?: number, newWindow = false) => {
+  const openFile = useCallback((path: string, line?: number, placement: boolean | { groupId: string } = false, column?: number, newWindow = false) => {
     const request = ++openRequest.current;
+    const split = placement === true;
     if (markdownPath(path)) {
       const location = line !== undefined || split ? noteSearchTarget(path, line ?? 1, request, split) : path;
       openWorkspace("knowledge", newWindow ? noteWindowTarget(path, request) : location);
@@ -133,7 +134,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, column, token: (before[file]?.token ?? 0) + 1 } }));
       if (newWindow) dock.openInWindow(file);
       else if (split) dock.split(file);
-      else dock.open(file);
+      else dock.open(file, typeof placement === "object" ? placement.groupId : undefined);
     };
     if (simulated) {
       focus(path);
@@ -216,12 +217,12 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     if (panel?.params?.path === path) setQuickFix({ panelId: panel.id, line, column });
   };
 
-  const save = async (path: string) => {
+  const save = async (path: string, ownerPanel?: FilePanelApi) => {
     const entry = simulated ? files[path] : source.getFile(path);
     if (!entry) return false;
     if (entry.external !== undefined) {
       dock.cancelCloseBatch();
-      setDialog({ kind: "conflict", path });
+      setDialog({ kind: "conflict", path, ownerPanel });
       return false;
     }
     setProblem("");
@@ -230,7 +231,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       if (!await source.save(path)) {
         if (source.getFile(path)?.external !== undefined) {
           dock.cancelCloseBatch();
-          setDialog({ kind: "conflict", path });
+          setDialog({ kind: "conflict", path, ownerPanel });
         }
         return false;
       }
@@ -296,7 +297,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     setDialog({ kind: "close", path, api });
     return false;
   };
-  const dockCommands = { dirty, requestClose, loadClosedFile: async (path: string) => {
+  const dockCommands = { dirty, requestClose, save, loadClosedFile: async (path: string) => {
     if (simulated) return files[path] ? path : undefined;
     const canonical = await loadSource(path);
     if (canonical) watchSource(canonical);
@@ -473,7 +474,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 ...(target.kind === "file" ? [[
                   { label: "Open", run: () => openFile(target.path) },
                   filePreview.action(target.path),
-                  ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
+                  { label: "Open to the side", run: () => openFile(target.path, undefined, true) },
+                  ...(!markdownPath(target.path) ? dock.openGroupActions(target.path, (groupId) => openFile(target.path, undefined, { groupId })) : []),
                   { label: "Open in new window", run: () => openFile(target.path, undefined, false, undefined, true) },
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
                   ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
@@ -643,7 +645,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           <button type="button" className="fw-btn fw-primary" disabled={confirmingClose} onClick={() => void confirmClose(dialog, true)}>Save and close</button>
         </div>
       </FileDialog>}
-      {dialog?.kind === "conflict" && <FileDialog title="File changed externally" description={`Review both versions of ${dialog.path} before continuing.`} onClose={() => setDialog(undefined)}>
+      {dialog?.kind === "conflict" && <FileDialog title="File changed externally" description={`Review both versions of ${dialog.path} before continuing.`}
+        ownerPanel={dialog.ownerPanel} onClose={() => setDialog(undefined)}>
         <div className="file-dialog-comparison">
           <div><h3>Local buffer</h3><pre>{files[dialog.path]?.content}</pre></div>
           <div><h3>External version</h3><pre>{files[dialog.path]?.external}</pre></div>

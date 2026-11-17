@@ -63,11 +63,12 @@ type SaveRace = {
   recovery: { message: string; editedPath: string; displacedPath: string };
 };
 
-function mockRepository() {
+function mockRepository(extra: DocumentFixture[] = []) {
   const onDisk = new Map([
     [release, documentAt(release, "release-1", releaseSource)],
     [checklist, documentAt(checklist, "checklist-1", checklistSource)],
   ]);
+  for (const document of extra) onDisk.set(document.revision.relativePath, document);
   type Draft = { revision: string; base: NoteRevision; markdown: string };
   const drafts = new Map<string, Draft>();
   const watchers = new Map<string, (event: NoteChange) => void>();
@@ -89,11 +90,13 @@ function mockRepository() {
       case "repository_note_catalog": return [
         { path: release, frontmatter: null },
         { path: checklist, frontmatter: checklistProperties },
+        ...extra.map(({ revision }) => ({ path: revision.relativePath, frontmatter: null })),
       ];
       case "repository_note_planning": return [];
       case "rebuild_repository_note_index": return [
         { id: 1, path: release, title: "Release notes", tags: [], frontmatter: null },
         { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
+        ...extra.map(({ revision }, index) => ({ id: index + 3, path: revision.relativePath, title: revision.relativePath, tags: [], frontmatter: null })),
       ];
       case "search_repository_note_index": return [
         { path: checklist, title: "Launch notes", snippet: "Keep the saved checklist." },
@@ -168,6 +171,55 @@ async function editor(path: string) {
 function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
+
+it("opens a closed note in the chosen group and saves only that group's dirty notes after resolving a conflict", async () => {
+  const appendix = "notes/Appendix.md";
+  const service = mockRepository([documentAt(appendix, "appendix-1", "# Appendix\n")]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const edit = async (path: string, addition: string) => {
+    const view = await editor(path);
+    act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: addition } }));
+  };
+  const groupOf = (name: string) => screen.getByRole("button", { name: `Close ${name}` }).closest<HTMLElement>(".dv-groupview")!;
+  await edit(release, "Release draft\n");
+  fireEvent.click(await screen.findByRole("button", { name: "notes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Checklist.md" }));
+  await edit(checklist, "Checklist draft\n");
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Close Checklist.md" }).closest(".file-tab-label")!);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move tab" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New group to the right" }));
+  expect(groupOf("Release.md")).not.toBe(groupOf("Checklist.md"));
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Appendix.md" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Open in editor group" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: /Group \d+ · Release\.md/ }));
+  await edit(appendix, "Appendix draft\n");
+  expect(groupOf("Appendix.md")).toBe(groupOf("Release.md"));
+  fireEvent.click(screen.getByRole("button", { name: "Checklist.md" }));
+  await waitFor(() => expect(groupOf("Checklist.md").classList.contains("dv-active-group")).toBe(true));
+
+  const saveGroup = async () => {
+    fireEvent.contextMenu(within(groupOf("Release.md")).getByRole("button", { name: "Actions for Editor group" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Save all tabs in group" }));
+  };
+  await waitFor(() => {
+    expect(service.drafts.size).toBe(3);
+    expect(service.isWatched(release)).toBe(true);
+  });
+  act(() => service.externalChange(documentAt(release, "release-external", "# External revision\n")));
+  await saveGroup();
+  const conflict = await screen.findByRole("dialog", { name: "Note revision conflict" });
+  expect(service.writes).not.toHaveBeenCalled();
+  expect(service.drafts.get(appendix)?.markdown).toContain("Appendix draft");
+  fireEvent.click(within(conflict).getByRole("button", { name: "Keep local edits" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Note revision conflict" })).toBeNull());
+
+  await saveGroup();
+  await waitFor(() => expect(service.writes.mock.calls.map(([args]) => args.path)).toEqual([release, appendix]));
+  expect(service.drafts.get(checklist)?.markdown).toContain("Checklist draft");
+  expect(groupOf("Checklist.md")).not.toBe(groupOf("Release.md"));
+});
 
 it("adds only the selected unsaved Markdown to an existing conversation draft", async () => {
   mockRepository();
