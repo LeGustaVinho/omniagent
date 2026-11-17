@@ -1881,7 +1881,11 @@ test("compares committed branches and registers a manual worktree in the real Gi
   await writeFile(join(repo, "README.md"), "# Topic branch\n");
   git(repo, "commit", "-qam", "Topic revision");
   git(repo, "switch", "-q", "main");
+  await writeFile(join(repo, "README.md"), "# Staged checkout version\n");
+  git(repo, "add", "README.md");
   await writeFile(join(repo, "README.md"), "# Unsaved working tree edit\n");
+  await writeFile(join(repo, "local-only.md"), "# Untracked checkout file\n");
+  const originalIndex = await readFile(join(repo, ".git", "index"));
 
   const driver = startTestDriver(application);
   let browser;
@@ -1907,6 +1911,41 @@ test("compares committed branches and registers a manual worktree in the real Gi
       return /Main\s+branch/.test(rendered) && /Topic\s+branch/.test(rendered) && !rendered.includes("Unsaved working tree edit");
     }, { timeout: 10_000, timeoutMsg: "The branch comparison should show committed versions, not dirty checkout content" });
     await capture(browser, "real-git-branch-comparison");
+
+    await click(gitView, "button=History");
+    const historyBranch = gitView.$('.//label[starts-with(normalize-space(.), "History branch")]/select');
+    await historyBranch.waitForEnabled();
+    await historyBranch.selectByAttribute("value", "refs/heads/topic");
+    const topic = gitView.$("button*=Topic revision");
+    await topic.waitForDisplayed();
+    await topic.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Compare with local checkout…"]');
+    const localComparison = browser.$('//*[@role="dialog"][./header/h2[normalize-space(.)="Compare commit with local checkout"]]');
+    await localComparison.waitForDisplayed();
+    const untrackedSelector = './/button[contains(@class, "diff-file-row")][.//span[@title="local-only.md"]]';
+    const untracked = localComparison.$(untrackedSelector);
+    await untracked.waitForDisplayed();
+    assert.match(await untracked.getText(), /Untracked/);
+    const expectLocalComparison = async (version, revised, excluded) => {
+      await browser.waitUntil(async () => {
+        const content = await browser.execute(() => {
+          const dialog = document.querySelector('[role="dialog"].file-comparison-dialog');
+          return {
+            revisions: dialog?.querySelector('[aria-label="Comparison revisions"]')?.textContent ?? "",
+            text: dialog?.querySelector('[aria-label="Diff editor for README.md"]')?.textContent?.replace(/\s+/g, " ") ?? "",
+          };
+        });
+        return content.revisions.includes(version) && content.text.includes("Topic branch") && content.text.includes(revised)
+          && !content.text.includes("Main branch") && !content.text.includes(excluded);
+      }, { timeout: 20_000, timeoutMsg: `The local comparison should show the clicked commit and ${version}` });
+    };
+    await expectLocalComparison("Files on disk", "Unsaved working tree edit", "Staged checkout version");
+    await localComparison.$('.//label[starts-with(normalize-space(.), "Checkout version")]/select').selectByAttribute("value", "staged");
+    await expectLocalComparison("Staged index", "Staged checkout version", "Unsaved working tree edit");
+    assert.equal(await localComparison.$(untrackedSelector).isExisting(), false);
+    await click(localComparison, 'button[aria-label="Close dialog"]');
+    await localComparison.waitForExist({ reverse: true });
+    assert.deepEqual(await readFile(join(repo, ".git", "index")), originalIndex);
 
     await click(gitView, "button=Worktrees");
     await click(gitView, "button=New worktree");
@@ -2522,9 +2561,12 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Saved notes repository");
   const path = "Release plan.md";
+  const comparisonPath = "Saved comparison source.md";
+  const comparisonText = "# Comparação de revisão\r\n\r\nExactly this saved note is the shared input.\r\n";
   git(scratch, "init", "-q", repo);
   await writeFile(join(repo, path), "# Release plan\n\nReview the saved rollout and verify its recovery step.\n");
-  git(repo, "add", path);
+  await writeFile(join(repo, comparisonPath), comparisonText);
+  git(repo, "add", "--", path, comparisonPath);
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-qm", "Save planning note");
 
@@ -2533,6 +2575,7 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
   try {
     browser = await connectTestDriver(driver, application);
     const { projectId, checkoutId } = await invoke(browser, "register_project", { directory: repo });
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
     await selectCheckout(browser, { projectId, checkoutId });
     const opened = await invoke(browser, "open_repository_document", { checkoutId, path });
     assert.equal(opened.status, "document");
@@ -2567,6 +2610,70 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
       return Boolean(card) && style.getPropertyValue("--xy-node-background-color").trim() === card;
     }), { timeoutMsg: "Delivery Git nodes should use the application's card theme" });
     await capture(browser, "real-plan-from-note");
+
+    const comparisonDocument = await invoke(browser, "open_repository_document", { checkoutId, path: comparisonPath });
+    assert.equal(comparisonDocument.status, "document");
+    const comparisonRevision = comparisonDocument.document.revision;
+    assert.equal(comparisonRevision.sha256, createHash("sha256").update(comparisonText).digest("hex"));
+    const unsavedNote = "# This unsaved draft must not be sent\n";
+    await invoke(browser, "save_repository_markdown_draft", { checkoutId, baseRevision: comparisonRevision.id,
+      expectedDraftRevision: null, markdown: unsavedNote });
+    await click(browser, '.work-rail button[aria-label="Knowledge"]');
+    await knowledge.$(`.file-tab-label[title=${JSON.stringify(path)}]`).waitForDisplayed();
+    const comparisonRow = knowledge.$(`button=${comparisonPath}`);
+    await comparisonRow.waitForDisplayed();
+    await comparisonRow.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Compare models from note…"]');
+    const compare = browser.$('section[aria-label="Model comparisons"]');
+    const source = compare.$('[aria-label="Saved note input"]');
+    await source.waitForDisplayed();
+    const fields = [];
+    for (const field of await source.$$("dd")) fields.push(await field.getText());
+    assert.deepEqual(fields, [
+      comparisonPath, comparisonRevision.id, comparisonRevision.sha256, comparisonRevision.baseCommit,
+    ]);
+    assert.equal(await compare.$('input[placeholder="Full commit SHA"]').isExisting(), false);
+    await click(compare, "summary=Read saved Markdown");
+    const preview = compare.$("details.pipeline-evidence pre");
+    await preview.waitForDisplayed();
+    assert.equal(await preview.getProperty("textContent"), comparisonText);
+
+    const modelIds = ["desktop-fixture", "gpt-6-luna"];
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    await click(compare, '.model-picker-trigger[aria-label^="Comparison candidates · "]');
+    for (const modelId of modelIds) {
+      const option = models.find(({ option }) => option.selectable && option.selection.modelId === modelId)?.option;
+      assert.ok(option, `Missing desktop fixture candidate ${modelId}`);
+      await click(browser, `.model-picker-menu [role="menuitemcheckbox"][aria-label=${JSON.stringify(option.name)}]`);
+    }
+    await browser.keys(Key.Escape);
+    const request = "Compare the recovery steps described in the saved review.";
+    await compare.$("label=Shared request").$("textarea").setValue(request);
+    // The desktop provider fixture only completes its predetermined prompts. Keep these jobs queued.
+    await invoke(browser, "set_job_queue_paused", { paused: true });
+    const comparisons = () => invoke(browser, "model_comparisons", { projectId });
+    assert.deepEqual(await comparisons(), []);
+    await click(compare, "button=Start comparison");
+    const saved = compare.$('section[aria-label="Saved comparison"]');
+    await saved.waitForDisplayed();
+    const [group] = await comparisons();
+    assert.equal(group.sourceCheckoutId, checkoutId);
+    assert.deepEqual(group.sourceDocument, comparisonRevision);
+    assert.equal(group.commit, comparisonRevision.baseCommit);
+    assert.equal(group.prompt, request);
+    assert.deepEqual(group.candidates.map(({ selection, state, runId }) => [selection.modelId, state, runId]),
+      modelIds.map((id) => [id, "queued", null]));
+
+    await browser.refresh();
+    await click(browser, '.work-rail button[aria-label="Pipelines"]');
+    await click(browser, "button=Compare models");
+    await saved.waitForDisplayed();
+    assert.equal(await saved.$("label=Comparison").$("select").getValue(), group.id);
+    assert.ok((await saved.getText()).includes(comparisonRevision.sha256));
+    assert.deepEqual(await comparisons(), [group]);
+    assert.equal((await invoke(browser, "read_repository_markdown_draft", { checkoutId, path: comparisonPath })).markdown, unsavedNote);
+    assert.equal(await readFile(join(repo, comparisonPath), "utf8"), comparisonText);
+    await capture(browser, "real-comparison-from-saved-note");
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();
