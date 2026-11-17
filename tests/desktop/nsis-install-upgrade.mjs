@@ -14,10 +14,11 @@ import { remote } from "webdriverio";
 // A separately named installed product preserves the production and desktop fixture profiles.
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "x64");
-assert.ok(process.argv[2], "Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json> [--workbench]");
+const supportedScenarios = ["--workbench", "--backup-restore"];
+assert.ok(process.argv[2], `Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json> ${supportedScenarios.map((flag) => `[${flag}]`).join(" ")}`);
 const caseFile = resolve(process.argv[2]);
 const scenarios = new Set(process.argv.slice(3));
-for (const scenario of scenarios) assert.ok(["--workbench"].includes(scenario), `Unknown NSIS scenario ${scenario}`);
+for (const scenario of scenarios) assert.ok(supportedScenarios.includes(scenario), `Unknown NSIS scenario ${scenario}`);
 const scratch = dirname(caseFile);
 const { product, identifier, sourceCommit, sourcePatch, requireInstallationIdentity = false } = JSON.parse(await readFile(caseFile, "utf8"));
 assert.equal(typeof requireInstallationIdentity, "boolean");
@@ -227,6 +228,10 @@ try {
   if (scenarios.has("--workbench")) {
     const { runInstalledWorkbench } = await import("./installed-workbench.mjs");
     receipt.workbench = await runInstalledWorkbench(installed);
+  }
+  if (scenarios.has("--backup-restore")) {
+    const { runInstalledBackupRestore } = await import("./installed-backup-restore.mjs");
+    receipt.backupRestore = await runInstalledBackupRestore(installed);
   }
 } finally {
   if (registry("HKCU", uninstallKey, "DisplayName") === product) {
