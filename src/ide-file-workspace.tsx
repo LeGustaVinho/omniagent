@@ -31,6 +31,7 @@ interface FilePanelParams {
 
 export type FilePanelApi = IDockviewPanelProps["api"];
 type DockGroup = DockviewApi["groups"][number];
+const groupPositions = [["left", "Left"], ["right", "Right"], ["top", "Above"], ["bottom", "Below"]] as const;
 type DockTab = DockviewApi["panels"][number];
 type CloseTab = (path: string, api: FilePanelApi) => boolean;
 type ReopenFile = (path: string) => string | undefined | Promise<string | undefined>;
@@ -416,6 +417,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     const dirtyEditors = group.panels.some(({ params }) =>
       params?.view === "editor" && typeof params.path === "string" && commands.dirty(params.path));
     const others = api.groups.filter((other) => other.id !== group.id);
+    const gridNeighbors = group.api.location.type === "grid" ? others.filter((other) => other.api.location.type === "grid") : [];
     const focused = group.activePanel;
     const current = focused?.params as FilePanelParams | undefined;
     return [[
@@ -428,6 +430,17 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       ] : [
         { label: "Move group to new window", disabled: !group.panels.length, run: () => void detach(group) },
       ]),
+      ...(gridNeighbors.length ? [{ label: "Move group in grid", items: gridNeighbors.map((other) => ({
+        label: groupName(api, other),
+        items: groupPositions.map(([position, label]) => ({
+          label,
+          run: () => {
+            if (api.groups.includes(group) && api.groups.includes(other) && group.api.location.type === "grid" && other.api.location.type === "grid") {
+              group.api.moveTo({ group: other, position });
+            }
+          },
+        })),
+      })) }] : []),
       ...(others.length ? [{ label: "Merge this group into", items: others.map((other) => ({
         label: groupName(api, other), run: () => mergeGroups(group, other),
       })) }, { label: "Merge all groups here", run: () => {

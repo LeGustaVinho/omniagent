@@ -382,7 +382,7 @@ it("closes tabs to the right of an inactive tab, prompts on drafts and preserves
   expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Source editor for src/recent.rs" })).value).toBe("fn recent() {}");
 });
 
-it("moves the clicked tab to a new group and merges groups without changing the draft or pin", async () => {
+it("moves tabs and groups in the editor grid without changing the draft or pin", async () => {
   const service = fixture({ "src/other.rs": "fn other() {}" });
   render(<IdeWorkspace {...propsFor(main)} />);
   fireEvent.click(await screen.findByRole("button", { name: "src" }));
@@ -407,6 +407,17 @@ it("moves the clicked tab to a new group and merges groups without changing the 
   expect(screen.queryByRole("dialog", { name: "Save changes?" })).toBeNull();
 
   fireEvent.contextMenu(within(movedGroup as HTMLElement).getByRole("button", { name: "Actions for Editor group" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move group in grid" }), { key: "ArrowRight" });
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: /Group \d+ · other\.rs/ }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Left" }));
+  const otherGroup = screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview")!;
+  const reorderedGroup = selected().closest(".dv-groupview")!;
+  const groups = [...document.querySelectorAll(".dv-groupview")];
+  expect(groups.indexOf(reorderedGroup)).toBeLessThan(groups.indexOf(otherGroup));
+  expect(within(reorderedGroup as HTMLElement).getByLabelText("Pinned")).toBeTruthy();
+  expect(views()[0]?.value).toBe("fn draft_before_move() {}");
+
+  fireEvent.contextMenu(within(reorderedGroup as HTMLElement).getByRole("button", { name: "Actions for Editor group" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Merge all groups here" }));
   expect(selected().closest(".dv-groupview")).toBe(screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview"));
   expect(await screen.findByLabelText("Pinned")).toBeTruthy();
