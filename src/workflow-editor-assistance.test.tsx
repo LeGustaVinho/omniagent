@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
 import PipelinesWorkspace from "@/pipelines-workspace";
-import { ConversationAuthoring, PipelineAuthoringEditor } from "@/workflow-authoring";
+import { BuilderAuthoring, PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
 import type { WorkflowPublication } from "@/workflow-publication";
 import { exampleCheckout } from "@/workbench-contract";
@@ -69,6 +69,7 @@ it("uses the role revision selected in the live editor and links the resulting d
           completionContract: "Finish review", reviewPolicy: "human_approval" } } };
       case "conversation_template_profile": return { cliVersion: "fixture", transport: "claude", toolScopes: [], capabilities: [] };
       case "inspect_workflow_package": return result;
+      case "list_conversations": return [{ id: result.conversationId, checkoutId: checkout.checkoutId, title: "Editor source" }];
       case "workflow_authoring_bases": case "conversation_workflow_authoring": return [];
       case "list_workflow_packages": {
         expect(input).toEqual({ projectId: checkout.projectId, conversationId: result.conversationId });
@@ -92,12 +93,12 @@ it("uses the role revision selected in the live editor and links the resulting d
   await user.click(screen.getByRole("button", { name: "Open queued authoring job" }));
   expect(props.openQueueJob).toHaveBeenCalledWith(result.request.jobId);
   draft.unmount();
-  const onOpenDraft = vi.fn();
-  mount(<ConversationAuthoring projectId={checkout.projectId} conversationId={result.conversationId}
-    selectedModel={selection} effort={null} onOpenDraft={onOpenDraft} />);
+  mount(<BuilderAuthoring checkout={checkout} openWorkspace={props.openWorkspace} />);
   await user.click(screen.getByRole("button", { name: "Create or edit with AI" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Source conversation" }), await screen.findByRole("option", { name: "Editor source" }));
+  props.openWorkspace.mockClear();
   await user.click(await screen.findByRole("button", { name: "Open linked package" }));
-  expect(onOpenDraft).toHaveBeenCalledWith(`package:${result.id}`);
+  expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:${result.id}`);
 });
 
 it("preserves the selected published pipeline and reusable artifact revisions", async () => {

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ArrowRight, ClipboardCheck, FileText, FlaskConical, GitCommitHorizontal, History, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { MergeOutcome } from "@/delivery-merge-model";
 import { deliveryQuery, taskStateQuery } from "@/project-agile-model";
@@ -20,6 +21,7 @@ import { WorkflowCommandRun } from "@/workflow-command";
 import { workflowRunTarget } from "@/workflow-execution-model";
 import { WorkflowApproval } from "@/workflow-approval";
 import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
+import "@/repository-delivery.css";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
@@ -242,6 +244,8 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
   const client = useQueryClient();
   const { projectId, checkoutId } = checkout;
   const [selected, setSelected] = useState(target ?? "");
+  const focusRun = useRef<string | undefined>(undefined);
+  const runHeading = useRef<HTMLHeadingElement>(null);
   useEffect(() => setSelected(target ?? ""), [target]);
   const runs = useQuery({
     queryKey: ["repository-delivery", projectId, "list"],
@@ -256,6 +260,13 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
       ? ["starting", "running", "waiting_for_input"].includes(job.latestAttempt.status)
       : job.queueState === "queued") ? 900 : false,
   });
+  const loadedRun = delivery.data?.run.id;
+  useEffect(() => {
+    if (loadedRun && focusRun.current === loadedRun) {
+      focusRun.current = undefined;
+      runHeading.current?.focus();
+    }
+  }, [loadedRun]);
   const refresh = () => Promise.all([
     client.invalidateQueries({ queryKey: ["repository-delivery", projectId] }),
     client.invalidateQueries({ queryKey: ["delivery-selection", projectId] }),
@@ -266,7 +277,11 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
   ]);
   const start = useMutation({
     mutationFn: (revisionId: string) => invoke<DeliveryRun>("start_repository_delivery", { projectId, checkoutId, revisionId }),
-    onSuccess: (run) => { setSelected(run.id); return refresh(); },
+    onSuccess: (run) => {
+      focusRun.current = run.id;
+      setSelected(run.id);
+      return refresh();
+    },
   });
   const action = useMutation({
     mutationFn: (operation: () => Promise<unknown>) => operation(),
@@ -274,21 +289,53 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
   });
   const busy = start.isPending || action.isPending;
   const error = start.error ?? action.error ?? runs.error ?? delivery.error;
-  return <div className="pipeline-view pipeline-view-content">
-    <header className="pipeline-section-heading">
-      <h2>Repository delivery</h2>
-      <Button variant="outline" onClick={() => startSimulation("pipelines")}>Open pipeline preview</Button>
-    </header>
-    <RepositoryMarkdownPicker key={checkoutId} checkoutId={checkoutId} onDeliver={(id) => start.mutate(id)} delivering={busy} />
-    {runs.data?.length ? <label className="pipeline-form pipeline-stack">Saved delivery
-      <select value={runId} onChange={(event) => setSelected(event.currentTarget.value)}>
-        {runId && !runs.data.some(({ id }) => id === runId) && <option value={runId}>{runId}</option>}
-        {runs.data.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}
-      </select>
-    </label> : null}
-    {delivery.data === null && <p role="status">This delivery is unavailable in this project.</p>}
-    {delivery.data && <DeliveryRunView key={delivery.data.run.id} delivery={delivery.data} projectId={projectId} checkoutId={checkoutId}
-      openActivity={openActivity} openWorkspace={openWorkspace} actions={{ busy, execute: (operation) => action.mutate(operation) }} />}
-    {error && <p role="alert" className="pipeline-note">{String(error)}</p>}
+  return <div className="pipeline-view pipeline-view-content repo-delivery">
+    <div className="repo-delivery-content">
+      <header className="repo-delivery-intro">
+        <div className="repo-delivery-title">
+          <span className="repo-delivery-card-icon"><Workflow size={21} aria-hidden /></span>
+          <div>
+            <h2>Repository delivery</h2>
+            <p>Turn a saved Markdown brief into a reviewed plan and verified Git changes.</p>
+          </div>
+        </div>
+        <Button type="button" variant="outline" onClick={() => startSimulation("pipelines")}>
+          <FlaskConical size={16} aria-hidden /> Try with example data
+        </Button>
+        <ol className="repo-delivery-flow" aria-label="Delivery stages">
+          <li><FileText size={15} aria-hidden /> Choose a brief</li>
+          <li><ArrowRight className="repo-delivery-flow-arrow" size={14} aria-hidden /><ClipboardCheck size={15} aria-hidden /> Plan and review</li>
+          <li><ArrowRight className="repo-delivery-flow-arrow" size={14} aria-hidden /><GitCommitHorizontal size={16} aria-hidden /> Verify changes</li>
+        </ol>
+      </header>
+      <div className="repo-delivery-setup">
+        <RepositoryMarkdownPicker key={checkoutId} checkoutId={checkoutId} deliveryWorktree={checkout.checkoutRoot}
+          onDeliver={(id) => start.mutate(id)} delivering={start.isPending} launchDisabled={action.isPending} />
+        <section className="repo-delivery-card pipeline-form pipeline-stack" aria-label="Saved deliveries">
+          <header className="repo-delivery-card-heading">
+            <span className="repo-delivery-card-icon"><History size={17} aria-hidden /></span>
+            <div><h3>Saved deliveries</h3><p>Resume a run or inspect its recorded results.</p></div>
+          </header>
+          {runs.data?.length ? <label>Saved delivery
+            <select title={runId} value={runId} disabled={start.isPending} onChange={(event) => setSelected(event.currentTarget.value)}>
+              {runId && !runs.data.some(({ id }) => id === runId) && <option value={runId}>{runId}</option>}
+              {runs.data.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}
+            </select>
+          </label> : runs.isPending ? <p className="repo-delivery-hint" role="status">Loading deliveries…</p>
+            : runs.isSuccess && <p className="repo-delivery-hint">No saved deliveries in this project.</p>}
+        </section>
+      </div>
+      {error && <p role="alert" className="repo-delivery-error">{String(error)}</p>}
+      {runId && delivery.isPending && <p className="repo-delivery-hint" role="status">Loading delivery…</p>}
+      {delivery.data === null && <p role="status">This delivery is unavailable in this project.</p>}
+      {delivery.data && <section className="repo-delivery-card repo-delivery-run" aria-label="Delivery run">
+        <header className="repo-delivery-card-heading">
+          <span className="repo-delivery-card-icon"><Workflow size={17} aria-hidden /></span>
+          <div><h3 ref={runHeading} tabIndex={-1}>Delivery run</h3><p title={delivery.data.run.id}>{delivery.data.run.id}</p></div>
+        </header>
+        <DeliveryRunView key={delivery.data.run.id} delivery={delivery.data} projectId={projectId} checkoutId={checkoutId}
+          openActivity={openActivity} openWorkspace={openWorkspace} actions={{ busy, execute: (operation) => action.mutate(operation) }} />
+      </section>}
+    </div>
   </div>;
 }

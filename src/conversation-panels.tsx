@@ -46,7 +46,6 @@ import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
-import { ConversationAuthoring, workflowAuthoringTarget } from "@/workflow-authoring";
 
 const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
@@ -621,9 +620,6 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           onClose={() => { setRenamingTitle(false); requestAnimationFrame(() => renameTrigger.current?.focus()); }} /> : undefined}
         rename={checkoutId && <button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
           title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}>
-        {library && inspector?.openWorkspace && <ConversationAuthoring projectId={library.projectId} conversationId={conversationId}
-          selectedModel={selected?.option.selectable ? selection : null} effort={sideEffort}
-          onOpenDraft={(draftId) => inspector.openWorkspace?.("pipelines", workflowAuthoringTarget(draftId))} />}
         <ConversationContinuationSettings conversationId={conversationId} targetCheckoutId={continuationCheckoutId}
           onCheckout={library ? setContinuationCheckoutId : undefined} />
         <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>

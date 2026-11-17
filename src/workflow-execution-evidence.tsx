@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { JobInspection } from "@/bindings/JobInspection";
 import { Button } from "@/components/ui/button";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { deliveryMergeReceiptQuery } from "@/delivery-merge-model";
 import { JobFailurePanel } from "@/job-failure";
+import { WorkflowStructuredEvidence } from "@/workflow-structured-evidence";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
 import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
@@ -208,8 +209,9 @@ function ControlEvidence({ control, snapshot, jobs, navigation }: {
   </section>;
 }
 
-export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigation }: {
-  node: ExecutionPinnedNode; snapshot: WorkflowExecutionSnapshot; unitId?: string; control?: ExecutionControl; navigation: Navigation;
+export function WorkflowNodeEvidence({ node, snapshot, unitId, focusedArtifactId, control, navigation }: {
+  node: ExecutionPinnedNode; snapshot: WorkflowExecutionSnapshot; unitId?: string; focusedArtifactId?: string;
+  control?: ExecutionControl; navigation: Navigation;
 }) {
   const { id, projectId } = snapshot.run;
   const scope = { runId: id, projectId };
@@ -217,6 +219,13 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
     (!snapshot.unitNodeIds.includes(nodeId) || !unitId || unit === unitId);
   const jobs = snapshot.jobs.filter(({ nodeId, unitId }) => belongs(nodeId, unitId));
   const outputs = snapshot.outputs.filter(({ artifact }) => belongs(artifact.nodeInstanceId, artifact.unitId));
+  const focusedOutput = outputs.find(({ artifact }) => artifact.id === focusedArtifactId)?.artifact.id;
+  const focusedCard = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!focusedOutput) return;
+    const frame = requestAnimationFrame(() => focusedCard.current?.scrollIntoView?.({ block: "nearest" }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusedOutput]);
   const pastControl = snapshot.control.filter((receipt) => receipt !== control && belongs(receipt.nodeId, receipt.unitId ?? null));
   const argumentsWire = node.definition.kind === "mcp_tool" ? snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === "arguments") : undefined;
   const argumentsArtifact = argumentsWire && snapshot.outputs.find(({ artifact, current }) => current && artifact.unitId === null &&
@@ -254,9 +263,13 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
     </section>}
     {!!outputs.length && <section aria-label="Recorded outputs" className="pipeline-stack">
       <h3>Recorded outputs</h3>
-      {outputs.map(({ artifact, current, inputReceipts }) => <section key={artifact.id} className="workflow-record-card" aria-label={`${artifact.port} output`}>
+      {outputs.map(({ artifact, current, inputReceipts }) => <section key={artifact.id}
+        className={artifact.id === focusedOutput ? "workflow-record-card ring-1 ring-primary" : "workflow-record-card"}
+        ref={artifact.id === focusedOutput ? focusedCard : undefined} aria-label={`${artifact.port} output`}>
         <p><strong>{artifact.port}</strong> · {text(artifact.value.kind)}{!current && <> · Earlier execution</>}</p>
         <p><code>{artifact.id}</code></p>
+        <WorkflowStructuredEvidence artifact={artifact} producer={node.instance.kind}
+          projectId={projectId} openWorkspace={navigation.openWorkspace} />
         <ArtifactLinks artifact={artifact} scope={scope} navigation={navigation} />
         <details><summary>Open output evidence</summary><pre className="workflow-evidence-json">{JSON.stringify(artifact.value.evidence, null, 2)}</pre></details>
         {!jobs.length && inputReceipts.length === 0 && <RecordedInputs inputs={null} snapshot={snapshot} scope={scope} navigation={navigation} />}

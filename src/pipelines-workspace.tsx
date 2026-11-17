@@ -13,13 +13,14 @@ import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
-import { PipelineCatalog, PipelineNodeCatalog, workflowGraphRegistryQuery, workflowRegistryGroups } from "@/pipeline-catalog";
+import { PipelineCatalog, workflowGraphRegistryQuery } from "@/pipeline-catalog";
+import { ProjectNodeLibrary } from "@/pipeline-published-library";
 import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
 import { WorkflowExchangePanel } from "@/workflow-exchange";
 import { WorkflowMaintenanceCandidates, WorkflowMaintenancePlugins } from "@/workflow-maintenance";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
-import { workflowRunTarget } from "@/workflow-execution-model";
+import { workflowRunTarget, type WorkflowExecutionFocus } from "@/workflow-execution-model";
 import type { ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge } from "@/workflow-execution-state";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
@@ -79,8 +80,13 @@ function handleSide(node: Pick<Node, "position">, other: Pick<Node, "position"> 
 
 const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles & templates", builder: "Builder", library: "Library" };
 
-function productionRoute(target = ""): { view: ProductionView; draftId?: string; runId?: string } {
-  if (target.startsWith("run:")) return { view: "runs", runId: target.slice("run:".length) };
+function productionRoute(target = ""): { view: ProductionView; draftId?: string; runId?: string; runFocus?: WorkflowExecutionFocus } {
+  if (target.startsWith("run:")) {
+    const [runId, search] = target.slice("run:".length).split("?", 2);
+    const params = new URLSearchParams(search);
+    const nodeId = params.get("node");
+    return { view: "runs", runId, runFocus: nodeId ? { nodeId, artifactId: params.get("artifact") ?? undefined } : undefined };
+  }
   if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
   const tab = productionTabs.find(({ id }) => id === target);
   return { view: tab?.id ?? (target === "" || target === "builder" ? "drafts" : "delivery") };
@@ -204,16 +210,18 @@ function StageRunDetails({ run, activeId, actions, links }: {
 function PipelineLibrary({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const registry = useQuery(workflowGraphRegistryQuery);
   return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
-    <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
-    <WorkflowExchangePanel projectId={checkout.projectId} openWorkspace={openWorkspace} />
+    <PipelineSectionHeading title="Library" description="Browse nodes and published presets or subflows for the Builder." icon={<Layers3 size={20} aria-hidden />} />
+    <div className="pipeline-library-packages">
+      <WorkflowExchangePanel projectId={checkout.projectId} openWorkspace={openWorkspace} />
+    </div>
     {registry.isPending && <p role="status">Loading node definitions…</p>}
     {registry.error && <p role="alert">{String(registry.error)}</p>}
-    {registry.data && <PipelineNodeCatalog groups={workflowRegistryGroups(registry.data)} />}
+    {registry.data && <ProjectNodeLibrary projectId={checkout.projectId} definitions={registry.data} />}
   </section>;
 }
 
 function ProjectPipelineMaintenance({ checkout, openActivity, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace">) {
-  return <PipelineMaintenanceLayout proposals={<WorkflowSettingsProposals checkout={checkout} onOpenRun={openActivity} />}
+  return <PipelineMaintenanceLayout proposals={<WorkflowSettingsProposals checkout={checkout} onOpenRun={openActivity} compact />}
     releases={<WorkflowMaintenanceCandidates checkout={checkout} openWorkspace={openWorkspace} />}
     inventory={<WorkflowMaintenancePlugins />} />;
 }
@@ -228,7 +236,7 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
   useEffect(() => {
     setHandoff((current) => current && workflowRunTarget(current.runId) === props.target ? current : undefined);
   }, [props.target]);
-  const { view, draftId, runId } = productionRoute(props.target);
+  const { view, draftId, runId, runFocus } = productionRoute(props.target);
   return <PipelineWorkspaceFrame>
     <PipelineTabs views={productionTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
@@ -239,7 +247,7 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
           props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
         }} />
           : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
-          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId}
+          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus}
             comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
           : view === "library" ? <PipelineLibrary {...props} />
           : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
@@ -258,6 +266,11 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [runId, setRunId] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState("plan");
+  const [inspectorRequest, revealInspector] = useState(0);
+  function viewStage(id: string) {
+    setSelectedId(id);
+    revealInspector((request) => request + 1);
+  }
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [issues, setIssues] = useState<string[]>([]);
@@ -444,15 +457,15 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
             </Dialog.Portal>
           </Dialog.Root>}
           {inspectingRun && <div className="pipeline-actions">
-            {actionableStage && <Button variant="outline" onClick={() => setSelectedId(actionableStage.id)}>View waiting stage</Button>}
-            {failedStage && <Button variant="outline" onClick={() => setSelectedId(failedStage.id)}>View failed stage</Button>}
+            {actionableStage && <Button variant="outline" onClick={() => viewStage(actionableStage.id)}>View waiting stage</Button>}
+            {failedStage && <Button variant="outline" onClick={() => viewStage(failedStage.id)}>View failed stage</Button>}
             <span className="pipeline-status" data-status={runStatus(inspectingRun)}>{runStatus(inspectingRun)}</span>
           </div>}
         </PipelineToolbar>
         {(status || resultLinks.length > 0) && <p className="pipeline-banner" role="status">{status}{resultLinks.length > 0 ? " Comparison inputs · " + resultLinks.join(", ") : ""}</p>}
         {issues.length > 0 && <div className="pipeline-banner pipeline-warning" role="alert"><CircleAlert size={17} /><ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
         {view === "Runs" && !inspectingRun ? <PipelineRunsEmpty onOpenBuilder={() => setView("Builder")} /> :
-          <PipelineCanvasFrame canvasLabel="Simulation graph canvas" inspectorLabel="Stage inspector"
+          <PipelineCanvasFrame canvasLabel="Simulation graph canvas" inspectorLabel="Stage inspector" inspectorRequest={inspectorRequest}
           canvas={graph ? (
               <PipelineGraphCanvas<RenderNode, StageEdge>
                 interactive={view === "Builder"}
@@ -525,8 +538,8 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
         <ComparisonView simulated={Boolean(simulation)} onSimulate={simulate} onUse={(ids) => { setDraft((document) => document && { ...document, comparisonRuns: ids }); setView("Builder"); setStatus("Selected comparison responses linked to the workflow draft."); }} />
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Library"}>
-        <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
-        <PipelineCatalog />
+        <PipelineSectionHeading title="Library" description="Browse nodes and presets to use in the Builder." icon={<Layers3 size={20} aria-hidden />} />
+        <PipelineCatalog library />
       </div>
       <div className="pipeline-view" hidden={view !== "Maintenance"}>
         <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />

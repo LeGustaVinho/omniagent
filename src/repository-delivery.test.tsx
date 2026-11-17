@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -96,12 +96,18 @@ it.each([false, true])("starts delivery from saved Markdown and queues planning 
   };
   const user = userEvent.setup();
   const initial = mount();
-  const revisions = await screen.findByRole("combobox", { name: "Saved source revision" });
+  const source = within(screen.getByRole("region", { name: "Repository Markdown source" }));
+  expect(source.getByRole("heading", { name: "Markdown brief" })).toBeTruthy();
+  expect(source.getByTitle(checkout.checkoutRoot)).toBeTruthy();
+  const revisions = await source.findByRole("combobox", { name: "Saved source revision" });
   await user.selectOptions(revisions, selected.id);
-  await user.click(await screen.findByText("Read saved Markdown"));
-  expect(await screen.findByText("# Deliver the selected release")).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Start repository delivery" }));
-  await screen.findByRole("button", { name: "Queue planning" });
+  await user.click(await source.findByText("Read saved Markdown"));
+  expect(await source.findByText("# Deliver the selected release")).toBeTruthy();
+  expect(source.getByText(selected.sha256)).toBeTruthy();
+  await user.click(source.getByRole("button", { name: "Start repository delivery" }));
+  const delivery = within(await screen.findByRole("region", { name: "Delivery run" }));
+  await delivery.findByRole("button", { name: "Queue planning" });
+  await waitFor(() => expect(document.activeElement).toBe(delivery.getByRole("heading", { name: "Delivery run" })));
   initial.unmount();
 
   mount();

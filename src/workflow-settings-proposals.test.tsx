@@ -24,9 +24,9 @@ const label = { field: "template_display_label", templateId: "review-template", 
 const pending = { id: "mixed", actor, requestId: "mixed-request", proposedAt: time, allowlistRevision: 5, reviewRevision: "mixed-r1", diffs: [timeout, label], decision: { status: "pending" } };
 const declined = { ...pending, id: "denied", requestId: "denied-request", reviewRevision: "denied-r1", diffs: [timeout] };
 
-function mount(open = vi.fn()) {
+function mount(open = vi.fn(), compact = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><WorkflowSettingsProposals checkout={checkout} onOpenRun={open} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><WorkflowSettingsProposals checkout={checkout} onOpenRun={open} compact={compact} /></QueryClientProvider>);
   return client;
 }
 
@@ -57,7 +57,7 @@ it("applies the complete reviewed revision, rejects a separate request, and keep
       default: throw Error(`Unexpected command ${command}`);
     }
   });
-  mount(open);
+  mount(open, true);
   const user = userEvent.setup();
   const summary = await screen.findByText(/Awaiting review · 2 fields/);
   await user.click(summary);
@@ -67,6 +67,7 @@ it("applies the complete reviewed revision, rejects a separate request, and keep
   expect(mixed.getByText("Default template name")).toBeTruthy();
   expect(mixed.getByText("Release review")).toBeTruthy();
   expect(mixed.getByText("template-r3")).toBeTruthy();
+  await user.click(mixed.getByText("Review details"));
   expect(mixed.getByText("actual-dispatch")).toBeTruthy();
   await user.click(mixed.getByRole("button", { name: "Open originating run" }));
   expect(open).toHaveBeenCalledWith(actor.runId);
@@ -106,8 +107,11 @@ it("writes explicit checkout and template grants against the reviewed allowlist 
       default: throw Error(`Unexpected command ${command}`);
     }
   });
-  mount();
+  mount(undefined, true);
   const user = userEvent.setup();
+  const rules = screen.getByText("Automatic approval rules");
+  expect(rules.closest("details")?.hasAttribute("open")).toBe(false);
+  await user.click(rules);
   const scope = within(await screen.findByRole("region", { name: "Allowlisted fields" }));
   expect(await scope.findByText("Saved revision 7")).toBeTruthy();
   expect(await scope.findByRole("option", { name: "preview" })).toBeTruthy();

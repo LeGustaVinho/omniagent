@@ -6,7 +6,15 @@ import type { WorkflowDefinition, WorkflowGraphNode, WorkflowLayout, WorkflowWir
 import type { WorkflowPendingDecision } from "@/workflow-stage-decisions";
 import type { ExecutionComparisonStage, RecordedComparison } from "@/workflow-execution-comparison";
 
-export const workflowRunTarget = (runId: string) => `run:${runId}`;
+export type WorkflowExecutionFocus = { nodeId: string; artifactId?: string };
+
+export function workflowRunTarget(runId: string, focus?: WorkflowExecutionFocus) {
+  const target = `run:${runId}`;
+  if (!focus) return target;
+  const params = new URLSearchParams({ node: focus.nodeId });
+  if (focus.artifactId) params.set("artifact", focus.artifactId);
+  return `${target}?${params}`;
+}
 
 export type WorkflowExecutionState = "queued" | "running" | "waiting" | "skipped" | "failed" | "completed" | "interrupted" | "cancelled";
 export type WorkflowVersion = { id: string; revision: string };
@@ -26,6 +34,7 @@ export type ExecutionControl = {
   planRevision?: string | null;
   state: "completed" | "skipped" | "failed";
   selectedPorts: string[];
+  forwardedOutputs?: Record<string, { input: string; artifactId: string }>;
   reason?: string | null;
   sourceRunId?: string | null;
   dependencies?: { from: WorkflowWire["from"]; toPort: string; selected: boolean; artifactId?: string | null }[];
@@ -53,7 +62,11 @@ export type ExecutionRolePin = {
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
   launch?: {
-    origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string };
+    checkoutId?: string;
+    sourceCommit?: string;
+    origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string } |
+      { kind: "conversation"; conversationId: string; workId?: string | null } |
+      { kind: "backlog"; workId: string; parentRunId: string; nodeId: string };
     checklistItem?: { itemId: string; revision: number; checked: boolean };
   } | null;
   layout?: WorkflowLayout;
@@ -66,7 +79,39 @@ export type WorkflowExecutionSnapshot = {
   control: ExecutionControl[];
   pendingDecisions?: WorkflowPendingDecision[];
   comparisonStages?: ExecutionComparisonStage[];
+  automaticAgentWaits?: UnitExecutionWait[];
+  automaticPreparationWaits?: ExecutionWait[];
+  testPhaseWaits?: UnitExecutionWait[];
+  integratedChecksWaits?: ExecutionWait[];
+  githubWaits?: UnitExecutionWait[];
+  backlogExecutions?: BacklogExecution[];
 };
+
+type ExecutionWait = { nodeId: string; reason: string | null };
+type UnitExecutionWait = ExecutionWait & { unitId: string | null };
+type BacklogExecution = ExecutionWait & {
+  backlogArtifactId: string;
+  state: "pending" | "completed" | "failed";
+  tasks: { key: string; taskId: string; workflowRunId: string }[];
+};
+
+const recordedWaits = [
+  ["automaticAgentWaits", "Waiting for agent dispatch"],
+  ["automaticPreparationWaits", "Waiting for worktree preparation"],
+  ["testPhaseWaits", "Waiting for the registered test check"],
+  ["integratedChecksWaits", "Waiting for checks on the integrated revision"],
+  ["githubWaits", "Waiting for confirmed GitHub evidence"],
+] as const;
+
+export function needsExecutionRefresh(snapshot: WorkflowExecutionSnapshot | null | undefined) {
+  if (!snapshot) return false;
+  return recordedWaits.some(([field]) => snapshot[field]?.length) ||
+    snapshot.backlogExecutions?.some(({ state }) => state === "pending") ||
+    snapshot.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
+    snapshot.jobs.some(({ job }) => job.queuedRecovery || job.downstreamWait ||
+      ["starting", "running", "waiting_for_input"].includes(job.latestAttempt?.status ?? "") ||
+      job.queueState === "queued" && !job.latestAttempt);
+}
 
 export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: string, unit?: ExecutionUnit) {
   const unitScoped = snapshot.unitNodeIds.includes(nodeId);
@@ -77,6 +122,19 @@ export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: stri
     (receipt.unitId ?? null) === (scope?.unit.id ?? null) && (receipt.planRevision ?? null) === plan);
 }
 
+function outputInScope(snapshot: WorkflowExecutionSnapshot, output: ExecutionOutput, unit?: ExecutionUnit) {
+  return snapshot.unitNodeIds.includes(output.artifact.nodeInstanceId)
+    ? Boolean(unit && output.artifact.unitId === unit.unit.id) : output.current;
+}
+
+export function executionOutputForWire(snapshot: WorkflowExecutionSnapshot, from: WorkflowWire["from"],
+  unit?: ExecutionUnit, control = false) {
+  const forwarded = controlForNode(snapshot, from.node, unit)?.forwardedOutputs?.[from.port];
+  return snapshot.outputs.findLast((output) => outputInScope(snapshot, output, unit) &&
+    (forwarded ? output.artifact.id === forwarded.artifactId
+      : output.artifact.nodeInstanceId === from.node && (control || output.artifact.port === from.port)));
+}
+
 export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit) {
   const inputs: Inputs = {};
   for (const port of node.definition.inputs) {
@@ -85,16 +143,13 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
       if (node.definition.kind === "agent" && port.name === "comparison") continue;
       return null;
     }
-    const sourceForUnit = snapshot.unitNodeIds.includes(wire.from.node);
     const selected = controlForNode(snapshot, wire.from.node, unit);
     if (selected?.state === "skipped") return null;
     if (port.value.kind === "control" && selected) {
       if (!selected.selectedPorts.includes(wire.from.port)) return null;
       continue;
     }
-    const output = snapshot.outputs.findLast(({ artifact, current }) =>
-      artifact.nodeInstanceId === wire.from.node && (sourceForUnit ? artifact.unitId === unit?.unit.id : current) &&
-      (port.value.kind === "control" || artifact.port === wire.from.port));
+    const output = executionOutputForWire(snapshot, wire.from, unit, port.value.kind === "control");
     if (!output) return null;
     if (port.value.kind === "data") inputs[port.name] = output.artifact.id;
   }
@@ -127,15 +182,13 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
 } {
   const nodeId = node.instance.id;
   const unitScoped = snapshot.unitNodeIds.includes(nodeId);
-  const eligible = (output: ExecutionOutput) => snapshot.unitNodeIds.includes(output.artifact.nodeInstanceId)
-    ? Boolean(unit && output.artifact.unitId === unit.unit.id) : output.current;
   if (unitScoped && !unit) return { status: "waiting", reason: "Waiting for an approved logical unit." };
   const scoped = snapshot.jobs.filter((entry) => entry.nodeId === nodeId && entry.job.origin.type !== "agent" &&
     (unitScoped ? entry.unitId === unit?.unit.id : entry.job.pipeline?.planRevision == null || entry.job.pipeline.planRevision === snapshot.run.planRevision));
   const pending = (entry: ExecutionJob) => entry.job.queueState !== "cancelled" &&
     (entry.job.queuedRecovery || !entry.job.latestAttempt || ["starting", "running", "waiting_for_input"].includes(entry.job.latestAttempt.status));
   const job = (scoped.findLast(pending) ?? scoped.at(-1))?.job;
-  const completed = snapshot.outputs.some((output) => output.artifact.nodeInstanceId === nodeId && eligible(output));
+  const completed = snapshot.outputs.some((output) => output.artifact.nodeInstanceId === nodeId && outputInScope(snapshot, output, unit));
   if (job) {
     if (job.queueState !== "cancelled") {
       if (job.downstreamWait) return { status: "waiting", reason: "Waiting for recorded downstream work." };
@@ -150,7 +203,15 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
   }
   const control = controlForNode(snapshot, nodeId, unit);
   if (control) return { status: control.state };
+  const backlog = snapshot.backlogExecutions?.findLast((entry) => entry.nodeId === nodeId);
+  if (backlog?.state === "failed") return { status: "failed", reason: backlog.reason ?? "A backlog delivery failed." };
+  if (backlog?.state === "pending") return { status: "waiting", reason: backlog.reason ?? "Waiting for eligible tasks and verified merges." };
   if (completed || (job?.latestAttempt?.status === "succeeded" && node.definition.outputs.every(({ value }) => value.kind === "control"))) return { status: "completed" };
+  for (const [field, fallback] of recordedWaits) {
+    const wait = snapshot[field]?.find((entry) => entry.nodeId === nodeId &&
+      (!("unitId" in entry) || entry.unitId === null || entry.unitId === unit?.unit.id));
+    if (wait) return { status: "waiting", reason: wait.reason ?? fallback };
+  }
   const missing = snapshot.definition.wires.filter(({ from, to }) => {
     if (to.node !== nodeId) return false;
     const control = node.definition.inputs.find(({ name }) => name === to.port)?.value.kind === "control";
@@ -158,8 +219,7 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
     if (decision?.state === "skipped") return true;
     if (decision && control) return !decision.selectedPorts.includes(from.port);
     if (decision?.state === "failed") return true;
-    return !snapshot.outputs.some((output) => output.artifact.nodeInstanceId === from.node && eligible(output) &&
-      (control || output.artifact.port === from.port));
+    return !executionOutputForWire(snapshot, from, unit, control);
   });
   if (missing.length > 0) return { status: "waiting", missing };
   if (job?.latestAttempt?.status === "succeeded") return { status: "waiting", reason: "Waiting for the recorded result of this attempt." };

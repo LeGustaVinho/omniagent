@@ -1,0 +1,129 @@
+.repo-delivery {
+  container: repository-delivery / inline-size;
+  min-width: 0;
+}
+
+.repo-delivery-content {
+  display: grid;
+  gap: 1rem;
+  inline-size: min(100%, 73rem);
+  margin-inline: auto;
+  align-self: start;
+}
+
+.repo-delivery-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 1rem;
+  padding: clamp(0.9rem, 2.5cqw, 1.45rem);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--primary) 9%, var(--card)), var(--card) 64%);
+}
+
+.repo-delivery-title,
+.repo-delivery-card-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.repo-delivery-title > div,
+.repo-delivery-card-heading > div { min-width: 0; }
+.repo-delivery-title h2 { font-size: clamp(1.25rem, 3cqw, 1.75rem); font-weight: 650; line-height: 1.2; }
+.repo-delivery-title p { margin-block-start: 0.28rem; color: var(--muted-foreground); line-height: 1.5; }
+.repo-delivery-card-heading h3 { font-size: 0.95rem; font-weight: 650; line-height: 1.4; }
+.repo-delivery-card-heading p { margin-block-start: 0.2rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+
+.repo-delivery-card-icon {
+  display: grid;
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--muted);
+  color: var(--primary);
+}
+
+.repo-delivery-title .repo-delivery-card-icon { width: 2.5rem; height: 2.5rem; }
+.repo-delivery-intro > button { justify-self: start; }
+
+.repo-delivery-flow {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  padding-block-start: 0.7rem;
+  border-block-start: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 550;
+}
+
+.repo-delivery-flow li { display: flex; align-items: center; gap: 0.4rem; }
+.repo-delivery-flow svg { flex: none; color: var(--primary); }
+.repo-delivery-flow .repo-delivery-flow-arrow { margin-inline-end: 0.25rem; color: var(--muted-foreground); }
+
+.repo-delivery-setup {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(13rem, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.repo-delivery-card {
+  min-width: 0;
+  padding: clamp(0.85rem, 2cqw, 1.1rem);
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--card);
+}
+
+.repo-delivery-card .repo-delivery-card-heading { margin-block-end: 0.25rem; }
+.repo-delivery-card label { font-weight: 550; }
+.repo-delivery-card select { width: 100%; min-height: 2.3rem; font-weight: 400; text-overflow: ellipsis; }
+.repo-delivery-card code { overflow-wrap: anywhere; }
+.repo-delivery-worktree { display: flex; align-items: center; gap: 0.35rem; font-family: var(--font-mono); font-size: 0.75rem; }
+.repo-delivery-card-heading > div { min-width: 0; }
+.repo-delivery-worktree svg { flex: none; }
+.repo-delivery-hint { color: var(--muted-foreground); font-size: 0.75rem; line-height: 1.45; }
+
+.repo-delivery-source { grid-template-columns: minmax(0, 1fr) auto; column-gap: 0.5rem; }
+.repo-delivery-source > :not(label, .repo-delivery-file-picker) { grid-column: 1 / -1; }
+.repo-delivery-file-picker { min-height: 2.3rem; justify-self: start; align-self: end; }
+.repo-delivery-document { background: var(--background); }
+.repo-delivery-document > summary { display: flex; align-items: center; gap: 0.35rem; min-height: 2rem; }
+.repo-delivery-document > summary::-webkit-details-marker { display: none; }
+.repo-delivery-document > summary svg { flex: none; color: var(--muted-foreground); }
+.repo-delivery-document[open] > summary svg { transform: rotate(90deg); }
+.repo-delivery-document pre { white-space: pre-wrap; }
+
+.repo-delivery-source-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.8rem;
+  padding-block-start: 0.7rem;
+  border-block-start: 1px solid var(--border);
+}
+
+.repo-delivery-run { display: grid; gap: 0.9rem; }
+.repo-delivery-run h3:focus-visible { border-radius: 0.2rem; outline: 2px solid var(--ring); outline-offset: 2px; }
+.repo-delivery-error { padding: 0.65rem; border: 1px solid var(--danger); border-radius: 0.45rem; overflow-wrap: anywhere; }
+
+@container repository-delivery (inline-size < 44rem) {
+  .repo-delivery-setup { grid-template-columns: minmax(0, 1fr); }
+}
+
+@container repository-delivery (inline-size < 36rem) {
+  .repo-delivery-intro { grid-template-columns: minmax(0, 1fr); gap: 0.7rem; }
+}
+
+@container repository-delivery (inline-size < 27rem) {
+  .repo-delivery-source { grid-template-columns: minmax(0, 1fr); }
+  .repo-delivery-flow .repo-delivery-flow-arrow { display: none; }
+}

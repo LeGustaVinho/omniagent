@@ -11,7 +11,8 @@ import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowDiffStage } from "@/workflow-execution-diff";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
-import type { ExecutionJob, ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
+import { needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
+  type ExecutionPinnedNode, type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -52,6 +53,62 @@ function job(nodeId: string, attempts: ExecutionJob["attempts"], kind: Job["kind
 }
 const output = (nodeInstanceId: string, id: string, port: string, kind: string, evidence: unknown, unitId: string | null = null): ExecutionOutput => ({
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
+});
+
+it("shows recorded backlog progress and links between the exact parent stage and task run", async () => {
+  const backlog = node("delivery", "Run backlog");
+  const sourceCommit = "b".repeat(40);
+  const childId = "pinned-child-run";
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, projectId, version, planRevision: null },
+    definition: { version, name: "Backlog workflow", nodes: [backlog], wires: [] },
+    units: [], unitNodeIds: [], jobs: [], outputs: [], control: [],
+    backlogExecutions: [{ nodeId: backlog.instance.id, backlogArtifactId: "backlog-revision", reason: "Waiting for a verified merge.",
+      state: "pending", tasks: [{ key: "DOC-2", taskId: "task-two", workflowRunId: childId }] }],
+  };
+  const child: WorkflowExecutionSnapshot = { ...snapshot, run: { ...snapshot.run, id: childId }, backlogExecutions: [],
+    launch: { sourceCommit, origin: { kind: "backlog", parentRunId: runId, nodeId: backlog.instance.id, workId: "task-two" } } };
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
+    if (command === "list_repository_deliveries") return [snapshot.run, child.run];
+    if (command === "inspect_workflow_execution") return (input as { runId: string }).runId === childId ? child : snapshot;
+    throw new Error(command);
+  });
+  const openWorkspace = vi.fn();
+  function Harness() {
+    const [target, setTarget] = useState(`run:${runId}`);
+    return <PipelinesWorkspace checkout={exampleCheckout} target={target} simulation={null} startSimulation={vi.fn()}
+      openWorkspace={(workspace, next) => { openWorkspace(workspace, next); setTarget(next ?? ""); }}
+      openActivity={vi.fn()} openChanges={vi.fn()} />;
+  }
+  render(<QueryClientProvider client={new QueryClient()}><Harness /></QueryClientProvider>);
+  expect(await screen.findByText("Waiting for a verified merge.")).toBeTruthy();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Open run for DOC-2" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", `run:${childId}`);
+  expect(await screen.findByTitle(sourceCommit)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Open parent backlog" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", `run:${runId}?node=delivery`);
+  expect(needsExecutionRefresh(snapshot)).toBeTruthy();
+  expect(needsExecutionRefresh(child)).toBeFalsy();
+});
+
+it("keeps wait text scoped to its unit and resolves the original artifact forwarded through Repeat until", () => {
+  const repeat = node("repeat", "Repeat until", [], [port("approved", "text")]);
+  const next = node("next", "Verify", [port("result", "text")]);
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, projectId, version, planRevision: logical.planRevision },
+    definition: { version, name: "Accepted iteration", nodes: [repeat, next], wires: [
+      { from: { node: repeat.instance.id, port: "approved" }, to: { node: next.instance.id, port: "result" } },
+    ] },
+    units: [logical], unitNodeIds: [next.instance.id], jobs: [],
+    outputs: [output("review", "first-accepted", "answer", "text", "Approved")],
+    control: [{ nodeId: repeat.instance.id, planRevision: logical.planRevision, state: "completed", selectedPorts: ["completed"],
+      forwardedOutputs: { approved: { input: "review", artifactId: "first-accepted" } } }],
+    testPhaseWaits: [{ nodeId: next.instance.id, unitId: "other-unit", reason: "Another unit's check" },
+      { nodeId: next.instance.id, unitId: logical.unit.id, reason: null }],
+  };
+  expect(wiredExecutionInputs(snapshot, next, logical)).toEqual({ result: "first-accepted" });
+  expect(presentation(snapshot, next, logical)).toEqual({ status: "waiting", reason: "Waiting for the registered test check" });
 });
 
 it("opens the real Builder from the Runs empty state", async () => {

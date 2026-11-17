@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { ArrowUpRight, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -18,8 +19,8 @@ import { WorkflowExecutionComparison } from "@/workflow-execution-comparison";
 import { comparisonReviewStages, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import {
-  comparisonForNode, controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
-  type ExecutionUnit, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
+  comparisonForNode, controlForNode, needsExecutionRefresh, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
+  type ExecutionUnit, type WorkflowExecutionFocus, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
@@ -50,17 +51,28 @@ function PinnedRole({ pin }: { pin: ExecutionRolePin }) {
 
 const unitKey = ({ planRevision, unit }: ExecutionUnit) => `${planRevision}:${unit.id}`;
 
-function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHandoff }: {
+function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHandoff, runFocus }: {
   snapshot: WorkflowExecutionSnapshot;
   navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
   runPicker: ReactNode;
   comparisonHandoff?: ComparisonHandoff;
+  runFocus?: WorkflowExecutionFocus;
 }) {
   const { definition, run, launch } = snapshot;
+  const origin = launch?.origin;
+  const workId = origin && origin.kind !== "editor" ? origin.workId : undefined;
   const review = comparisonHandoff && comparisonHandoff.planRevision === run.planRevision &&
     comparisonReviewStages(snapshot, comparisonHandoff.sourceCheckoutId).some(({ instance }) => instance.id === comparisonHandoff.nodeId)
     ? comparisonHandoff : undefined;
-  const [selected, setSelected] = useState(review?.nodeId ?? definition.nodes[0]?.instance.id ?? "");
+  const focusedNode = definition.nodes.find(({ instance }) => instance.id === runFocus?.nodeId);
+  const focusedOutput = focusedNode && runFocus?.artifactId ? snapshot.outputs.find(({ artifact }) =>
+    artifact.id === runFocus.artifactId && artifact.nodeInstanceId === focusedNode.instance.id)?.artifact : undefined;
+  const [selected, setSelected] = useState(focusedNode?.instance.id ?? review?.nodeId ?? definition.nodes[0]?.instance.id ?? "");
+  const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
+  function viewStage(id: string) {
+    setSelected(id);
+    revealInspector((request) => request + 1);
+  }
   const [selectedUnit, setSelectedUnit] = useState<string>();
   const [subflowPath, setSubflowPath] = useState("");
   const [theme, setTheme] = useState(readTheme);
@@ -69,7 +81,9 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme"] });
     return () => observer.disconnect();
   }, []);
-  const unit = snapshot.units.find((entry) => unitKey(entry) === selectedUnit) ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
+  const unit = snapshot.units.find((entry) => unitKey(entry) === selectedUnit)
+    ?? snapshot.units.find(({ unit }) => unit.id === focusedOutput?.unitId)
+    ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
   const subflow = definition.subflows?.find(({ path }) => path === subflowPath);
   const graph = useMemo(() => ({
     name: subflow?.name ?? definition.name,
@@ -132,8 +146,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
         </label>}
       </div>
       <div className="pipeline-actions">
-        {waiting && <Button variant="outline" type="button" onClick={() => setSelected(waiting.node.instance.id)}>View waiting stage</Button>}
-        {failed && <Button variant="outline" type="button" onClick={() => setSelected(failed.node.instance.id)}>View failed stage</Button>}
+        {waiting && <Button variant="outline" type="button" onClick={() => viewStage(waiting.node.instance.id)}>View waiting stage</Button>}
+        {failed && <Button variant="outline" type="button" onClick={() => viewStage(failed.node.instance.id)}>View failed stage</Button>}
         <Button variant="outline" type="button" onClick={() => navigation.openWorkspace("pipelines", run.id)}>Open delivery controls</Button>
       </div>
     </PipelineToolbar>
@@ -143,7 +157,16 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     <header className="workflow-run-summary">
       <div><h2>{definition.name}</h2>
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
-        {launch && launch.origin.kind !== "editor" && <p>Agile work <code className="break-all">{launch.origin.workId}</code></p>}
+        {origin?.kind === "conversation" && (!launch?.checkoutId || launch.checkoutId === navigation.checkout.checkoutId
+          ? <Button type="button" variant="ghost"
+            onClick={() => navigation.openWorkspace("conversations", origin.conversationId)}>Open source conversation</Button>
+          : <p>Conversation turn from another worktree</p>)}
+        {origin?.kind === "backlog" && <Button type="button" variant="ghost" className="gap-2"
+          onClick={() => navigation.openWorkspace("pipelines", workflowRunTarget(origin.parentRunId, { nodeId: origin.nodeId }))}>
+          <Workflow size={14} aria-hidden /> Open parent backlog <ArrowUpRight size={14} aria-hidden />
+        </Button>}
+        {workId && <p>Agile work <code className="break-all">{workId}</code></p>}
+        {launch?.sourceCommit && <p>Source commit <code title={launch.sourceCommit}>{launch.sourceCommit.slice(0, 12)}</code></p>}
         {launch?.checklistItem && <p>Checklist item <code className="break-all">{launch.checklistItem.itemId}</code>
           {" · "}Revision {launch.checklistItem.revision} · {launch.checklistItem.checked ? "Checked" : "Reopened"}</p>}
       </div>
@@ -155,7 +178,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
         </li>)}</ul>
       </details>}
     </header>
-    <PipelineCanvasFrame className="workflow-run-frame" canvasLabel="Workflow execution graph" inspectorLabel="Execution node evidence"
+    <PipelineCanvasFrame className="workflow-run-frame" canvasLabel="Workflow execution graph" inspectorLabel="Execution node evidence" inspectorRequest={inspectorRequest}
       canvas={<PipelineGraphCanvas<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
         nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
         onNodeClick={(_, node) => setSelected(node.id)} onNodesChange={(changes) => {
@@ -196,22 +219,31 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
           <WorkflowExecutionHost snapshot={snapshot} node={active.node} />
           <WorkflowExecutionUnitChecks key={`checks:${active.node.instance.id}`} snapshot={snapshot} node={active.node} unit={unit} />
           <WorkflowDiffStage snapshot={snapshot} node={active.node} />
+          {snapshot.backlogExecutions?.filter(({ nodeId, tasks }) => nodeId === active.node.instance.id && tasks.length > 0)
+            .map(({ backlogArtifactId, tasks }) => <section key={backlogArtifactId} className="workflow-record-card pipeline-stack" aria-label="Backlog child workflows">
+              <h3>Task runs</h3>
+              <ul className="pipeline-stack">{tasks.map(({ key, workflowRunId }) => <li key={workflowRunId}>
+                <Button type="button" variant="outline" className="gap-2"
+                  onClick={() => navigation.openWorkspace("pipelines", workflowRunTarget(workflowRunId))}>
+                  <Workflow size={14} aria-hidden /> Open run for {key} <ArrowUpRight size={14} aria-hidden />
+                </Button>
+              </li>)}</ul>
+            </section>)}
           <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit ? unitKey(unit) : ""}`} node={active.node} snapshot={snapshot}
-            unitId={unit?.unit.id} control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
+            unitId={unit?.unit.id} focusedArtifactId={focusedOutput?.id}
+            control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
         </div>}
       </>} />
   </section>;
 }
 
-export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string; comparisonHandoff?: ComparisonHandoff }) {
-  const { checkout: { projectId }, runId, openWorkspace } = props;
+export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string; runFocus?: WorkflowExecutionFocus; comparisonHandoff?: ComparisonHandoff }) {
+  const { checkout: { projectId }, runId, runFocus, openWorkspace } = props;
   const runs = useQuery({ queryKey: ["repository-delivery", projectId, "list"], queryFn: () => invoke<WorkflowRun[]>("list_repository_deliveries", { projectId }) });
   const execution = useQuery({
     queryKey: ["repository-delivery", projectId, "execution", runId], queryFn: () => invoke<WorkflowExecutionSnapshot | null>("inspect_workflow_execution", { projectId, runId }),
     enabled: Boolean(runId),
-    refetchInterval: ({ state }) => state.data?.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
-      state.data?.jobs.some(({ job }) => job.queuedRecovery || job.downstreamWait ||
-        ["starting", "running", "waiting_for_input"].includes(job.latestAttempt?.status ?? "") || job.queueState === "queued" && !job.latestAttempt) ? 900 : false,
+    refetchInterval: ({ state }) => needsExecutionRefresh(state.data) ? 900 : false,
   });
   const loadError = execution.error ?? runs.error;
   const runPicker = <label className="workflow-execution-field">Saved workflow run
@@ -223,8 +255,8 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
   </label>;
   return <section className="pipeline-view" aria-label="Workflow runs">
     {loadError && <p className="pipeline-banner" role="alert">{String(loadError)}</p>}
-    {execution.data ? <WorkflowExecutionCanvas key={execution.data.run.id}
-      snapshot={execution.data} navigation={props} runPicker={runPicker} comparisonHandoff={props.comparisonHandoff} /> : <>
+    {execution.data ? <WorkflowExecutionCanvas key={workflowRunTarget(execution.data.run.id, runFocus)}
+      snapshot={execution.data} navigation={props} runPicker={runPicker} runFocus={runFocus} comparisonHandoff={props.comparisonHandoff} /> : <>
       <PipelineToolbar><div className="workflow-run-selectors">{runPicker}</div></PipelineToolbar>
       {!runId && runs.data?.length === 0 ? (
         <PipelineRunsEmpty onOpenBuilder={() => openWorkspace("pipelines", "drafts")} />

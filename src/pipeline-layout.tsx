@@ -1,10 +1,13 @@
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Background, Controls, ReactFlow, type Edge, type Node, type NodeChange, type ReactFlowProps } from "@xyflow/react";
-import { ArrowRight, CirclePlay, Clock3, FileCode2, Layers3, PanelRight, ShieldCheck, Workflow } from "lucide-react";
+import { ArrowRight, CirclePlay, FileCode2, FileDiff, Layers3, PackageCheck, PanelRight, Puzzle, Workflow, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { ResizablePanel } from "@/panel-resize";
+import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
 import "@xyflow/react/dist/style.css";
 import "./pipelines-workspace.css";
+import "./pipeline-maintenance.css";
 
 type PipelineView<T extends string> = { id: T; label: string };
 
@@ -60,17 +63,27 @@ export function PipelineTemplateList({ entries, onOpen }: {
 export function PipelineMaintenanceLayout({ proposals, releases, inventory }: {
   proposals: ReactNode; releases: ReactNode; inventory: ReactNode;
 }) {
-  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow maintenance">
-    <PipelineSectionHeading title="Maintenance" description="Review proposals and candidate build evidence."
-      icon={<ShieldCheck size={20} aria-hidden />} />
-    <div className="pipeline-two-columns">
-      <section className="pipeline-box pipeline-stack">{proposals}</section>
-      <section className="pipeline-box pipeline-stack">{releases}</section>
+  const sections = [
+    { id: "proposals", name: "Proposed changes", icon: FileDiff,
+      detail: "Review workflow requests to change project settings or template labels.", body: proposals },
+    { id: "package", name: "Candidate package", icon: PackageCheck,
+      detail: "Compare the running build with packages accepted by this project.", body: releases },
+    { id: "plugins", name: "CLI plugins", icon: Puzzle,
+      detail: "Check or manage plugins in the selected CLI’s user profile.", body: inventory },
+  ];
+  const sectionId = useId();
+  return <section className="pipeline-view-content pipeline-maintenance" aria-label="Workflow maintenance">
+    <header className="pipeline-maintenance-heading"><h2>Maintenance</h2></header>
+    <div className="pipeline-maintenance-grid">
+      {sections.map(({ id, name, icon: Icon, detail, body }) => <section key={id} className="pipeline-maintenance-card"
+        data-area={id} aria-labelledby={`${sectionId}-${id}`}>
+        <header className="pipeline-maintenance-card-heading">
+          <span className="pipeline-maintenance-icon"><Icon size={17} aria-hidden /></span>
+          <div><h3 id={`${sectionId}-${id}`}>{name}</h3><p>{detail}</p></div>
+        </header>
+        <div className="pipeline-maintenance-card-body">{body}</div>
+      </section>)}
     </div>
-    <section className="pipeline-box pipeline-stack">
-      <div className="pipeline-card-heading"><h3>Plugin inventory</h3><Clock3 size={16} aria-hidden /></div>
-      {inventory}
-    </section>
   </section>;
 }
 
@@ -132,27 +145,63 @@ export function PipelineInspectorHeader({ detail, title, children }: { detail: s
   </header>;
 }
 
-export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, palette, paletteLabel, className }: {
+export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, palette, paletteLabel, className, inspectorRequest, onClosePalette }: {
   canvas: ReactNode; canvasLabel: string; inspector: ReactNode; inspectorLabel: string;
   inspectorClassName?: string; palette?: ReactNode; paletteLabel?: string; className?: string;
+  inspectorRequest?: number;
+  onClosePalette?: () => void;
 }) {
   const inspectorId = useId();
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  return <div className={className ? `pipeline-editor ${className}` : "pipeline-editor"}>
-    {palette != null && <ResizablePanel as="aside" className="pipeline-palette" aria-label={paletteLabel}
-      edge={["right", "bottom"]} resizeKey="pipeline-palette" resizeLabel={paletteLabel ?? "node palette"}>
+  const workspace = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const inspectorOrigin = useRef<HTMLElement | null>(null);
+  const { width } = useWorkspaceSize(workspace);
+  const drawer = width < 792;
+  const paletteDrawer = width < 1032;
+  const [inspectorPreference, setInspectorPreference] = useState(false);
+  const [dismissedRequest, setDismissedRequest] = useState(0);
+  const inspectorOpen = inspectorPreference || Boolean(inspectorRequest && inspectorRequest !== dismissedRequest);
+  const inspectorBody = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!inspectorRequest || inspectorRequest === dismissedRequest) return;
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && !focused.closest(".pipeline-inspector")) inspectorOrigin.current = focused;
+    const frame = requestAnimationFrame(() => inspectorBody.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [dismissedRequest, inspectorRequest]);
+  function closeInspector() {
+    setDismissedRequest(inspectorRequest ?? 0);
+    setInspectorPreference(false);
+    requestAnimationFrame(() => (inspectorOrigin.current ?? toggle.current)?.focus({ preventScroll: true }));
+  }
+  return <div ref={workspace} className={className ? `pipeline-editor ${className}` : "pipeline-editor"} data-palette={Boolean(palette) && !paletteDrawer}>
+    {palette != null && <WorkbenchPanel as="aside" open drawer={paletteDrawer} label={paletteLabel ?? "Node catalog"}
+      drawerClass="pipeline-palette-drawer" className="pipeline-palette" aria-label={paletteLabel}
+      onClose={() => onClosePalette?.()} edge={["right", "bottom"]} resizeKey="pipeline-palette" resizeLabel={paletteLabel ?? "node palette"}>
+      {paletteDrawer && <div className="work-panel-header"><span>{paletteLabel ?? "Node catalog"}</span>
+        <Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close node catalog" onClick={onClosePalette}><X size={16} aria-hidden /></Button>
+      </div>}
       <div className="pipeline-palette-scroll">{palette}</div>
-    </ResizablePanel>}
+    </WorkbenchPanel>}
     <ResizablePanel className="pipeline-canvas" role="region" aria-label={canvasLabel} edge="bottom"
       resizeKey={canvasLabel} resizeLabel={canvasLabel}>{canvas}</ResizablePanel>
-    <Button type="button" variant="ghost" className="pipeline-compact-inspector"
-      aria-expanded={inspectorOpen} aria-controls={inspectorId} onClick={() => setInspectorOpen(!inspectorOpen)}>
+    {drawer && <Button type="button" ref={toggle} variant="ghost" className="pipeline-compact-inspector"
+      aria-expanded={inspectorOpen} aria-controls={inspectorId} onClick={() => {
+        inspectorOrigin.current = toggle.current;
+        if (inspectorOpen) closeInspector();
+        else setInspectorPreference(true);
+      }}>
       <PanelRight size={16} /> {inspectorOpen ? "Hide inspector" : "Show inspector"}
-    </Button>
-    <ResizablePanel as="aside" id={inspectorId} data-compact-open={inspectorOpen || undefined}
+    </Button>}
+    <WorkbenchPanel as="aside" id={inspectorId} drawer={drawer} open={!drawer || (inspectorOpen && !(paletteDrawer && palette))}
+      label={inspectorLabel} drawerClass="pipeline-inspector-drawer" onClose={closeInspector}
       className={inspectorClassName ? `pipeline-inspector ${inspectorClassName}` : "pipeline-inspector"} aria-label={inspectorLabel}
-      edge={["left", "bottom"]} resizeKey={inspectorLabel} resizeLabel={inspectorLabel}>
-      <div className="pipeline-inspector-scroll">{inspector}</div>
-    </ResizablePanel>
+      edge="left" resizeKey={inspectorLabel} resizeLabel={inspectorLabel}>
+      {drawer && <div className="work-panel-header"><span>{inspectorLabel}</span>
+        <ControlTooltip label="Close inspector"><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close inspector"
+          onClick={closeInspector}><X size={16} aria-hidden /></Button></ControlTooltip>
+      </div>}
+      <div className="pipeline-inspector-scroll" tabIndex={-1} ref={inspectorBody}>{inspector}</div>
+    </WorkbenchPanel>
   </div>;
 }

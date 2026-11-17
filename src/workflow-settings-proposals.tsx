@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ChevronRight, RefreshCw, ShieldCheck } from "lucide-react";
 import { useId, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
@@ -71,8 +72,20 @@ function ProposalDiff({ diff, templateName, applied }: { diff: Diff; templateNam
   </li>;
 }
 
-function ProposalReview({ projectId, templates, checkouts, onOpenRun }: {
+function ProposalEvidence({ proposal, checkout }: { proposal: Proposal; checkout: string }) {
+  return <dl className="space-y-1 break-all text-xs text-muted-foreground">
+    <div><dt className="inline">Checkout </dt><dd className="inline">{checkout}</dd></div>
+    <div><dt className="inline">Review revision </dt><dd className="inline"><code>{proposal.reviewRevision}</code></dd></div>
+    <div><dt className="inline">Allowlist at proposal </dt><dd className="inline">Revision {proposal.allowlistRevision}</dd></div>
+    <div><dt className="inline">Originating run </dt><dd className="inline"><code>{proposal.actor.runId}</code></dd></div>
+    <div><dt className="inline">Turn </dt><dd className="inline"><code>{proposal.actor.turnId}</code></dd></div>
+    <div><dt className="inline">Dispatch </dt><dd className="inline"><code>{proposal.actor.dispatchId}</code></dd></div>
+  </dl>;
+}
+
+function ProposalReview({ projectId, templates, checkouts, onOpenRun, compact }: {
   projectId: string; templates: ReadonlyMap<string, string>; checkouts: ReadonlyMap<string, string>; onOpenRun: (runId: string) => void;
+  compact?: boolean;
 }) {
   const client = useQueryClient();
   const title = useId();
@@ -95,13 +108,18 @@ function ProposalReview({ projectId, templates, checkouts, onOpenRun }: {
   });
   return <section className="space-y-3" data-setting="settings-proposals" aria-labelledby={title}>
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <h3 id={title} className="font-semibold">Settings and template proposals</h3>
-      <Button type="button" variant="outline" disabled={proposals.isFetching} onClick={() => void proposals.refetch()}>Refresh proposals</Button>
+      <h3 id={title} className={compact ? "sr-only" : "font-semibold"}>Settings and template proposals</h3>
+      {compact && proposals.data?.length === 0 && <p className="pipeline-maintenance-subtle" role="status">
+        {offset === 0 ? "No proposals for this project." : "No more proposals."}
+      </p>}
+      <Button type="button" variant="outline" disabled={proposals.isFetching} onClick={() => void proposals.refetch()}>
+        {compact && <RefreshCw size={15} aria-hidden />} Refresh proposals
+      </Button>
     </div>
     {proposals.isPending && <p role="status">Loading proposals…</p>}
     {proposals.error && <p role="alert" className="settings-result settings-result-error">{String(proposals.error)}</p>}
-    {proposals.data?.length === 0 && <p className="text-sm text-muted-foreground">{offset === 0 ? "No requests for this project." : "No more proposals."}</p>}
-    <ul className="space-y-2" aria-label="Proposal history">
+    {!compact && proposals.data?.length === 0 && <p className="text-sm text-muted-foreground">{offset === 0 ? "No requests for this project." : "No more proposals."}</p>}
+    {Boolean(proposals.data?.length) && <ul className="space-y-2" aria-label="Proposal history">
       {proposals.data?.map((proposal) => <li key={proposal.id}>
         <details className="rounded-md border border-border p-3">
           <summary className="cursor-pointer text-sm font-medium">
@@ -116,21 +134,17 @@ function ProposalReview({ projectId, templates, checkouts, onOpenRun }: {
                 return <ProposalDiff key={`${diff.field}:${templateId ?? ""}`} diff={diff} templateName={templateId ? templates.get(templateId) : undefined} applied={applied} />;
               })}
             </ul>
-            <dl className="space-y-1 break-all text-xs text-muted-foreground">
-              <div><dt className="inline">Checkout </dt><dd className="inline">{checkouts.get(proposal.actor.checkoutId) ?? proposal.actor.checkoutId}</dd></div>
-              <div><dt className="inline">Review revision </dt><dd className="inline"><code>{proposal.reviewRevision}</code></dd></div>
-              <div><dt className="inline">Allowlist at proposal </dt><dd className="inline">Revision {proposal.allowlistRevision}</dd></div>
-              <div><dt className="inline">Originating run </dt><dd className="inline"><code>{proposal.actor.runId}</code></dd></div>
-              <div><dt className="inline">Turn </dt><dd className="inline"><code>{proposal.actor.turnId}</code></dd></div>
-              <div><dt className="inline">Dispatch </dt><dd className="inline"><code>{proposal.actor.dispatchId}</code></dd></div>
-            </dl>
             <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" onClick={() => onOpenRun(proposal.actor.runId)}>Open originating run</Button>
               {proposal.decision.status === "pending" && <>
                 <Button type="button" disabled={review.isPending} onClick={() => review.mutate({ proposalId: proposal.id, expectedReviewRevision: proposal.reviewRevision, accept: true })}>Apply all changes</Button>
                 <Button type="button" variant="outline" disabled={review.isPending} onClick={() => review.mutate({ proposalId: proposal.id, expectedReviewRevision: proposal.reviewRevision, accept: false })}>Reject proposal</Button>
               </>}
+              <Button type="button" variant="outline" onClick={() => onOpenRun(proposal.actor.runId)}>Open originating run</Button>
             </div>
+            {compact ? <details>
+              <summary className="cursor-pointer text-sm font-medium">Review details</summary>
+              <ProposalEvidence proposal={proposal} checkout={checkouts.get(proposal.actor.checkoutId) ?? proposal.actor.checkoutId} />
+            </details> : <ProposalEvidence proposal={proposal} checkout={checkouts.get(proposal.actor.checkoutId) ?? proposal.actor.checkoutId} />}
             {review.error && review.variables?.proposalId === proposal.id && <p role="alert" className="settings-result settings-result-error">{String(review.error)}</p>}
             {proposal.decision.status !== "pending" && <p className="text-sm text-muted-foreground">
               {decisionNames[proposal.decision.status]} by {proposal.decision.source === "user_allowlist" ? "user allowlist" : "desktop user"} · Allowlist revision {proposal.decision.allowlistRevision} · <DateStamp seconds={proposal.decision.at} />
@@ -138,7 +152,7 @@ function ProposalReview({ projectId, templates, checkouts, onOpenRun }: {
           </div>
         </details>
       </li>)}
-    </ul>
+    </ul>}
     {(offset > 0 || proposals.data?.length === pageSize) && <nav aria-label="Proposal pages" className="flex gap-2">
       <Button type="button" variant="outline" disabled={offset === 0} onClick={() => setOffset(offset - pageSize)}>Newer proposals</Button>
       <Button type="button" variant="outline" disabled={proposals.data?.length !== pageSize || offset + pageSize > 16_384} onClick={() => setOffset(offset + pageSize)}>Older proposals</Button>
@@ -146,8 +160,9 @@ function ProposalReview({ projectId, templates, checkouts, onOpenRun }: {
   </section>;
 }
 
-function AllowlistEditor({ checkout, checkouts, templates }: {
+function AllowlistEditor({ checkout, checkouts, templates, compact }: {
   checkout: ProjectCheckout; checkouts: readonly ProjectCheckout[]; templates: readonly Template[];
+  compact?: boolean;
 }) {
   const { projectId } = checkout;
   const client = useQueryClient();
@@ -172,8 +187,8 @@ function AllowlistEditor({ checkout, checkouts, templates }: {
   }
   const checkoutScope = (id: string | null) => id ? checkouts.find((item) => item.checkoutId === id)?.checkoutRoot ?? id : "All project checkouts";
   const templateScope = (id: string | null) => id ? templates.find((item) => item.templateId === id)?.name ?? id : "All project templates";
-  return <section className="space-y-3 border-t border-border pt-4" data-setting="allowed-settings-fields" aria-labelledby={title}>
-    <h3 id={title} className="font-semibold">Allowlisted fields</h3>
+  const editor = <section className={compact ? "space-y-3" : "space-y-3 border-t border-border pt-4"} data-setting="allowed-settings-fields" aria-labelledby={title}>
+    <h3 id={title} className={compact ? "sr-only" : "font-semibold"}>Allowlisted fields</h3>
     <p className="text-sm text-muted-foreground">A proposal applies automatically when every changed field matches a project grant.</p>
     {allowlist.isPending && <p role="status">Loading allowlist…</p>}
     {allowlist.error && <p role="alert" className="settings-result settings-result-error">{String(allowlist.error)} <button type="button" onClick={() => void allowlist.refetch()}>Retry</button></p>}
@@ -218,18 +233,22 @@ function AllowlistEditor({ checkout, checkouts, templates }: {
       {save.isSuccess && <p role="status" className="settings-result settings-result-success">Allowlist saved.</p>}
     </>}
   </section>;
+  return compact ? <details className="pipeline-maintenance-rules">
+    <summary className="pipeline-maintenance-disclosure"><ShieldCheck size={15} aria-hidden /> Automatic approval rules <ChevronRight size={14} aria-hidden /></summary>
+    {editor}
+  </details> : editor;
 }
 
-export function WorkflowSettingsProposals({ checkout, onOpenRun }: { checkout: ProjectCheckout; onOpenRun: (runId: string) => void }) {
+export function WorkflowSettingsProposals({ checkout, onOpenRun, compact }: { checkout: ProjectCheckout; onOpenRun: (runId: string) => void; compact?: boolean }) {
   const { projectId } = checkout;
   const checkouts = useQuery({ queryKey: ["registered-checkouts"], queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts") });
   const templates = useQuery({ queryKey: ["conversation-templates", projectId], queryFn: () => invoke<Template[]>("list_conversation_templates", { projectId }) });
   const scopedCheckouts = (checkouts.data ?? []).filter((item) => item.projectId === projectId);
   if (!scopedCheckouts.some((item) => item.checkoutId === checkout.checkoutId)) scopedCheckouts.push(checkout);
-  return <div className="space-y-5">
+  return <div className={compact ? "grid gap-3" : "space-y-5"}>
     <ProposalReview projectId={projectId} checkouts={new Map(scopedCheckouts.map((item) => [item.checkoutId, item.checkoutRoot]))}
-      templates={new Map((templates.data ?? []).map((item) => [item.templateId, item.name]))} onOpenRun={onOpenRun} />
-    <AllowlistEditor key={checkout.checkoutId} checkout={checkout} checkouts={scopedCheckouts} templates={templates.data ?? []} />
+      templates={new Map((templates.data ?? []).map((item) => [item.templateId, item.name]))} onOpenRun={onOpenRun} compact={compact} />
+    <AllowlistEditor key={checkout.checkoutId} checkout={checkout} checkouts={scopedCheckouts} templates={templates.data ?? []} compact={compact} />
     {(checkouts.error || templates.error) && <p role="alert" className="settings-result settings-result-error">{String(checkouts.error || templates.error)}</p>}
   </div>;
 }

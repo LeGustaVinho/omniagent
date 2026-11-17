@@ -240,7 +240,6 @@ export function PipelineMaintenance({ simulation, startSimulation, openWorkspace
     <p className="pipeline-meta">Automatic changes are limited to fields approved for this project. Running workflows retain their pinned revisions.</p>
     {proposal === "pending" ? <div className="pipeline-actions"><Button onClick={() => setProposal("accepted")}>Accept proposal</Button><Button variant="outline" onClick={() => setProposal("rejected")}>Decline</Button></div> : <p role="status" className="pipeline-note"><Check size={15} /> Decision recorded for this scenario.</p>}
   </>} releases={<>
-    <h3>Candidate package</h3>
     <dl className="pipeline-data"><dt>Running</dt><dd>0.1.0 · 41ac02e</dd><dt>Candidate</dt><dd>0.2.0 · 48ecf27</dd><dt>Digest</dt><dd className="font-mono">sha256:a48ecf27…5f99be3</dd><dt>Evidence</dt><dd>Build, checks and approved change</dd></dl>
     <div className="pipeline-actions"><Button variant="outline" onClick={() => openWorkspace("tasks", "release")}>Open task</Button><Button variant="outline" onClick={() => openChanges("saved")}>Open diff evidence</Button><Button variant="outline" onClick={() => startSimulation("windows")}>Open update simulation</Button></div>
   </>} inventory={<>

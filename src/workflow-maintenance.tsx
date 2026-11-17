@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ChevronRight, FileCheck2, ListChecks, RefreshCw, Settings2 } from "lucide-react";
 import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { Provider } from "@/bindings/Provider";
@@ -88,11 +89,13 @@ function BuildDescription({ build }: { build: RunningBuild }) {
   </div>;
 }
 
-export function WorkflowMaintenanceSettings({ checkout }: { checkout: ProjectCheckout }) {
+export function WorkflowMaintenanceSettings({ checkout, compact = false }: { checkout: ProjectCheckout; compact?: boolean }) {
   const [open, setOpen] = useState(false);
-  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Maintenance workflow</summary>
-    {open && <MaintenanceSettingsForm checkout={checkout} />}
+  return <details className={compact ? "pipeline-maintenance-workflow" : "pipeline-evidence"} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary className={compact ? "pipeline-maintenance-disclosure" : undefined}>
+      {compact ? <><Settings2 size={15} aria-hidden /> Configure maintenance workflow <ChevronRight size={14} aria-hidden /></> : "Maintenance workflow"}
+    </summary>
+    {open && <MaintenanceSettingsForm checkout={checkout} showRunningBuild={!compact} />}
   </details>;
 }
 
@@ -103,13 +106,24 @@ export function WorkflowMaintenanceCandidates({ checkout, openWorkspace }: Pick<
   const handoffs = maintenance.data?.handoffs ?? [];
   const handoff = handoffs.find(({ id }) => id === handoffId) ?? handoffs[0];
   const settings = maintenance.data?.settings;
+  const build = maintenance.data?.runningBuild;
   const activation = useActivateMaintenanceFixture(projectId);
   return <>
-    <h3>Candidate package</h3>
     {maintenance.isPending && <p role="status">Loading release evidence…</p>}
     {maintenance.error && <p role="alert">{String(maintenance.error)}</p>}
-    {maintenance.data && <BuildDescription build={maintenance.data.runningBuild} />}
-    {maintenance.data && !handoff && <p>No accepted package has been built for this project.</p>}
+    {build && <div className="pipeline-maintenance-build">
+      <p className="pipeline-maintenance-state"><span>Running build</span><strong>{build.version}</strong></p>
+      <details>
+        <summary className="pipeline-maintenance-disclosure"><ListChecks size={15} aria-hidden /> Build details <ChevronRight size={14} aria-hidden /></summary>
+        <dl className="pipeline-data">
+          <dt>Target</dt><dd>{build.target}</dd>
+          <dt>Profile</dt><dd>{build.profile}</dd>
+          <dt>Source commit</dt><dd><code>{build.sourceCommit ?? "Unavailable"}</code>
+            {build.sourceModified && <span className="block">Built from a modified checkout</span>}</dd>
+        </dl>
+      </details>
+    </div>}
+    {maintenance.data && !handoff && <p className="pipeline-maintenance-subtle">No accepted package has been built for this project.</p>}
     {handoff && <>
       {handoffs.length > 1 && <label className="pipeline-form pipeline-stack">Saved package
         <select value={handoff.id} onChange={(event) => setHandoffId(event.currentTarget.value)}>
@@ -118,12 +132,15 @@ export function WorkflowMaintenanceCandidates({ checkout, openWorkspace }: Pick<
           </option>)}
         </select>
       </label>}
-      <dl className="pipeline-data break-all">
-        <dt>Candidate</dt><dd>{handoff.version} · {handoff.packageName}</dd>
-        <dt>Accepted source</dt><dd><code>{handoff.sourceRevision}</code></dd>
-        <dt>Package SHA-256</dt><dd><code>{handoff.sha256}</code></dd>
-        <dt>Evidence</dt><dd>{handoff.checks.join(", ")} · <code>{handoff.verificationId}</code></dd>
-      </dl>
+      <p className="pipeline-maintenance-state"><span>Accepted package</span><strong>{handoff.version} · {handoff.packageName}</strong></p>
+      <details className="pipeline-maintenance-workflow">
+        <summary className="pipeline-maintenance-disclosure"><FileCheck2 size={15} aria-hidden /> Package evidence <ChevronRight size={14} aria-hidden /></summary>
+        <dl className="pipeline-data pt-2">
+          <dt>Accepted source</dt><dd><code>{handoff.sourceRevision}</code></dd>
+          <dt>Package SHA-256</dt><dd><code>{handoff.sha256}</code></dd>
+          <dt>Evidence</dt><dd>{handoff.checks.join(", ")} · <code>{handoff.verificationId}</code></dd>
+        </dl>
+      </details>
       {handoff.activation && <p role="status">Fixture activation recorded <code>{handoff.activation.id}</code></p>}
       {handoff.signedActivation && <p role="status">Signed update {handoff.signedActivation.version} verified at startup.</p>}
       <div className="pipeline-actions">
@@ -139,7 +156,7 @@ export function WorkflowMaintenanceCandidates({ checkout, openWorkspace }: Pick<
         settings.configuration.activation === "signed_updater" &&
         <SignedHandoffUpdate key={handoff.id} projectId={projectId} handoff={handoff} />}
     </>}
-    <WorkflowMaintenanceSettings checkout={checkout} />
+    <WorkflowMaintenanceSettings checkout={checkout} compact />
   </>;
 }
 
@@ -158,20 +175,20 @@ export function WorkflowMaintenancePlugins() {
   });
   const error = inventory.error ?? refresh.error;
   return <>
-    <div className="pipeline-actions">
-      <label className="pipeline-form pipeline-stack">CLI for plugin inventory
+    <div className="pipeline-maintenance-plugin-actions">
+      <label className="pipeline-form pipeline-stack">CLI
         <select value={provider} disabled={refresh.isPending}
           onChange={(event) => { setProvider(event.currentTarget.value as Provider); refresh.reset(); }}>
           <option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option>
         </select>
       </label>
       <Button type="button" variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate(provider)}>
-        {refresh.isPending ? "Checking plugins…" : "Check plugins"}
+        <RefreshCw size={15} aria-hidden /> {refresh.isPending ? "Checking plugins…" : "Check plugins"}
       </Button>
     </div>
     {inventory.isPending && <p role="status">Loading saved plugin inventory…</p>}
     {error && <p role="alert">{String(error)}</p>}
-    {inventory.data === null && <p>No saved inventory for this CLI. Check plugins to read the current user profile.</p>}
+    {inventory.data === null && <p className="pipeline-maintenance-subtle">No plugin check has been saved for this CLI.</p>}
     {inventory.data && <>
       <p className="pipeline-meta">Last checked {new Date(inventory.data.checkedAt).toLocaleString()} · {inventory.data.report.status}</p>
       {inventory.data.report.plugins.map((plugin, index) => <PipelinePluginItem key={`${plugin.id}:${plugin.scope ?? ""}:${index}`}
@@ -184,7 +201,7 @@ export function WorkflowMaintenancePlugins() {
   </>;
 }
 
-function MaintenanceSettingsForm({ checkout }: { checkout: ProjectCheckout }) {
+function MaintenanceSettingsForm({ checkout, showRunningBuild }: { checkout: ProjectCheckout; showRunningBuild: boolean }) {
   const { projectId } = checkout;
   const maintenance = useQuery({ queryKey: maintenanceKey(projectId), queryFn: () => readMaintenance(projectId) });
   const workflows = useQuery({
@@ -204,7 +221,7 @@ function MaintenanceSettingsForm({ checkout }: { checkout: ProjectCheckout }) {
     {error && <p role="alert">{String(error)}</p>}
     {!error && !maintenance.data && <p role="status">Loading maintenance settings…</p>}
     {maintenance.data && <>
-      <BuildDescription build={maintenance.data.runningBuild} />
+      {showRunningBuild && <BuildDescription build={maintenance.data.runningBuild} />}
       <MaintenanceConfigurationForm key={maintenance.data.settings?.revision ?? "initial"} projectId={projectId}
         checkoutId={checkout.checkoutId} settings={maintenance.data.settings} workflows={available}
         checkouts={(checkouts.data ?? []).filter((row) => row.projectId === projectId)} />

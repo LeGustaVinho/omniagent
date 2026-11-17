@@ -1,0 +1,164 @@
+.pipeline-builder-landing {
+  container: pipeline-builder / inline-size;
+  min-width: 0;
+  padding: clamp(0.8rem, 2vw, 1.25rem);
+}
+
+.pipeline-builder-content {
+  display: grid;
+  gap: 1rem;
+  inline-size: min(100%, 72rem);
+  margin-inline: auto;
+}
+
+.pipeline-builder-intro {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: clamp(0.9rem, 3cqw, 1.35rem);
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: linear-gradient(115deg, color-mix(in srgb, var(--primary) 10%, var(--card)), var(--card) 65%);
+}
+
+.pipeline-builder-icon {
+  display: grid;
+  flex: none;
+  inline-size: 2.15rem;
+  block-size: 2.15rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--muted);
+  color: var(--primary);
+}
+
+.pipeline-builder-intro > .pipeline-builder-icon {
+  inline-size: 2.7rem;
+  block-size: 2.7rem;
+}
+
+.pipeline-builder-intro h2 {
+  font-size: clamp(1.2rem, 3cqw, 1.65rem);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.pipeline-builder-intro p,
+.pipeline-builder-start p,
+.pipeline-builder-card-heading p,
+.pipeline-builder-dialog-heading p {
+  margin-block-start: 0.25rem;
+  color: var(--muted-foreground);
+  line-height: 1.45;
+}
+
+.pipeline-builder-starts,
+.pipeline-builder-saved {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.pipeline-builder-starts { grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); }
+.pipeline-builder-saved { grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); align-items: start; }
+
+.pipeline-builder-start,
+.pipeline-builder-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--card);
+}
+
+.pipeline-builder-start {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  justify-items: start;
+  gap: 0.7rem;
+  padding: 0.9rem;
+}
+
+.pipeline-builder-start[data-primary="true"] { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
+.pipeline-builder-start h3,
+.pipeline-builder-card-heading h3 { font-size: 0.95rem; font-weight: 650; }
+.pipeline-builder-start > button { align-self: end; min-height: 2.2rem; max-inline-size: 100%; }
+.pipeline-builder-start > button svg,
+.pipeline-builder-card button svg { flex: none; }
+
+.pipeline-builder-card-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.pipeline-builder-card-heading > div { flex: 1 1 10rem; min-width: 0; }
+.pipeline-builder-card-heading > button { align-self: center; }
+
+.pipeline-builder-card-body,
+.pipeline-builder-dialog-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.85rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pipeline-builder-empty { color: var(--muted-foreground); }
+.pipeline-builder-card-body > details { background: var(--background); }
+
+.pipeline-builder-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgb(0 0 0 / .56);
+}
+
+.pipeline-builder-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 71;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
+}
+
+.pipeline-builder-dialog-heading {
+  display: flex;
+  gap: 0.65rem;
+  align-items: start;
+  padding: 0.9rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.pipeline-builder-dialog-heading > div { flex: 1; min-width: 0; }
+.pipeline-builder-dialog-heading h2 { font-size: 1rem; font-weight: 650; }
+.pipeline-builder-dialog-heading > button { flex: none; }
+.pipeline-builder-dialog-body { overflow-y: auto; }
+.pipeline-builder-dialog-form { display: grid; gap: 0.75rem; }
+
+@container pipeline-builder (inline-size < 42rem) {
+  .pipeline-builder-starts { grid-template-columns: 1fr; }
+  .pipeline-builder-start {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    align-items: start;
+  }
+  .pipeline-builder-start > button { align-self: center; }
+}
+
+@container pipeline-builder (inline-size < 28rem) {
+  .pipeline-builder-start { grid-template-columns: auto minmax(0, 1fr); gap: 0.55rem; }
+  .pipeline-builder-start > button { grid-column: 2; }
+}

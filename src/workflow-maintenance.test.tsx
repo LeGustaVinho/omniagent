@@ -43,13 +43,16 @@ it("opens the saved release execution and loads real CLI plugin controls from Ma
     <WorkflowMaintenancePlugins />
   </>);
   const user = userEvent.setup();
+  const packageEvidence = await screen.findByText("Package evidence");
+  expect(packageEvidence.closest("details")?.hasAttribute("open")).toBe(false);
+  await user.click(packageEvidence);
   expect(await screen.findByText("accepted-package-digest")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Open task" }));
   expect(openWorkspace).toHaveBeenCalledWith("tasks", "release-task");
   await user.click(screen.getByRole("button", { name: "Open workflow execution" }));
   expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:release-run");
   expect(await screen.findByText("Review Tools")).toBeTruthy();
-  await user.selectOptions(screen.getByLabelText("CLI for plugin inventory"), "claude");
+  await user.selectOptions(screen.getByLabelText("CLI"), "claude");
   await user.click(screen.getByRole("button", { name: "Check plugins" }));
   expect(invoke).toHaveBeenCalledWith("cli_plugin_inventory", { provider: "claude", refresh: true });
   await user.click(screen.getByText("Manage user plugins"));

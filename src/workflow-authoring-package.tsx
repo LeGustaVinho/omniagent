@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ArrowRight, FilePlus2, LayoutTemplate, Package as PackageIcon, Plus, Sparkles, Workflow, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
@@ -13,6 +14,7 @@ import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exch
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout } from "@/workflow-graph-model";
+import "./pipeline-builder-landing.css";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
 type Member = { key: string; name: string; body: ReusableBody; destination?: string; base?: Version | null; references?: Record<string, ReusableReference> };
@@ -62,7 +64,10 @@ function packageGraphs(text: string) {
   }
 }
 
-export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
+export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, authoring }: Pick<WorkspaceProps, "checkout" | "openWorkspace"> & {
+  drafts?: ReactNode;
+  authoring?: ReactNode;
+}) {
   const { projectId } = checkout;
   const client = useQueryClient();
   const packages = useQuery({
@@ -89,22 +94,28 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
     },
     onSuccess: (draft) => { showCreatePipeline(false); openDraft(draft); },
   });
-  return <section aria-label="Workflow packages" className="pipeline-stack border-t border-border pt-4">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <h2 className="font-semibold">Workflow packages</h2>
-      <div className="pipeline-actions">
-        <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate(null)}>New workflow package</Button>
-        <Dialog.Root open={creatingPipeline} onOpenChange={(open) => {
-          if (create.isPending) return;
-          if (open) { setPipelineName(""); create.reset(); }
-          showCreatePipeline(open);
-        }}>
-          <Dialog.Trigger asChild><Button type="button">New pipeline</Button></Dialog.Trigger>
-          <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
-            <Dialog.Content className="fixed left-1/2 top-1/2 z-50 grid w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-card p-5 shadow-lg">
-              <Dialog.Title className="text-lg font-semibold">New pipeline</Dialog.Title>
-              <form className="pipeline-form grid gap-3" onSubmit={(event) => {
+  return <section aria-label="Pipeline builder" className="pipeline-builder-landing">
+    <div className="pipeline-builder-content">
+      <header className="pipeline-builder-intro">
+        <span className="pipeline-builder-icon"><Workflow size={23} aria-hidden /></span>
+        <div>
+          <h2>Build a pipeline</h2>
+          <p>Connect steps on the canvas, test the workflow, and publish a reviewed revision.</p>
+        </div>
+      </header>
+      <div className="pipeline-builder-starts">
+        <article className="pipeline-builder-start" data-primary="true">
+          <span className="pipeline-builder-icon"><FilePlus2 size={18} aria-hidden /></span>
+          <div><h3>From scratch</h3><p>Open the canvas with a start node and add the steps you need.</p></div>
+          <Dialog.Root open={creatingPipeline} onOpenChange={(open) => {
+            if (create.isPending) return;
+            if (open) { setPipelineName(""); create.reset(); }
+            showCreatePipeline(open);
+          }}>
+            <Dialog.Trigger asChild><Button type="button"><Plus size={16} aria-hidden /> New pipeline</Button></Dialog.Trigger>
+            <BuilderLandingDialog title="New pipeline" icon={<FilePlus2 size={20} aria-hidden />}
+              description="Name your pipeline to open it on the canvas." busy={create.isPending}>
+              <form className="pipeline-form pipeline-builder-dialog-form" onSubmit={(event) => {
                 event.preventDefault();
                 if (pipelineName.trim() && !create.isPending) create.mutate(pipelineName.trim());
               }}>
@@ -116,21 +127,65 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
                   <Button type="submit" disabled={!pipelineName.trim() || create.isPending}>Create pipeline</Button>
                 </div>
               </form>
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
+            </BuilderLandingDialog>
+          </Dialog.Root>
+        </article>
+        <article className="pipeline-builder-start">
+          <span className="pipeline-builder-icon"><LayoutTemplate size={18} aria-hidden /></span>
+          <div><h3>From a template</h3><p>Choose a workflow with steps and connections already set up.</p></div>
+          <WorkflowFactoryTemplates key={projectId} projectId={projectId} openDraft={openDraft} />
+        </article>
+        {authoring && <article className="pipeline-builder-start">
+          <span className="pipeline-builder-icon"><Sparkles size={18} aria-hidden /></span>
+          <div><h3>AI-assisted</h3><p>Describe a pipeline or changes to an existing revision.</p></div>
+          {authoring}
+        </article>}
+      </div>
+      <div className="pipeline-builder-saved">
+        {drafts}
+        <section aria-label="Workflow packages" className="pipeline-builder-card">
+          <header className="pipeline-builder-card-heading">
+            <span className="pipeline-builder-icon"><PackageIcon size={17} aria-hidden /></span>
+            <div><h3>Workflow packages</h3><p>Group pipelines and reusable artifacts.</p></div>
+            <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate(null)}>
+              <Plus size={15} aria-hidden /> New workflow package
+            </Button>
+          </header>
+          <div className="pipeline-builder-card-body">
+            {packages.isPending && <p role="status">Loading workflow packages…</p>}
+            {(packages.error ?? (!creatingPipeline && create.error)) && <p role="alert">{String(packages.error ?? create.error)}</p>}
+            {packages.data?.length === 0 && <p className="pipeline-builder-empty">No workflow packages yet.</p>}
+            {!!packages.data?.length && <ul className="workflow-draft-list">
+              {packages.data.map((draft) => <li key={draft.id}>
+                <div><strong>{draft.name}</strong><p>{draft.memberCount} {draft.memberCount === 1 ? "artifact" : "artifacts"} · {draft.published ? "Published" : "Draft"}</p></div>
+                <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", packageDraftTarget(draft.id))}>
+                  Open package <ArrowRight size={15} aria-hidden />
+                </Button>
+              </li>)}
+            </ul>}
+            <WorkflowExchangePanel key={projectId} projectId={projectId} openWorkspace={openWorkspace} />
+          </div>
+        </section>
       </div>
     </div>
-    {(packages.error ?? (!creatingPipeline && create.error)) && <p role="alert">{String(packages.error ?? create.error)}</p>}
-    <WorkflowFactoryTemplates key={`factory:${projectId}`} projectId={projectId} openDraft={openDraft} />
-    <WorkflowExchangePanel key={projectId} projectId={projectId} openWorkspace={openWorkspace} />
-    {!!packages.data?.length && <ul className="workflow-draft-list">
-      {packages.data.map((draft) => <li key={draft.id}>
-        <div><strong>{draft.name}</strong><p>{draft.memberCount} artifacts · {draft.published ? "Published" : "Draft"}</p></div>
-        <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", packageDraftTarget(draft.id))}>Open package</Button>
-      </li>)}
-    </ul>}
   </section>;
+}
+
+function BuilderLandingDialog({ title, description, icon, busy = false, children }: {
+  title: string; description: string; icon: ReactNode; busy?: boolean; children: ReactNode;
+}) {
+  return <Dialog.Portal>
+    <Dialog.Overlay className="pipeline-builder-overlay" />
+    <Dialog.Content className="pipeline-builder-dialog">
+      <header className="pipeline-builder-dialog-heading">
+        <span className="pipeline-builder-icon">{icon}</span>
+        <div><Dialog.Title>{title}</Dialog.Title><Dialog.Description>{description}</Dialog.Description></div>
+        <Dialog.Close asChild><Button type="button" variant="ghost" className="ui-icon-button"
+          aria-label={"Close " + title.toLowerCase()} disabled={busy}><X size={17} aria-hidden /></Button></Dialog.Close>
+      </header>
+      <div className="pipeline-builder-dialog-body">{children}</div>
+    </Dialog.Content>
+  </Dialog.Portal>;
 }
 
 function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string; openDraft: (draft: PackageDraft) => void }) {
@@ -144,15 +199,17 @@ function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string;
     mutationFn: ({ id, revision }: FactoryTemplate) => invoke<PackageDraft>("create_workflow_factory_draft", {
       projectId, template: id, revision,
     }),
-    onSuccess: openDraft,
+    onSuccess: (draft) => { setOpen(false); openDraft(draft); },
     onError: () => templates.refetch(),
   });
   const error = templates.error ?? create.error;
-  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Start from a template</summary>
-    {open && <>
+  return <Dialog.Root open={open} onOpenChange={(next) => { if (!create.isPending) setOpen(next); }}>
+    <Dialog.Trigger asChild><Button type="button" variant="outline"><LayoutTemplate size={16} aria-hidden /> Start from a template</Button></Dialog.Trigger>
+    <BuilderLandingDialog title="Workflow templates" icon={<LayoutTemplate size={20} aria-hidden />}
+      description="Choose a template to open it as an editable draft in this project." busy={create.isPending}>
       {error && <p role="alert">{String(error)}</p>}
       {!error && templates.isPending && <p role="status">Loading workflow templates…</p>}
+      {templates.data?.length === 0 && <p className="pipeline-builder-empty">No templates are available.</p>}
       {!!templates.data?.length && <ul className="workflow-draft-list">
         {templates.data.map((entry) => <li key={entry.id}>
           <div><strong>{entry.name}</strong>
@@ -162,8 +219,8 @@ function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string;
             onClick={() => create.mutate(entry)}>Create draft</Button>
         </li>)}
       </ul>}
-    </>}
-  </details>;
+    </BuilderLandingDialog>
+  </Dialog.Root>;
 }
 
 export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWorkspace, openQueueJob }: WorkspaceProps & { draftId: string }) {

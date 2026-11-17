@@ -6,7 +6,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
-import { WorkflowPackageList } from "@/workflow-authoring-package";
+import { PipelineBuilderLanding } from "@/workflow-authoring-package";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -114,7 +114,7 @@ it("opens an editable project draft from the selected factory template revision"
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageList checkout={exampleCheckout} openWorkspace={openWorkspace} />
+    <PipelineBuilderLanding checkout={exampleCheckout} openWorkspace={openWorkspace} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(screen.getByText("Start from a template"));
@@ -187,7 +187,7 @@ it("starts a named pipeline directly in the visual Builder", async () => {
   });
   const projectId = exampleCheckout.projectId;
   render(<QueryClientProvider client={new QueryClient()}>
-    <WorkflowPackageList checkout={exampleCheckout} openWorkspace={openWorkspace} />
+    <PipelineBuilderLanding checkout={exampleCheckout} openWorkspace={openWorkspace} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "New pipeline" }));
