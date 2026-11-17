@@ -10,7 +10,9 @@ use crate::workflows::{
 
 use super::*;
 
+mod diff;
 mod repair;
+mod task;
 
 const REVIEW: &str = "review-test::review";
 const CHECK: &str = "review-test::check";
