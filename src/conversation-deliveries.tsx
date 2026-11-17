@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
-import { SavedAttachments, type AttachmentEvidence } from "@/conversation-attachment-evidence";
+import { SavedAttachments, type AttachmentDraftDestination, type AttachmentEvidence } from "@/conversation-attachment-evidence";
 import { ReferencePreview, type ConversationReferencePreview } from "@/conversation-reference";
 
 type InstructionDispatch = {
@@ -86,12 +86,13 @@ function DeliveryRow({ item, conversationId, runId, live }: {
   </li>;
 }
 
-export function ConversationDeliveries({ input, conversationId, runId, live, checkoutId }: {
+export function ConversationDeliveries({ input, conversationId, runId, live, checkoutId, draftDestination }: {
   input: ConversationInput;
   conversationId: string;
   runId: string;
   live: boolean;
   checkoutId?: string;
+  draftDestination?: AttachmentDraftDestination;
 }) {
   return <>
     <p className="break-all text-xs text-muted-foreground">Turn {input.turnId}</p>
@@ -101,7 +102,7 @@ export function ConversationDeliveries({ input, conversationId, runId, live, che
     </p> : input.removedAttachmentCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">
       Exact input is unavailable after attachment history was deleted.
     </p> : <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>}
-    <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} checkoutId={checkoutId} />
+    <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} checkoutId={checkoutId} draftDestination={draftDestination} />
     {Boolean(input.conversationReferences?.length) && <details className="mt-2">
       <summary>Conversation references</summary>
       {input.conversationReferences?.map(({ messageRevisionId, reference }) =>

@@ -35,7 +35,57 @@ const POWERSHELL_PROMPT: &str = r#"
 $global:__OmniAgentPromptToken = $env:OMNIAGENT_PROMPT_TOKEN
 Remove-Item Env:OMNIAGENT_PROMPT_TOKEN -ErrorAction SilentlyContinue
 $global:__OmniAgentOriginalPrompt = (Get-Item Function:prompt).ScriptBlock
+$global:__OmniAgentOriginalReadLine = $null
+$global:__OmniAgentAcceptedCommand = $null
+$global:__OmniAgentCommandSequence = 0
+$global:__OmniAgentSeenHistory = $null
 function global:prompt {
+    # Read the execution result before the prompt runs any of its own commands.
+    $commandSucceeded = $global:?
+    if ($null -eq $global:__OmniAgentOriginalReadLine -and (Microsoft.PowerShell.Core\Get-Module PSReadLine)) {
+        $reader = Get-Item Function:PSConsoleHostReadLine -ErrorAction SilentlyContinue
+        if ($reader) {
+            $global:__OmniAgentOriginalReadLine = $reader.ScriptBlock
+            function global:PSConsoleHostReadLine {
+                $line = & $global:__OmniAgentOriginalReadLine
+                if ($line -is [string] -and -not [string]::IsNullOrWhiteSpace($line)) {
+                    $global:__OmniAgentCommandSequence++
+                    $global:__OmniAgentAcceptedCommand = @{ Sequence = $global:__OmniAgentCommandSequence; Line = $line }
+                    $row = [Console]::CursorTop - [Console]::WindowTop
+                    [Console]::Write([string][char]27 + ']633;P;OmniAgentCommandStart=' +
+                        $global:__OmniAgentPromptToken + ';' + $global:__OmniAgentCommandSequence + ';' + $row + ';' + [Console]::CursorLeft + [char]7)
+                }
+                $line
+            }
+        }
+    }
+    $started = $global:__OmniAgentAcceptedCommand
+    $global:__OmniAgentAcceptedCommand = $null
+    $latest = Microsoft.PowerShell.Core\Get-History -Count 1
+    $historyId = if ($null -eq $latest) { 0 } else { $latest.Id }
+    $newEntry = $null -ne $global:__OmniAgentSeenHistory -and $historyId -gt $global:__OmniAgentSeenHistory
+    if ($newEntry -or $started) {
+        $sequence = 0
+        $command = ''
+        $status = 'unknown'
+        if ($newEntry) {
+            $command = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($latest.CommandLine))
+            # Keep the complete OSC record within xterm's parser limit.
+            if ($command.Length -gt 9999800) { $command = '' }
+            if ($started -and [string]::Equals($latest.CommandLine, $started.Line, [StringComparison]::Ordinal)) {
+                $sequence = $started.Sequence
+                if ($latest.ExecutionStatus -eq 'Completed') {
+                    $status = if ($commandSucceeded) { 'succeeded' } else { 'failed' }
+                } elseif ($latest.ExecutionStatus -eq 'Failed') {
+                    $status = 'failed'
+                }
+            }
+        }
+        $row = [Console]::CursorTop - [Console]::WindowTop
+        [Console]::Write([string][char]27 + ']633;P;OmniAgentCommandEnd=' +
+            $global:__OmniAgentPromptToken + ';' + $sequence + ';' + $row + ';' + [Console]::CursorLeft + ';' + $status + ';' + $command + [char]7)
+    }
+    $global:__OmniAgentSeenHistory = $historyId
     $location = $ExecutionContext.SessionState.Path.CurrentLocation
     $path = if ($location.Provider.Name -eq 'FileSystem') { $location.ProviderPath } else { '' }
     $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$path))
@@ -494,23 +544,26 @@ pub async fn write_manual_terminal(
 }
 
 #[tauri::command]
-pub async fn resolve_manual_terminal_file(
+pub async fn resolve_manual_terminal_path(
     store: State<'_, Store>,
     checkout_id: String,
     relative_directory: Option<String>,
     observed_directory: Option<String>,
     path: String,
-) -> Result<String, String> {
-    omniagent::repository::terminal_file_links::resolve_terminal_file(
+    expected_kind: Option<omniagent::repository::terminal_file_links::TerminalPathKind>,
+) -> Result<omniagent::repository::terminal_file_links::TerminalPath, String> {
+    omniagent::repository::terminal_file_links::resolve_terminal_path(
         &store,
         checkout_id,
         relative_directory,
         observed_directory,
         path,
+        expected_kind,
     )
     .await
     .map_err(|_| {
-        "This terminal reference does not resolve to a file in the current checkout.".into()
+        "This terminal reference does not resolve to a matching path in the current checkout."
+            .into()
     })
 }
 

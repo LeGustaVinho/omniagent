@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowComparisons } from "@/workflow-comparison";
@@ -10,6 +10,8 @@ import { comparisonOutcome } from "@/workflow-comparison-outcomes";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import type { Job } from "@/bindings/Job";
 import { exampleCheckout } from "@/workbench-contract";
+import PipelinesWorkspace from "@/pipelines-workspace";
+import { workflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -21,9 +23,10 @@ const options = profiles.map((selection, index) => ({
     rating: { intelligenceTenths: 558, apiReferenceCents: 125, priceScore: 43 } }, efforts: [], defaultEffort: null,
 }));
 
-function mount() {
+function mount(target?: string, fromNavigation = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><WorkflowComparisons checkout={exampleCheckout}
+  const Surface = fromNavigation ? PipelinesWorkspace : WorkflowComparisons;
+  return render(<QueryClientProvider client={client}><Surface checkout={exampleCheckout} target={target}
     simulation={null} startSimulation={vi.fn()} openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
 }
 
@@ -65,6 +68,67 @@ it("pins the selected Git revision and preserves selection order for same-provid
   mount();
   expect(within(await screen.findByRole("list", { name: "Comparison results" })).getAllByRole("heading").map((heading) => heading.textContent))
     .toEqual(["second-codex", "first-codex"]);
+});
+
+it("routes from Knowledge through Pipelines to a comparison pinned to the reviewed saved revision", async () => {
+  const { projectId, checkoutId } = exampleCheckout;
+  const revision = { id: "saved-revision", checkoutId, relativePath: "notes/Decisão técnica.md", sha256: "b".repeat(64), baseCommit: commit };
+  const markdown = "# Pinned requirement\r\nOriginal constraints\r\n";
+  const target = workflowComparisonNoteTarget({ checkoutId, revisionId: revision.id, relativePath: revision.relativePath, sha256: revision.sha256 });
+  const source = { revision, markdown };
+  vi.mocked(invoke).mockImplementation(async (name, args) => {
+    if (name === "conversation_models") return (args as { provider: string }).provider === "codex" ? options : [];
+    if (name === "read_repository_markdown") return source;
+    if (name === "model_comparisons") return [];
+    if (name === "start_model_comparison_from_markdown") return { id: "comparison-note", sourceCheckoutId: checkoutId,
+      sourceDocument: revision, commit, prompt: "Evaluate feasibility", tree: "tree", candidates: [] };
+    throw Error(`Unexpected IPC ${name}`);
+  });
+  mount(target, true);
+  const user = userEvent.setup();
+  const pinned = within(await screen.findByLabelText("Saved note input"));
+  expect(pinned.getByText(revision.relativePath)).toBeTruthy();
+  expect(pinned.getByText(revision.id)).toBeTruthy();
+  expect(pinned.getByText(revision.sha256)).toBeTruthy();
+  expect(pinned.getByText(commit)).toBeTruthy();
+  expect(screen.queryByRole("textbox", { name: "Git commit" })).toBeNull();
+  await user.click(screen.getByText("Read saved Markdown"));
+  expect(screen.getByText(/Pinned requirement/, { selector: "pre" }).textContent).toBe(markdown);
+  expect(invoke).toHaveBeenCalledWith("read_repository_markdown", { checkoutId, revisionId: revision.id });
+  expect(invoke).not.toHaveBeenCalledWith("comparison_source_commit", expect.anything());
+  await user.click(screen.getByRole("button", { name: /Comparison candidates/ }));
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: /Second Codex model/ }));
+  await user.click(screen.getByRole("menuitemcheckbox", { name: /First Codex model/ }));
+  await user.keyboard("{Escape}");
+  const launch = screen.getByRole<HTMLButtonElement>("button", { name: "Start comparison" });
+  expect(launch.disabled).toBe(true);
+  await user.type(screen.getByRole("textbox", { name: "Shared request" }), "  Evaluate feasibility  ");
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison_from_markdown", expect.anything());
+  await user.click(launch);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_model_comparison_from_markdown", {
+    projectId, checkoutId, revisionId: revision.id, relativePath: revision.relativePath, sha256: revision.sha256,
+    prompt: "Evaluate feasibility", selections: [profiles[1], profiles[0]],
+  }));
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison", expect.anything());
+  const result = within(await screen.findByRole("region", { name: "Saved comparison" }));
+  expect(result.getByText(revision.id)).toBeTruthy();
+});
+
+it("does not offer a working checkout comparison for a mismatched note revision", async () => {
+  const { checkoutId } = exampleCheckout;
+  const target = workflowComparisonNoteTarget({ checkoutId, revisionId: "expected", relativePath: "Note.md", sha256: "d".repeat(64) });
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === "conversation_models" || name === "model_comparisons") return [];
+    if (name === "read_repository_markdown") return { markdown: "A different note", revision: {
+      checkoutId, id: "expected", relativePath: "Somewhere else.md", sha256: "d".repeat(64), baseCommit: commit,
+    } };
+    throw Error(`Unexpected IPC ${name}`);
+  });
+  mount(target);
+  expect((await screen.findByRole("alert")).textContent).toBe("The chosen Markdown revision is unavailable.");
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Start comparison" }).disabled).toBe(true);
+  expect(screen.queryByText("A different note")).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("comparison_source_commit", expect.anything());
 });
 
 it("shows each dispatch's observed instruction reads and tool use alongside the shared revision", async () => {

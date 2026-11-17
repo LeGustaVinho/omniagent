@@ -12,23 +12,38 @@ import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
 const newConversation = "new";
-type ContextText = { title: string; reference: string; text: string; language?: string };
+type ContextText = { title: string; reference: string; text: string; language?: string; confirmSource?: () => Promise<void> };
+type RecordedFile = { title: string; reference: string; sourceConversationId: string; runId: string; ordinal: number;
+  messageRevisionId: string; sourceSha256: string };
+
+const fileRequests = [
+  ["Explain selected files…", "Read the selected checkout files and explain their purpose and how they work."],
+  ["Find usages…", "Find code and workflows that use the selected checkout files or their exported symbols. Cite the relevant paths and lines."],
+  ["Review selected files…", "Review the selected checkout files for defects and regressions. Cite the relevant paths and lines."],
+  ["Suggest a fix…", "Read the selected checkout files, identify issues with concrete evidence, and suggest a fix."],
+  ["Generate tests…", "Read the selected checkout files and propose tests that cover their behavior and edge cases."],
+  ["Document selected files…", "Read the selected checkout files and draft documentation for their public behavior and usage."],
+  ["Propose a refactor…", "Read the selected checkout files and propose a behavior-preserving refactor, including how to verify it."],
+] as const;
 
 export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
   const [targets, setTargets] = useState<readonly FileTreeTarget[]>();
   const [excerpt, setExcerpt] = useState<{ selection: ContextText; instruction?: string }>();
+  const [recordedFile, setRecordedFile] = useState<RecordedFile>();
+  const [fileRequest, setFileRequest] = useState<string>();
   const [destination, setDestination] = useState("");
   const [pipelineKey, setPipelineKey] = useState<string>();
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const canAttach = Boolean(excerpt || recordedFile || (targets && selected.length));
   const conversationKey = ["conversations", checkoutId];
   const conversations = useQuery({
     queryKey: conversationKey,
     queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-    enabled: !simulated && Boolean(targets || excerpt),
+    enabled: !simulated && Boolean(targets || excerpt || recordedFile),
     retry: false,
   });
   const pipelines = useQuery({
@@ -51,19 +66,23 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     ? (files.data ?? []).filter((path) => folders.some((folder) => path.startsWith(`${folder}/`)) && path.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
     : [];
 
-  function start(items: readonly FileTreeTarget[], create: boolean) {
+  function start(items: readonly FileTreeTarget[], create: boolean, instruction?: string) {
     setSelected(items.filter(({ kind }) => kind === "file").map(({ path }) => path));
     setDestination(create ? newConversation : "");
     setPipelineKey(undefined);
     setFilter("");
     setError("");
     setExcerpt(undefined);
+    setRecordedFile(undefined);
+    setFileRequest(instruction);
     setTargets(items);
   }
 
   function startContextText(selection: ContextText, instruction?: string) {
     if (simulated || (!selection.text.trim() && !(selection.text && instruction?.trim()))) return;
     setTargets(undefined);
+    setRecordedFile(undefined);
+    setFileRequest(undefined);
     setExcerpt({ selection, instruction });
     setDestination(instruction ? newConversation : "");
     setPipelineKey(undefined);
@@ -74,9 +93,21 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     startContextText({ title: fileName(selection.path), reference: excerptReference(selection), text: selection.text, language: selection.language }, instruction);
   }
 
+  function startRecordedFile(file: RecordedFile) {
+    if (simulated) return;
+    setTargets(undefined);
+    setExcerpt(undefined);
+    setFileRequest(undefined);
+    setRecordedFile(file);
+    setDestination("");
+    setError("");
+  }
+
   function close() {
     setTargets(undefined);
     setExcerpt(undefined);
+    setRecordedFile(undefined);
+    setFileRequest(undefined);
   }
 
   function actions(item: FileTreeTarget, selection?: readonly FileTreeTarget[]): MenuGroups {
@@ -85,30 +116,37 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     return [[
       { label: !selection && item.kind === "file" ? "Add to conversation…" : "Add files to conversation…", run: () => start(items, false) },
       { label: "New conversation with context…", run: () => start(items, true) },
+      { label: "Ask agent", items: fileRequests.map(([label, instruction]) => ({ label, run: () => start(items, true, instruction) })) },
     ]];
   }
 
   async function attach() {
-    if (busy || (!excerpt && (!targets || !selected.length)) || !destination || (destination === newConversation && !pipeline)) return;
+    if (busy || !canAttach || !destination || (destination === newConversation && !pipeline)) return;
     setBusy(true);
     setError("");
     try {
+      await excerpt?.selection.confirmSource?.();
       let conversationId = destination;
       if (destination === newConversation) {
-        const title = excerpt?.selection.title ?? (targets?.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files");
+        const title = excerpt?.selection.title ?? recordedFile?.title ?? (targets?.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files");
         const created = await invoke<Conversation>("create_conversation", { checkoutId, title, pipeline });
         conversationId = created.id;
         setDestination(created.id);
         client.setQueryData<Conversation[]>(conversationKey, (current) => [created, ...(current ?? [])]);
         void client.invalidateQueries({ queryKey: conversationLibraryKey });
       }
-      if (excerpt) {
-        const { selection, instruction } = excerpt;
+      if (excerpt || fileRequest) {
+        const selection = excerpt?.selection ?? { reference: `Selected files in checkout ${checkoutId}`, text: selected.join("\n") };
+        const instruction = excerpt?.instruction ?? fileRequest;
         const context = [instruction, `Source: ${selection.reference}`, markdownExcerpt(selection)].filter(Boolean).join("\n\n");
         await queueConversationDraftWrite(conversationId, () => invoke<void>("append_checkout_context_to_conversation", {
           checkoutId, conversationId, context,
         }));
         await client.invalidateQueries({ queryKey: ["conversation", conversationId, "draft"] });
+      } else if (recordedFile) {
+        const { title: _title, reference: _reference, ...source } = recordedFile;
+        await invoke("reuse_saved_conversation_attachment", { request: { ...source, destinationConversationId: conversationId } });
+        await client.invalidateQueries({ queryKey: ["conversation", conversationId, "attachments"] });
       } else {
         await invoke("add_checkout_files_to_conversation", { checkoutId, conversationId, paths: selected });
         void client.invalidateQueries({ queryKey: ["conversation", conversationId, "attachments"] });
@@ -122,9 +160,9 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     }
   }
 
-  const description = excerpt ? excerpt.selection.reference
+  const description = excerpt ? excerpt.selection.reference : recordedFile ? recordedFile.reference
     : targets?.length === 1 ? targets[0]!.path : `${targets?.length ?? 0} selected items`;
-  const dialog = (targets || excerpt) && <FileDialog title="Add checkout context" description={description}
+  const dialog = (targets || excerpt || recordedFile) && <FileDialog title={recordedFile ? "Reuse saved attachment" : "Add checkout context"} description={description}
     onClose={() => { if (!busy) close(); }}>
     <form className="grid gap-2" onSubmit={(event) => { event.preventDefault(); void attach(); }}>
       <label>Conversation <select className="delivery-filter" value={destination} disabled={busy}
@@ -141,6 +179,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       {targets && <p className="file-help">File attachments use a direct conversation.</p>}
       {conversations.isFetching && <p role="status">Loading conversations…</p>}
       {conversations.error && <p role="alert">{String(conversations.error)}</p>}
+      {fileRequest && <p>{fileRequest}</p>}
       {folders.length > 0 && <>
         <label className="file-field"><input type="search" aria-label="Filter files" value={filter}
           onChange={(event) => setFilter(event.currentTarget.value)} /></label>
@@ -163,6 +202,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
         {excerpt.instruction && <p>{excerpt.instruction}</p>}
         <pre className="max-h-48 overflow-auto" aria-label="Selected text">{excerpt.selection.text}</pre>
       </>}
+      {recordedFile && <p>Review delivery options in the destination draft before sending.</p>}
       {targets && targets.length > 1 && selected.length > 0 && <details>
         <summary>Selected files</summary>
         <ul className="max-h-36 overflow-auto">{selected.map((path) => <li key={path}>{path}</li>)}</ul>
@@ -170,11 +210,11 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       {error && <p className="file-help" role="alert">{error}</p>}
       <div className="file-dialog-footer">
         <button type="button" className="fw-btn" disabled={busy} onClick={close}>Cancel</button>
-        <button type="submit" className="fw-btn fw-primary" disabled={busy || !destination || (destination === newConversation && !pipeline) || (!excerpt && !selected.length)}>
+        <button type="submit" className="fw-btn fw-primary" disabled={busy || !destination || !canAttach || (destination === newConversation && !pipeline)}>
           {busy ? "Adding…" : "Add to draft"}
         </button>
       </div>
     </form>
   </FileDialog>;
-  return { actions, dialog, startExcerpt, startContextText };
+  return { actions, dialog, startExcerpt, startContextText, startRecordedFile };
 }

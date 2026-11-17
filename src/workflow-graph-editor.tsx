@@ -164,9 +164,9 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
-type PendingConnection = { from: WorkflowEndpoint; replacing?: string };
+type PendingConnection = { endpoint: WorkflowEndpoint; side: PortSide; replacing?: string };
 type EditorHistory = { past: WorkflowEditorState[]; future: WorkflowEditorState[] };
-type CanvasTarget = { kind: "pane" } | { kind: "node" | "edge"; id: string };
+type CanvasTarget = { kind: "pane" } | { kind: "node" | "edge"; id: string } | { kind: "selection"; ids: string[] };
 type CanvasMenu = { target: CanvasTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement };
 type GraphSelection = {
   nodes: { node: WorkflowGraphNode; position: { x: number; y: number }; binding?: WorkflowNodeBinding;
@@ -428,7 +428,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         delete definitionCopies[change.id];
         delete nodeBindings[change.id];
         if (change.id === selected) select("");
-        if (pending?.from.node === change.id) setPending(undefined);
+        if (pending?.endpoint.node === change.id) setPending(undefined);
       } else if (change.type === "position") {
         if (change.dragging && change.position) {
           dragging.current[change.id] = change.position;
@@ -449,7 +449,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     if (previewChanged) setPreviewPositions({ ...dragging.current });
     if (!removed.size && !layoutChanged && !removedWireIds.length) return;
     const removedWires = new Set(removedWireIds);
-    if (pending?.replacing && removedWires.has(pending.replacing)) setPending(undefined);
+    if (pending?.replacing && (removedWires.has(pending.replacing) || graph.wires.some((wire) =>
+      wireKey(wire) === pending.replacing && (removed.has(wire.from.node) || removed.has(wire.to.node))))) setPending(undefined);
     apply({ ...state, layout: nextLayout, updateDefinitions: nextDefinitions,
       ...(state.definitionCopies && { definitionCopies }), ...(state.nodeBindings && { nodeBindings }),
       graph: removed.size || removedWires.size ? { ...graph,
@@ -482,10 +483,14 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const endpoint = { node: nodeId, port };
     select(nodeId);
     if (side === "output") {
+      if (pending?.side === "input") {
+        connect({ from: endpoint, to: pending.endpoint }, pending.replacing);
+        return;
+      }
       setConnectionError(null);
-      setPending({ from: endpoint, replacing: pending?.replacing });
-    } else if (pending) {
-      connect({ from: pending.from, to: endpoint }, pending.replacing);
+      setPending({ endpoint, side, replacing: pending?.replacing });
+    } else if (pending?.side === "output") {
+      connect({ from: pending.endpoint, to: endpoint }, pending.replacing);
     } else {
       setConnectionError("Select an output port first.");
     }
@@ -508,10 +513,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         ? item : { ...item, configuration: defaultConfiguration(version.configuration) }) } });
   }
 
-  function reconnect(wire: WorkflowWire) {
+  function reconnect(wire: WorkflowWire, change: "source" | "destination" = "destination") {
     if (disabled) return;
     setConnectionError(null);
-    setPending({ from: wire.from, replacing: wireKey(wire) });
+    setPending({ endpoint: change === "source" ? wire.to : wire.from,
+      side: change === "source" ? "input" : "output", replacing: wireKey(wire) });
   }
 
   function openMenu(event: MouseEvent | globalThis.MouseEvent, target: CanvasTarget) {
@@ -526,6 +532,33 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     setConnectionError(null);
     void Promise.resolve().then(() => navigator.clipboard.writeText(text))
       .catch(() => setConnectionError("Could not copy to the clipboard."));
+  }
+
+  function scopedNodeActions(scoped: WorkflowGraphNode[]): MenuGroups {
+    const first = scoped[0]!;
+    const multiple = scoped.length > 1;
+    const selection = `${scoped.length} selected nodes`;
+    const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind)).map(({ id }) => id);
+    const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && definitions[id] !== undefined);
+    return [[
+      ...(multiple ? [{ label: "Fit selection to view", disabled: !flow,
+        run: () => { void flow?.fitView({ nodes: scoped.map(({ id }) => ({ id })), padding: 0.15, maxZoom: 1 }); } }] : []),
+      ...(onDerive && subflowNodes.length ? [{ label: subflowNodes.length > 1
+        ? `Extract ${subflowNodes.length} selected nodes as subflow…` : "Extract node as subflow…", disabled: deriveDisabled,
+        run: () => onDerive({ type: "subflow", nodeIds: subflowNodes }) }] : []),
+    ], disabled ? [] : [
+      ...(duplicable ? [
+        { label: multiple ? `Duplicate ${selection}` : "Duplicate node", run: () => insert(capture(scoped)) },
+        { label: multiple ? `Copy ${selection}` : "Copy node", run: () => setClipboard(capture(scoped)) },
+      ] : []),
+      ...(!multiple && layout[first.id] ? [{ label: "Reset node position", run: () => {
+        const nextLayout = { ...layout };
+        delete nextLayout[first.id];
+        apply({ ...state, layout: nextLayout });
+      } }] : []),
+      { label: multiple ? `Remove ${selection}` : "Remove node", destructive: true,
+        run: () => changeNodes(scoped.map(({ id }) => ({ type: "remove", id }))) },
+    ]];
   }
 
   function menuGroups(target: CanvasTarget): { label: string; groups: MenuGroups } | undefined {
@@ -543,12 +576,15 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       { label: "Redo graph edit", disabled: disabled || !history.future.length, run: () => restore("redo") },
       ...(pending ? [{ label: "Cancel connection", run: () => { setPending(undefined); setConnectionError(null); } }] : []),
     ]] };
+    if (target.kind === "selection") {
+      const scoped = graph.nodes.filter(({ id }) => target.ids.includes(id));
+      if (scoped.length !== target.ids.length || scoped.length < 2) return;
+      return { label: `${scoped.length} selected nodes`, groups: scopedNodeActions(scoped) };
+    }
     if (target.kind === "node") {
       const clicked = graph.nodes.find(({ id }) => id === target.id);
       if (!clicked) return;
       const scoped = selectedNodes.includes(clicked.id) ? graph.nodes.filter(({ id }) => selectedNodes.includes(id)) : [clicked];
-      const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind)).map(({ id }) => id);
-      const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && definitions[id] !== undefined);
       return { label: clicked.id, groups: [[
         { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); revealInspector((request) => request + 1); } },
         { label: "Copy node ID", run: () => copy(clicked.id) },
@@ -556,21 +592,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       ], [
         ...(onDerive && isPresetEligible(clicked) && !editablePresetFields?.[clicked.id] ? [{ label: "Save node as preset…", disabled: deriveDisabled,
           run: () => onDerive({ type: "preset", nodeId: clicked.id }) }] : []),
-        ...(onDerive && subflowNodes.length ? [{ label: subflowNodes.length > 1
-          ? `Extract ${subflowNodes.length} selected nodes as subflow…` : "Extract node as subflow…", disabled: deriveDisabled,
-          run: () => onDerive({ type: "subflow", nodeIds: subflowNodes }) }] : []),
-      ], disabled ? [] : [
-        ...(duplicable ? [
-          { label: scoped.length > 1 ? `Duplicate ${scoped.length} selected nodes` : "Duplicate node", run: () => insert(capture(scoped)) },
-          { label: scoped.length > 1 ? `Copy ${scoped.length} selected nodes` : "Copy node", run: () => setClipboard(capture(scoped)) },
-        ] : []),
-        ...(layout[clicked.id] ? [{ label: "Reset node position", run: () => {
-          const nextLayout = { ...layout };
-          delete nextLayout[clicked.id];
-          apply({ ...state, layout: nextLayout });
-        } }] : []),
-        { label: "Remove node", destructive: true, run: () => changeNodes([{ type: "remove", id: clicked.id }]) },
-      ]] };
+      ], ...scopedNodeActions(scoped)] };
     }
     const wire = graph.wires.find((candidate) => wireKey(candidate) === target.id);
     if (!wire) return;
@@ -580,6 +602,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       { label: "Inspect destination node", run: () => select(wire.to.node) },
       { label: "Copy connection", run: () => copy(details) },
     ], disabled ? [] : [
+      { label: "Reconnect source…", run: () => reconnect(wire, "source") },
       { label: "Reconnect destination…", run: () => reconnect(wire) },
       { label: "Remove connection", destructive: true, run: () => changeNodes([], [target.id]) },
     ]] };
@@ -592,7 +615,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
       ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, promptRole: promptRoles?.[item.id], readOnly: disabled, inspected: item.id === selected,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined, backlogBound?.(item.id))),
-        portActions: { nodeId: item.id, activeOutput: pending?.from, activate: (side, name) => activatePort(item.id, side, name) },
+        portActions: { nodeId: item.id, activeOutput: pending?.side === "output" ? pending.endpoint : undefined,
+          activate: (side, name) => activatePort(item.id, side, name) },
       } };
   });
   const entryKind = catalog.some(({ kind }) => kind === "typed_start") && !graph.nodes.some(({ kind }) => kind === "start") ? "typed_start" : "start";
@@ -647,19 +671,22 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       canvas={<div ref={canvas} tabIndex={0} aria-label="Workflow canvas actions" className="workflow-graph-canvas" onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         if (!(event.target instanceof Element)) return;
-        const anchor = event.target.closest(".react-flow__node, .react-flow__edge");
+        const anchor = event.target.closest(".react-flow__node, .react-flow__edge, .react-flow__nodesselection-rect");
         const id = anchor?.getAttribute("data-id");
         const origin = anchor instanceof HTMLElement || anchor instanceof SVGElement ? anchor : event.currentTarget;
         const rect = origin.getBoundingClientRect();
         event.preventDefault();
         event.stopPropagation();
-        setMenu({ target: id ? { kind: anchor?.classList.contains("react-flow__edge") ? "edge" : "node", id } : { kind: "pane" },
+        const target: CanvasTarget = id ? { kind: anchor?.classList.contains("react-flow__edge") ? "edge" : "node", id }
+          : anchor?.classList.contains("react-flow__nodesselection-rect") && selectedNodes.length > 1
+            ? { kind: "selection", ids: selectedNodes } : { kind: "pane" };
+        setMenu({ target,
           point: { x: rect.left + 8, y: rect.top + 8 }, origin });
       }}>
         {(connectionError || pending || dataSuggestions.length > 0) && <div className="workflow-graph-feedback">
           {connectionError && <p className="workflow-graph-error" role="alert"><CircleAlert size={15} aria-hidden />{connectionError}</p>}
           {pending && <div className="workflow-connection-status">
-            <p role="status">Select an input port for {pending.from.node}.{pending.from.port}.</p>
+            <p role="status">Select an {pending.side === "output" ? "input" : "output"} port for {pending.endpoint.node}.{pending.endpoint.port}.</p>
             <Button type="button" variant="ghost" onClick={() => { setPending(undefined); setConnectionError(null); }}>Cancel connection</Button>
           </div>}
           {dataSuggestions.length > 0 && !pending && <section className="workflow-data-suggestions" aria-label="Suggested data connections">
@@ -696,6 +723,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           onPaneContextMenu={(event) => openMenu(event, { kind: "pane" })}
           onNodeContextMenu={(event, clicked) => openMenu(event, { kind: "node", id: clicked.id })}
           onEdgeContextMenu={(event, clicked) => openMenu(event, { kind: "edge", id: clicked.id })}
+          onSelectionContextMenu={(event, nodes) => openMenu(event, { kind: "selection", ids: nodes.map(({ id }) => id) })}
           onConnect={(candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire); }}
           onReconnect={(previous, candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire, previous.id); }}
         />

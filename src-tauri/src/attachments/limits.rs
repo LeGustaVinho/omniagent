@@ -12,7 +12,7 @@ use crate::{repository, store::Store};
 use super::{
     AttachmentBlocker, AttachmentDelivery, AttachmentDispatch, AttachmentFormat, AttachmentInput,
     AttachmentMetadata, AttachmentPreview, AttachmentSource, NativeAttachmentEncoding,
-    authorized_path, inspect,
+    PreviewOrigin, SavedNativeAttachment, authorized_path, inspect,
 };
 use crate::providers::Provider;
 
@@ -259,6 +259,11 @@ impl AttachmentLimits {
         delivery: AttachmentDelivery,
         size: u64,
     ) -> Result<()> {
+        ensure!(
+            delivery != AttachmentDelivery::Reference
+                || !matches!(source, AttachmentSource::SavedNative { .. }),
+            "A saved attachment has no current file path to reference."
+        );
         if delivery.uses_file_budget(source) {
             ensure!(
                 size <= self.bytes_per_file,
@@ -296,11 +301,7 @@ impl AttachmentPreview {
             file.take(excerpt_limit.min(64 * 1024))
                 .read_to_end(&mut first)?;
         }
-        let end = match std::str::from_utf8(&first) {
-            Ok(text) => text.len(),
-            Err(error) => error.valid_up_to(),
-        };
-        Ok((metadata, end as u64))
+        Ok((metadata, utf8_excerpt_end(&first)))
     }
 
     pub(crate) fn prepare_draft_file(
@@ -321,9 +322,13 @@ impl AttachmentPreview {
         if self.metadata.size > max_bytes || self.metadata.format == AttachmentFormat::Unknown {
             return Ok(None);
         }
+        let canonical = match &self.origin {
+            PreviewOrigin::Local(path) => path,
+            PreviewOrigin::Saved(bytes) => return Ok(Some(STANDARD.encode(bytes))),
+        };
         let path = authorized_path(&self.checkout, &self.metadata.source)?;
         ensure!(
-            path == self.canonical,
+            &path == canonical,
             "The file path changed. Review it again."
         );
         let file = crate::providers::configuration::open_locked_local_file(&path)?;
@@ -335,6 +340,23 @@ impl AttachmentPreview {
             "The file changed. Review it again."
         );
         Ok(Some(STANDARD.encode(bytes)))
+    }
+}
+
+impl SavedNativeAttachment {
+    pub(crate) fn suggested_excerpt_end(&self, limit: u64) -> u64 {
+        if self.metadata.format != AttachmentFormat::Text {
+            return 0;
+        }
+        let end = self.bytes.len().min(limit.min(64 * 1024) as usize);
+        utf8_excerpt_end(&self.bytes[..end])
+    }
+}
+
+fn utf8_excerpt_end(bytes: &[u8]) -> u64 {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.len() as u64,
+        Err(error) => error.valid_up_to() as u64,
     }
 }
 

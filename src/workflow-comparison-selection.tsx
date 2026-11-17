@@ -6,6 +6,7 @@ import type { ModelRating } from "@/bindings/ModelRating";
 import { Button } from "@/components/ui/button";
 import type { CandidateOutcome } from "@/workflow-comparison-outcomes";
 import type { WorkspaceProps } from "@/workbench-contract";
+import type { NoteRevision } from "@/repository-note-buffers";
 
 export type ComparisonCandidate = {
   selection: ModelSelection;
@@ -16,7 +17,8 @@ export type ComparisonCandidate = {
   dispatchId: string | null;
   state: string;
 };
-export type ComparisonGroup = { id: string; sourceCheckoutId: string; commit: string; tree: string; prompt: string; candidates: ComparisonCandidate[] };
+export type ComparisonGroup = { id: string; sourceCheckoutId: string; commit: string; tree: string; prompt: string;
+  sourceDocument?: NoteRevision | null; candidates: ComparisonCandidate[] };
 export type ComparisonSelection = { groupId: string; runIds: string[] };
 export type ComparisonInput = { groupId: string; jobId: string; runId: string; dispatchId: string; responseRevisionId: string };
 

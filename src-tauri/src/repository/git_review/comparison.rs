@@ -6,7 +6,7 @@ use crate::store::Store;
 use super::{
     GitFileSide, IsolatedGit, ReviewScope, base_commit, branch_reference,
     comments::{GitReviewCommentScope, GitReviewCommentSource},
-    content, inspect, passive, validate_oid, validate_path,
+    content, inspect, passive, patch::{self, GitReviewPatch}, validate_oid, validate_path,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -44,6 +44,7 @@ pub struct GitBranchDiff {
     pub original: GitFileSide,
     pub modified: GitFileSide,
     pub comment_scope: Option<GitReviewCommentScope>,
+    pub patch: GitReviewPatch,
 }
 
 impl Store {
@@ -78,6 +79,7 @@ impl Store {
             );
             let original = content::read_tree(&view, &revisions.merge_base, &path)?;
             let modified = content::read_tree(&view, &revisions.head, &path)?;
+            let patch = patch::between(&view, &revisions.merge_base, &revisions.head, &path);
             let comment_scope = GitReviewCommentScope::from_comparison(
                 &scope.id,
                 &path,
@@ -90,6 +92,7 @@ impl Store {
                 original,
                 modified,
                 comment_scope,
+                patch,
             })
         })
         .await?

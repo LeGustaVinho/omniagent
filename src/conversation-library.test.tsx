@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "@/app";
+import { activeCustomizationDraft } from "@/active-customization-draft";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
@@ -80,8 +81,10 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       checkoutId?: string; conversationId?: string; title?: string; query?: string; projectId?: string;
-      archived?: boolean;
-      change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string };
+      archived?: boolean; sectionId?: string | null;
+      selection?: { conversationId: string; checkoutId: string; expectedSectionId: string | null }[];
+      change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string;
+        expectedName?: string; neighborId?: string; before?: boolean };
       workspace?: string; layout?: string; runId?: string; after?: string; text?: string; choice?: string;
     };
     const layoutKey = `${input.checkoutId}:${input.workspace}`;
@@ -96,6 +99,7 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
       case "subscribe_events": return `subscription-${input.checkoutId}`;
       case "unsubscribe_events": return;
       case "registered_checkouts": return [selected, other, linked];
+      case "open_checkout_item_in_shell": return;
       case "workbench_layout": return layouts.get(layoutKey) ?? null;
       case "save_workbench_layout":
         layouts.set(layoutKey, input.layout!);
@@ -109,7 +113,44 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
             ? [{ ...summary, conversation: chat, organization: state }] : [];
         });
       case "conversation_library_sections":
-        return sections.filter(({ projectId }) => projectId === input.projectId);
+        return sections.filter(({ projectId }) => !input.projectId || projectId === input.projectId);
+      case "organize_conversation_library_section": {
+        const index = sections.findIndex((section) => section.projectId === input.projectId && section.id === input.sectionId);
+        if (index < 0) throw new Error("Section does not belong to this project");
+        const section = sections[index]!;
+        const change = input.change!;
+        if (change.type === "rename") {
+          if (change.expectedName !== section.name) throw new Error("Section changed");
+          if (sections.some((other) => other !== section && other.projectId === section.projectId && other.name.toLowerCase() === change.name?.toLowerCase())) {
+            throw new Error("A section already exists in this project");
+          }
+          section.name = change.name!;
+        } else {
+          const ordered = sections.filter((item) => item.projectId === section.projectId);
+          const neighbor = ordered[ordered.indexOf(section) + (change.before ? -1 : 1)];
+          if (!neighbor || neighbor.id !== change.neighborId) throw new Error("Section order changed");
+          sections[sections.indexOf(neighbor)] = section;
+          sections[index] = neighbor;
+        }
+        return;
+      }
+      case "move_conversations_to_library_section": {
+        const destination = sections.find(({ id, projectId }) => id === input.sectionId && projectId === input.projectId) ?? null;
+        if (input.sectionId && !destination) throw new Error("Section does not belong to this project");
+        const selection = input.selection!;
+        for (const { conversationId, checkoutId, expectedSectionId } of selection) {
+          const entry = summaries.find(({ id }) => id === conversationId);
+          if (entry?.checkout.checkoutId !== checkoutId || entry.checkout.projectId !== input.projectId) throw new Error("Wrong worktree scope");
+          if ((getOrganization(conversationId).section?.id ?? null) !== expectedSectionId) throw new Error("Changed membership");
+        }
+        let moved = 0;
+        for (const { conversationId, expectedSectionId } of selection) {
+          if (expectedSectionId === input.sectionId) continue;
+          organization.set(conversationId, { ...getOrganization(conversationId), section: destination });
+          moved++;
+        }
+        return moved;
+      }
       case "export_conversation_markdown":
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong export scope");
         return true;
@@ -271,11 +312,13 @@ it("moves an already open conversation to the side with the same mounted compose
   await screen.findByRole("region", { name: "Conversation library" });
   await user.click(await library().findByRole("button", { name: original }));
   const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)?.conversationId).toBe(archiveId));
   const edited = `${draft}\nRetain this unsent edit across a split.`;
   fireEvent.change(input, { target: { value: edited } });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
   await user.click(library().getByRole("button", { name: "Live handoff" }));
   const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)).toBeUndefined());
   const originalTab = () => screen.getByRole("tab", { name: original });
   expect(originalTab().closest(".dv-groupview")).toBe(companion.closest(".dv-groupview"));
 
@@ -285,9 +328,55 @@ it("moves an already open conversation to the side with the same mounted compose
   await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
   await waitFor(() => expect(originalTab().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
   await waitFor(() => expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input));
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)?.conversationId).toBe(archiveId));
   expect(input.value).toBe(edited);
   expect(screen.getAllByRole("tab", { name: original })).toHaveLength(1);
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("uses the clicked conversation tab for its menu and preserves its mounted draft when moving it", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  const edited = `${draft}\nKeep the selected tab's draft.`;
+  fireEvent.change(input, { target: { value: edited } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
+  await user.click(library().getByRole("button", { name: "Live handoff" }));
+  const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  const source = () => screen.getByRole("tab", { name: original });
+  const choose = async (action: string) => {
+    fireEvent.contextMenu(source());
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+  };
+
+  await choose("Copy conversation ID");
+  expect(await navigator.clipboard.readText()).toBe(archiveId);
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+  source().focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree folder" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: selected.checkoutId, relativePath: "", action: "open" });
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+  await user.click(within(source()).getByRole("button", { name: `Actions for ${original} tab` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Export conversation as Markdown…" }));
+  expect(invoke).toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: selected.checkoutId, conversationId: archiveId });
+  expect(invoke).not.toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: selected.checkoutId, conversationId: liveId });
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+
+  await choose("Move tab right");
+  await waitFor(() => expect(screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual(["Live handoff", original]));
+  await choose("Split tab right");
+  await waitFor(() => expect(source().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
+  expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input);
+  expect(input.value).toBe(edited);
+
+  await choose("Close tab");
+  expect(screen.queryByRole("tab", { name: original })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Live handoff" })).toBeTruthy();
+  await user.click(library().getByRole("button", { name: original }));
+  await waitFor(() => expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(edited));
 });
 
 it("persists library and tab renames, restores older history and draft, and shares the saved title with the reference picker", async () => {
@@ -508,6 +597,103 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
 });
 
+it("renames and reorders a saved section, including empty sections, without changing membership", async () => {
+  repository();
+  const first = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  for (const name of ["Zulu", "Alpha"]) {
+    fireEvent.contextMenu(await library().findByRole("button", { name: original }));
+    const submenu = await screen.findByRole("menuitem", { name: "Section" });
+    submenu.focus();
+    await first.user.keyboard("{ArrowRight}");
+    await first.user.click(await screen.findByRole("menuitem", { name: "New section…" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Create section" }));
+    await first.user.type(dialog.getByRole("textbox", { name: "Section name" }), name);
+    await first.user.click(dialog.getByRole("button", { name: "Save" }));
+    await screen.findByRole("region", { name });
+  }
+  const order = () => library().getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+  expect(order()).toEqual(["Conversations", "Zulu", "Alpha"]);
+  expect(within(library().getByRole("region", { name: "Zulu" })).getByText("No conversations in this section.")).toBeTruthy();
+
+  const actions = library().getByRole("button", { name: "Actions for Alpha section" });
+  actions.focus();
+  await first.user.keyboard("{Shift>}{F10}{/Shift}");
+  await first.user.click(await screen.findByRole("menuitem", { name: "Rename section…" }));
+  const rename = within(await screen.findByRole("dialog", { name: "Rename section" }));
+  const name = rename.getByRole("textbox", { name: "Section name" });
+  await first.user.clear(name);
+  await first.user.type(name, "Beta");
+  await first.user.click(rename.getByRole("button", { name: "Save" }));
+  const beta = await screen.findByRole("heading", { name: "Beta" });
+  expect(order()).toEqual(["Conversations", "Zulu", "Beta"]);
+  expect(invoke).toHaveBeenCalledWith("organize_conversation_library_section", {
+    projectId: selected.projectId, sectionId: "section-3", change: { type: "rename", expectedName: "Alpha", name: "Beta" },
+  });
+
+  fireEvent.contextMenu(beta);
+  expect((await screen.findByRole("menuitem", { name: "Move section down" })).hasAttribute("data-disabled")).toBe(true);
+  await first.user.click(screen.getByRole("menuitem", { name: "Move section up" }));
+  await waitFor(() => expect(order()).toEqual(["Conversations", "Beta", "Zulu"]));
+  expect(invoke).toHaveBeenCalledWith("organize_conversation_library_section", {
+    projectId: selected.projectId, sectionId: "section-3", change: { type: "move", neighborId: "section-2", before: true },
+  });
+  first.unmount();
+  mount();
+  await screen.findByRole("region", { name: "Beta" });
+  expect(order()).toEqual(["Conversations", "Beta", "Zulu"]);
+  expect(within(library().getByRole("region", { name: "Beta" })).getByRole("button", { name: original })).toBeTruthy();
+});
+
+it("moves a reviewed selection in one project from row and section context menus", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  fireEvent.contextMenu(await library().findByRole("button", { name: original }));
+  const submenu = await screen.findByRole("menuitem", { name: "Section" });
+  submenu.focus();
+  await user.keyboard("{ArrowRight}");
+  await user.click(await screen.findByRole("menuitem", { name: "New section…" }));
+  const create = within(await screen.findByRole("dialog", { name: "Create section" }));
+  await user.type(create.getByRole("textbox", { name: "Section name" }), "Triage");
+  await user.click(create.getByRole("button", { name: "Save" }));
+  await screen.findByRole("region", { name: "Triage" });
+
+  fireEvent.contextMenu(library().getByRole("button", { name: "Live handoff" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Select conversations to move…" }));
+  expect((library().getByRole("checkbox", { name: "Select Live handoff" }) as HTMLInputElement).checked).toBe(true);
+  expect(library().queryByRole("checkbox", { name: "Select Audit details" })).toBeNull();
+  await user.click(library().getByRole("checkbox", { name: `Select ${original}` }));
+  await user.click(library().getByRole("button", { name: "Move selected conversations…" }));
+  const review = within(await screen.findByRole("dialog", { name: "Move selected conversations" }));
+  expect(review.getByText("2 selected")).toBeTruthy();
+  expect(review.getByText(original)).toBeTruthy();
+  expect(review.getByText("Live handoff")).toBeTruthy();
+  expect(review.queryByRole("option", { name: "Audit only" })).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("move_conversations_to_library_section", expect.anything());
+  await user.selectOptions(review.getByRole("combobox", { name: "Destination section" }), "section-2");
+  await user.click(review.getByRole("button", { name: "Move" }));
+  const inSection = within(await screen.findByRole("region", { name: "Triage" }));
+  expect(inSection.getByRole("button", { name: "Live handoff" })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("move_conversations_to_library_section", {
+    projectId: selected.projectId, sectionId: "section-2", selection: [
+      { checkoutId: selected.checkoutId, conversationId: liveId, expectedSectionId: null },
+      { checkoutId: selected.checkoutId, conversationId: archiveId, expectedSectionId: "section-2" },
+    ],
+  });
+
+  fireEvent.contextMenu(inSection.getByRole("heading", { name: "Triage" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Select visible conversations to move…" }));
+  expect(library().getByText("2 selected")).toBeTruthy();
+  await user.click(library().getByRole("button", { name: "Move selected conversations…" }));
+  const remove = within(await screen.findByRole("dialog", { name: "Move selected conversations" }));
+  await user.selectOptions(remove.getByRole("combobox", { name: "Destination section" }), "");
+  await user.click(remove.getByRole("button", { name: "Move" }));
+  expect(await screen.findByText("Moved 2 conversations.")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Triage" })).getByText("No conversations in this section.")).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
 it("exports the clicked conversation using its actual checkout, including from Archived", async () => {
   repository();
   const { user, onOpenOtherCheckout } = mount();
@@ -547,6 +733,25 @@ it("opens a same-project linked worktree and only shows another project's conver
   expect(await library().findByRole("button", { name: "Audit details" })).toBeTruthy();
   expect(library().queryByRole("button", { name: "Linked worktree review" })).toBeNull();
   expect(invoke).toHaveBeenCalledWith("conversation_library", { query: null, projectId: other.projectId });
+});
+
+it("opens the clicked conversation's worktree folder and navigates to its IDE", async () => {
+  repository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByRole("region", { name: "Conversation library" }, { timeout: 8_000 });
+  fireEvent.contextMenu(await library().findByRole("button", { name: "Linked worktree review" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree folder in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: linked.checkoutId, relativePath: "", action: "open" });
+  expect(invoke).not.toHaveBeenCalledWith("select_active_checkout", expect.anything());
+
+  fireEvent.keyDown(library().getByRole("button", { name: "Linked worktree review" }), { key: "F10", shiftKey: true });
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree in IDE" }));
+  await screen.findByRole("region", { name: "IDE workspace" });
+  expect(screen.getByRole("button", { name: "Switch repository or worktree" }).textContent).toContain("Launch / launch-review");
+  expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: linked.checkoutId });
+  expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: linked.checkoutId, conversationId: linkedId });
 });
 
 it("opens saved conversations from the compact library and returns space to the transcript", async () => {

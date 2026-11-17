@@ -323,6 +323,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
       openActivity: (runId, conversationId, requestId) => showSide({
         type: "activity", runId, conversationId, focusQuestion: requestId === undefined ? undefined : { requestId },
       }),
+      openCheckoutWorkspace: simulation ? undefined : async (selected, destination) => {
+        if (selected.projectId !== checkout.projectId) throw new Error("This worktree is unavailable in the current project.");
+        if (selected.checkoutId === checkout.checkoutId) setRealNavigation((current) => show(destination.workspace, destination.target, current));
+        else await onSelectCheckout(selected, undefined, destination);
+      },
       openChanges: (target) => showSide({ type: "changes", target }),
       openQueueJob: simulation ? undefined : (jobId) => {
         rememberQueueTrigger();
@@ -469,6 +474,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
           {realQueue && <WorkbenchPanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue"
             drawer={queueDrawer} drawerClass="work-queue-drawer" label="Queue" open={!preview && realQueue === "open" && !(queueDrawer && side)} onClose={closeQueue}>
             <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
+              onOpenRegisteredWorktree={(source, destination) => onSelectCheckout(source, undefined, destination)}
               active={!preview && realQueue === "open"} onClose={closeQueue} /></Suspense>
           </WorkbenchPanel>}
           {previewQueue && simulated && <WorkbenchPanel className="work-queue-panel" edge="top" resizeKey="example-queue" resizeLabel="queue"
@@ -509,7 +515,7 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, deckV
   compact: boolean;
   deckVisible?: boolean;
   openSystem?: () => void;
-  onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
+  onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId?: string, destination?: WorkspaceDestination) => Promise<void>;
 }) {
   return Object.entries(nav.visited).map(([id, state]) => {
     const workspace = id as WorkspaceId;
@@ -521,7 +527,11 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, deckV
         {workspace === "conversations" ? context.simulation
           ? <ConversationsPreview {...context} target={target} compact={compact} />
           : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
-            compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} />
+            compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} onOpenCheckoutInIde={async (source) => {
+              if (source.checkoutId === context.checkout.checkoutId) context.openWorkspace("ide");
+              else if (onOpenOtherCheckout) await onOpenOtherCheckout(source, undefined, { workspace: "ide" });
+              else throw new Error("This worktree cannot be opened from the current workspace.");
+            }} />
           : workspace === "diagnostics" ? context.simulation
             ? <SimulationDiagnostics {...context} openSystem={openSystem} />
             : <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />

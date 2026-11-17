@@ -6,6 +6,7 @@ import { PipelineTemplateList } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { packageDraftTarget, type PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import { useWorkflowExchangeDownload } from "@/workflow-exchange";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
 import type { WorkflowDefinitions, WorkflowGraph, WorkflowLayout, WorkflowReuseSelection } from "@/workflow-graph-model";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
@@ -29,6 +30,7 @@ function templateQuery(projectId: string, version: ReusableVersion | undefined) 
 export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
+  const download = useWorkflowExchangeDownload(projectId);
   const [selected, setSelected] = useState<PublishedWorkflow>();
   const [derivation, setDerivation] = useState<{ graph: SavedWorkflow; selection: WorkflowReuseSelection }>();
   const [initialLaunch, setInitialLaunch] = useState<number>();
@@ -92,6 +94,7 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
     {catalog.isPending && <p role="status">Loading saved workflow templates…</p>}
     {catalog.error && <p role="alert">{String(catalog.error)}</p>}
     {revise.error && <p role="alert">{String(revise.error)}</p>}
+    {download.error && <p role="alert">{String(download.error)}</p>}
     {message && <p role={message.error ? "alert" : "status"}>{message.text}</p>}
     {catalog.data && <fieldset disabled={revise.isPending}><PipelineTemplateList entries={templates.map((template) => {
       const { version, name } = template;
@@ -102,6 +105,7 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
           { label: "Configure run of this revision…", disabled: revise.isPending, run: () => inspect(template, true) },
         ] : []),
         { label: "Duplicate as project draft…", disabled: revise.isPending, run: () => revise.mutate({ template, duplicate: true }) },
+        { label: "Download package for this revision", disabled: download.isPending, run: () => download.mutate([version]) },
       ], [
         { label: "Copy workflow ID", run: () => void copy(() => version.id) },
         { label: "Copy revision ID", run: () => void copy(() => version.revision) },

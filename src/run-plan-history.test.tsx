@@ -131,3 +131,46 @@ it("opens frozen plan versions, revision feedback, and the prior release in the 
   await user.click(comparison.getByRole("button", { name: "Open compared attempt" }));
   expect(openActivity).toHaveBeenLastCalledWith("original-planner");
 });
+
+it("prepares feedback about only the selected lines of a saved plan revision", async () => {
+  const projectId = "project";
+  const runId = "current-attempt";
+  const sourceRunId = "prior-attempt";
+  const checkoutId = "linked-worktree";
+  const text = "Keep earlier text private\r\nReview this exact step.\r\nRun the current fixture.\r\nUnselected final text.";
+  const excerpt = "Review this exact step.\r\nRun the current fixture.";
+  const open = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "repository_plan_history") return { request: null, versions: [{ revisionId: "old-plan", sourceRunId, eventSequence: "17", text }] };
+    if (command === "list_conversations") return [{ id: "target-chat", title: "Plan review" }];
+    if (command === "append_checkout_context_to_conversation") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={queryClient()}>
+    <RunPlanHistory projectId={projectId} runId={runId} openActivity={vi.fn()} draftDestination={{ checkoutId, open }} />
+  </QueryClientProvider>);
+  await user.click(screen.getByText("Plan revision history"));
+  await user.click(await screen.findByText("Proposal 17"));
+  const pre = screen.getByText(/Keep earlier text private/, { selector: "pre" });
+  const selection = document.getSelection()!;
+  const range = document.createRange();
+  const start = text.indexOf(excerpt);
+  range.setStart(pre.firstChild!, start);
+  range.setEnd(pre.firstChild!, start + excerpt.length);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  fireEvent.contextMenu(pre);
+  await user.click(await screen.findByRole("menuitem", { name: "Review selected plan excerpt…" }));
+  selection.removeAllRanges();
+  const dialog = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(dialog.getByText("Plan revision old-plan · Run prior-attempt · Proposal 17 · Lines 2–3")).toBeTruthy();
+  expect(dialog.getByLabelText("Selected text").textContent).toBe(excerpt);
+  await user.selectOptions(dialog.getByLabelText("Conversation"), "target-chat");
+  await user.click(dialog.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+    checkoutId, conversationId: "target-chat", context: expect.stringContaining(`\n\n\`\`\`markdown\n${excerpt}\n\`\`\``),
+  }));
+  expect(open).toHaveBeenCalledWith("target-chat");
+  expect(invoke).not.toHaveBeenCalledWith("request_repository_plan_revision", expect.anything());
+});

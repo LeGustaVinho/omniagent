@@ -40,7 +40,8 @@ it("positions and focuses Monaco before invoking the available native Quick Fix"
   const model = { getLanguageId: () => "typescript", onDidChangeContent: subscribe, onDidChangeLanguage: subscribe };
   const run = vi.fn(async () => undefined);
   const getAction = vi.fn(() => ({ isSupported: () => true, run }));
-  const instance = { getAction, setPosition: vi.fn(), revealLineInCenter: vi.fn(), focus: vi.fn(), saveViewState: () => null, dispose: vi.fn() };
+  const instance = { getAction, addAction: subscribe, onContextMenu: subscribe, setPosition: vi.fn(),
+    revealLineInCenter: vi.fn(), focus: vi.fn(), saveViewState: () => null, dispose: vi.fn() };
   vi.mocked(loadMonaco).mockResolvedValue({
     Uri: { from: () => ({ toString: () => "source-uri" }) },
     MarkerSeverity: { Error: 8, Warning: 4 },
@@ -78,36 +79,50 @@ it("offers supported model settings and copies the saved byte format reported by
 
 it("looks up the right-clicked source line in the editor's exact checkout and uses its unsaved text", async () => {
   const subscribe = () => ({ dispose: vi.fn() });
-  let context: (event: { target: { position?: { lineNumber: number } } }) => void = () => undefined;
+  const gutterLineNumbers = 3;
+  type MouseEvent = { event: { preventDefault(): void; stopPropagation(): void; browserEvent: { clientX: number; clientY: number } };
+    target: { type: number; position: { lineNumber: number } } };
+  const contextListeners: ((event: MouseEvent) => void)[] = [];
   let showBlame: (() => void) | undefined;
   const editorText = "first\nunsaved editor line\n";
   const getValue = vi.fn(() => editorText);
-  const model = { getLanguageId: () => "typescript", getValue, onDidChangeContent: subscribe, onDidChangeLanguage: subscribe };
+  const model = { getLanguageId: () => "typescript", getValue, getLineContent: (line: number) => editorText.split("\n")[line - 1],
+    onDidChangeContent: subscribe, onDidChangeLanguage: subscribe };
   const instance = {
     getPosition: () => ({ lineNumber: 1 }),
-    addAction: ({ id, run }: { id: string; run: () => void }) => { if (id === "omniagent.git-line-blame") showBlame = run; },
-    onContextMenu: (listener: typeof context) => { context = listener; return subscribe(); },
+    addAction: ({ id, run }: { id: string; run: () => void }) => {
+      if (id === "omniagent.git-line-blame") showBlame = run;
+      return subscribe();
+    },
+    onContextMenu: (listener: (event: MouseEvent) => void) => { contextListeners.push(listener); return subscribe(); },
     onMouseDown: subscribe, onKeyDown: subscribe, getAction: () => undefined,
     focus: vi.fn(), saveViewState: () => null, dispose: vi.fn(),
   };
   vi.mocked(loadMonaco).mockResolvedValue({
     Uri: { from: () => ({ toString: () => "source-uri" }) },
-    editor: { EndOfLinePreference: { LF: 1 }, createModel: () => model, create: () => instance, getModelMarkers: () => [], onDidChangeMarkers: subscribe },
+    editor: { EndOfLinePreference: { LF: 1 }, MouseTargetType: { GUTTER_LINE_NUMBERS: gutterLineNumbers },
+      createModel: () => model, create: () => instance, getModelMarkers: () => [], onDidChangeMarkers: subscribe },
   } as unknown as Awaited<ReturnType<typeof loadMonaco>>);
   vi.mocked(invoke).mockResolvedValueOnce({ status: "uncommitted", reason: "This editor line has no matching line in the checkout HEAD." });
   const copy = vi.fn();
   render(<CodeEditor scope="test" path="src/app.ts" content="saved" models={new Map()} update={vi.fn()} problems={vi.fn()}
     blameCheckoutId="linked-checkout" onCopy={copy} />);
   await waitFor(() => expect(showBlame).toBeTypeOf("function"));
-  act(() => { context({ target: { position: { lineNumber: 2 } } }); showBlame?.(); });
+  const user = userEvent.setup();
+  const click = (type: number, lineNumber: number) => {
+    const event = { preventDefault: vi.fn(), stopPropagation: vi.fn(), browserEvent: { clientX: 40, clientY: 20 } };
+    act(() => { for (const listener of contextListeners) listener({ event, target: { type, position: { lineNumber } } }); });
+  };
+  click(gutterLineNumbers, 2);
+  await user.click(await screen.findByRole("menuitem", { name: "Show Git blame for line…" }));
   expect(await screen.findByText(/no matching line/)).toBeTruthy();
   expect(invoke).toHaveBeenCalledExactlyOnceWith("git_checkout_line_blame", { checkoutId: "linked-checkout", path: "src/app.ts", line: 2, editorText });
   expect(getValue).toHaveBeenCalledWith(1);
-  const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Close dialog" }));
   const commit = "f123".repeat(10);
   vi.mocked(invoke).mockResolvedValueOnce({ status: "committed", commit, head: "00ff".repeat(10), author: "Author Name",
     summary: "First line", authoredAt: 123_456, headLine: 1, originalLine: 5 });
+  click(6, 1);
   act(() => showBlame?.());
   expect(await screen.findByText("Author Name")).toBeTruthy();
   expect(screen.getByText("src/app.ts:1")).toBeTruthy();

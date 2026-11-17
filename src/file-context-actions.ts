@@ -195,6 +195,12 @@ export function fileContextActions({ checkout, simulated, status, report, curren
         ...(target.kind === "file" ? [
           { label: "Open in default application", run: () => shell(path, "open") },
           { label: "Open with another application…", run: () => shell(path, "open_with") },
+          { label: "Open in external editor", run: () => {
+            report("");
+            void invoke("open_checkout_file_in_external_editor", { checkoutId: checkout.checkoutId, relativePath: path })
+              .then(() => status("Started external editor for " + fileName(path)))
+              .catch((error: unknown) => report(String(error)));
+          } },
         ] : []),
       ] : []),
     ], [{ label: "Copy", items: [

@@ -35,8 +35,8 @@ pub(crate) use checklists::progress::{
     ChecklistProgressRequest, set_pipeline_checklist_item_checked_in_transaction,
 };
 pub use checklists::{
-    ChecklistDispatchTarget, ChecklistExecutionMode, ChecklistItem, TaskChecklist,
-    TaskChecklistModeSettings,
+    ChecklistDispatchTarget, ChecklistExecutionMode, ChecklistItem, ChecklistOrderAnchor,
+    TaskChecklist, TaskChecklistModeSettings,
 };
 pub use delivery::milestone::{
     DeliveryCompletionMilestone, DeliveryMilestonePolicy, PendingTaskDeliveryMerge,

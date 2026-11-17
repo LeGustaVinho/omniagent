@@ -88,6 +88,80 @@ pub async fn git_checkout_history(
 }
 
 #[tauri::command]
+pub async fn git_checkout_commit_details(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHistoryCommitRequest,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDetails, String> {
+    store
+        .git_checkout_commit_details(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_checkout_commit_diff(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHistoryCommitRequest,
+    path: String,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_checkout_commit_diff(checkout_id, request, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commits(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: omniagent::repository::git_review::GitCommitRange,
+) -> Result<Vec<omniagent::repository::git_review::GitHistoryCommitFile>, String> {
+    store
+        .git_compare_commits(checkout_id, range)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commit_file(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: omniagent::repository::git_review::GitCommitRange,
+    path: String,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_compare_commit_file(checkout_id, range, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commit_checkout(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitCommitCheckoutRequest,
+) -> Result<omniagent::repository::git_review::GitCommitCheckoutComparison, String> {
+    store
+        .git_compare_commit_checkout(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commit_checkout_file(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitCommitCheckoutFileRequest,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_compare_commit_checkout_file(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_file_history(
     store: State<'_, Store>,
     checkout_id: String,
@@ -286,6 +360,19 @@ pub async fn git_set_review_comment_resolved(
 }
 
 #[tauri::command]
+pub async fn create_git_branch(
+    store: State<'_, Store>,
+    checkout_id: String,
+    branch: String,
+    expected_head: String,
+) -> Result<(), String> {
+    store
+        .create_git_branch(checkout_id, branch, expected_head)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn create_git_worktree(
     app: AppHandle,
     store: State<'_, Store>,
@@ -375,9 +462,10 @@ pub async fn commit_git_index(
 pub async fn git_saved_attempts(
     store: State<'_, Store>,
     project_id: String,
+    checkout_id: Option<String>,
 ) -> Result<Vec<SavedGitAttempt>, String> {
     store
-        .git_saved_attempts(project_id)
+        .git_saved_attempts(project_id, checkout_id)
         .await
         .map_err(review_error)
 }

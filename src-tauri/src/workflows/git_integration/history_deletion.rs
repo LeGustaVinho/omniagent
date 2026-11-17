@@ -32,7 +32,7 @@ async fn deletes_recorded_workflow_diff_and_derivatives_without_erasing_verified
     )
     .await?;
     let attempt = store
-        .git_saved_attempts(fixture.project.clone())
+        .git_saved_attempts(fixture.project.clone(), None)
         .await?
         .into_iter()
         .find(|attempt| attempt.run_id == run)
@@ -103,7 +103,7 @@ async fn deletes_recorded_workflow_diff_and_derivatives_without_erasing_verified
             .await?
             .is_none()
     );
-    let saved = store.git_saved_attempts(fixture.project.clone()).await?;
+    let saved = store.git_saved_attempts(fixture.project.clone(), None).await?;
     assert!(
         saved
             .iter()

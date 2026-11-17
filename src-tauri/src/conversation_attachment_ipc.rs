@@ -6,7 +6,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use omniagent::{
-    conversations::draft_files::{AttachmentDraft, AttachmentDraftReview, DraftAttachmentEdit},
+    conversations::draft_files::{
+        AttachmentDraft, AttachmentDraftReview, DraftAttachmentEdit,
+        ReuseSavedConversationAttachment,
+    },
     diagnostics,
     model_catalog::ModelSelection,
     providers::SessionMode,
@@ -150,6 +153,17 @@ pub async fn add_checkout_files_to_conversation(
 ) -> Result<AttachmentDraft, String> {
     store
         .add_conversation_checkout_paths(conversation_id, checkout_id, paths)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn reuse_saved_conversation_attachment(
+    store: State<'_, Store>,
+    request: ReuseSavedConversationAttachment,
+) -> Result<AttachmentDraft, String> {
+    store
+        .reuse_saved_conversation_attachment(request)
         .await
         .map_err(ui_error)
 }

@@ -110,6 +110,7 @@ it("stages the verified backup only after confirmation and reports the pending r
       case "appearance_settings": return defaultAppearance;
       case "runtime_status": return "Desktop runtime is ready.";
       case "ripgrep_status": return { configuredExecutable: null, executable: null, version: null };
+      case "external_editor_setting": return null;
       case "desktop_cli_prerequisites": return { git: {}, providers: [] };
       case "signed_update_status": return { configured: false, latest: null };
       case "application_restore_status": return { active: null, pending, rejection: null };
@@ -128,6 +129,48 @@ it("stages the verified backup only after confirmation and reports the pending r
   await user.click(screen.getByRole("button", { name: "Stage restore for next restart" }));
   expect(invoke).toHaveBeenCalledWith("stage_application_restore", { archive, manifestSha256: "a".repeat(64) });
   expect(await screen.findByText(/Restore staged\. Quit OmniAgent/)).toBeTruthy();
+});
+
+it("finds the device's external editor setting, preserves it on cancel and clears it on request", async () => {
+  const selected = "C:\\Program Files\\Editor\\Editor.exe";
+  let pick: string | null = selected;
+  getVersion.mockResolvedValue("0.1.0");
+  invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "runtime_status": return "Desktop runtime is ready.";
+      case "ripgrep_status": return { configuredExecutable: null, executable: null, version: null };
+      case "desktop_cli_prerequisites": return { git: {}, providers: [] };
+      case "signed_update_status": return { configured: false, latest: null };
+      case "application_restore_status": return { active: null, pending: null, rejection: null };
+      case "external_editor_setting": return null;
+      case "choose_external_editor": return pick;
+      case "clear_external_editor": return;
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ simulation: null, checkout: null });
+  const user = userEvent.setup();
+  await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "external editor");
+  await user.click(screen.getByRole("button", { name: "External editor in System" }));
+  const path = screen.getByRole<HTMLInputElement>("textbox", { name: "External editor executable" });
+  const choose = screen.getByRole<HTMLButtonElement>("button", { name: "Choose executable…" });
+  const clear = screen.getByRole<HTMLButtonElement>("button", { name: "Clear external editor" });
+  expect(clear.disabled).toBe(true);
+
+  await user.click(choose);
+  await waitFor(() => expect(path.value).toBe(selected));
+  expect(clear.disabled).toBe(false);
+  pick = null;
+  await user.click(choose);
+  await waitFor(() => expect(choose.disabled).toBe(false));
+  expect(path.value).toBe(selected);
+
+  await user.click(clear);
+  await waitFor(() => expect(path.value).toBe(""));
+  expect(clear.disabled).toBe(true);
+  expect(invoke.mock.calls.filter(([command]) => command === "choose_external_editor")).toHaveLength(2);
+  expect(invoke.mock.calls.filter(([command]) => command === "clear_external_editor")).toHaveLength(1);
 });
 
 it("saves execution capacity in the same device scheduler used by the queue", async () => {

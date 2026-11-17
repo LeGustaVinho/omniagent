@@ -7,12 +7,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "@/knowledge-workspace";
+import { getProperties, noteFrontmatter } from "@/knowledge-document";
 import type { NoteRevision } from "@/repository-note-buffers";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import { readWorkflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   Channel: class { onmessage = () => {}; },
+}));
+vi.mock("@/git-diff-view", () => ({
+  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
+    <div aria-label="Compared note versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
 }));
 
 const rangeLayout = {
@@ -56,6 +62,83 @@ const documentAt = (relativePath: string, id: string, markdown: string) => ({
   fileIdentity: relativePath,
 });
 
+it("edits the exact Reading property in the draft and searches same-value notes with the new YAML overlay", async () => {
+  const source = "\uFEFF---\r\n'phase': 'ready'  # preserve me\r\nflag: one\r\n'flag': two\r\n---\r\n# Review release\r\n";
+  const updated = source.replace("'ready'", '"done"');
+  const other = "notes/Second.md";
+  const fixture = mockRepository([documentAt(release, "phase-note", source), documentAt(other, "matching-note", "---\nphase: done\n---\n# Second\n")]);
+  const normal = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "describe_note_properties") {
+      const markdown = (args as { markdown: string }).markdown;
+      if (markdown.includes("'phase':")) return [
+        { name: "phase", line: 2, value: markdown.includes('"done"') ? '"done"' : "'ready'", editable: true, filterable: true },
+        { name: "flag", line: 3, value: "one", editable: false, filterable: false },
+        { name: "flag", line: 4, value: "two", editable: false, filterable: false },
+      ];
+    }
+    if (command === "replace_note_property") {
+      expect(args).toEqual({ markdown: source, key: "phase", value: '"done"' });
+      return updated;
+    }
+    if (command === "search_repository_note_properties") {
+      expect(args).toEqual({ checkoutId, key: "phase", value: '"done"', drafts: { [release]: noteFrontmatter(updated) } });
+      return [{ path: other, title: "Second", line: 2, value: "done" }];
+    }
+    return normal(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  await user.click(screen.getByRole("button", { name: "Reading" }));
+  const reading = within(await screen.findByLabelText(`Reading view for ${release}`, undefined, { timeout: 5000 }));
+  await reading.findByText("phase", { selector: "dt" });
+  fireEvent.contextMenu(reading.getByText("two", { selector: "dd" }));
+  expect(await screen.findByRole("menuitem", { name: "Copy property value" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Edit property…" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Find notes with this property value" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  fireEvent.contextMenu(reading.getByText("phase", { selector: "dt" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit property…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Edit YAML property" }));
+  const field = dialog.getByRole("textbox", { name: "phase" });
+  expect(field).toHaveProperty("value", "'ready'");
+  await user.clear(field);
+  await user.type(field, '"done"');
+  await user.click(dialog.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(fixture.drafts.get(release)?.markdown).toBe(updated));
+  expect(fixture.writes).not.toHaveBeenCalled();
+
+  fireEvent.contextMenu(await reading.findByText('"done"', { selector: "dd" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Find notes with this property value" }));
+  const match = await screen.findByRole("option", { name: /Second.*Line 2.*phase: done/ });
+  await user.click(match);
+  expect(await screen.findByLabelText(`Reading view for ${other}`)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Clear property filter" }));
+  expect(screen.queryByRole("button", { name: "Clear property filter" })).toBeNull();
+});
+
+it.each(["Source", "Live Preview"])("offers the exact YAML property menu in %s", async (mode) => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={checklist} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(checklist);
+  await user.click(screen.getByRole("button", { name: "Note details" }));
+  await user.click(screen.getByRole("button", { name: "Properties" }));
+  await screen.findByRole("textbox", { name: "aliases" });
+  await user.click(screen.getByRole("button", { name: mode }));
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  act(() => view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 2 } }));
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  expect(screen.queryByRole("menuitem", { name: "Format Markdown" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Edit property…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Edit YAML property" }));
+  expect(dialog.getByRole("textbox", { name: "aliases" })).toHaveProperty("value", "[Launch checklist]");
+});
+
 type NoteChange = { checkoutId: string; relativePath: string };
 type DocumentFixture = ReturnType<typeof documentAt>;
 type SaveRace = {
@@ -63,11 +146,12 @@ type SaveRace = {
   recovery: { message: string; editedPath: string; displacedPath: string };
 };
 
-function mockRepository() {
+function mockRepository(extra: DocumentFixture[] = []) {
   const onDisk = new Map([
     [release, documentAt(release, "release-1", releaseSource)],
     [checklist, documentAt(checklist, "checklist-1", checklistSource)],
   ]);
+  for (const document of extra) onDisk.set(document.revision.relativePath, document);
   type Draft = { revision: string; base: NoteRevision; markdown: string };
   const drafts = new Map<string, Draft>();
   const watchers = new Map<string, (event: NoteChange) => void>();
@@ -89,11 +173,13 @@ function mockRepository() {
       case "repository_note_catalog": return [
         { path: release, frontmatter: null },
         { path: checklist, frontmatter: checklistProperties },
+        ...extra.map(({ revision }) => ({ path: revision.relativePath, frontmatter: null })),
       ];
       case "repository_note_planning": return [];
       case "rebuild_repository_note_index": return [
         { id: 1, path: release, title: "Release notes", tags: [], frontmatter: null },
         { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
+        ...extra.map(({ revision }, index) => ({ id: index + 3, path: revision.relativePath, title: revision.relativePath, tags: [], frontmatter: null })),
       ];
       case "search_repository_note_index": return [
         { path: checklist, title: "Launch notes", snippet: "Keep the saved checklist." },
@@ -116,6 +202,8 @@ function mockRepository() {
       }
       case "unwatch_repository_note": return;
       case "analyze_note_markdown": return { bufferRevision: input.bufferRevision, nodes: [] };
+      case "describe_note_properties": return getProperties(input.markdown).map(({ key, value, line }) => ({ name: key, value, line,
+        editable: true, filterable: true }));
       case "save_repository_markdown_draft": {
         const base = Array.from(onDisk.values()).find(({ revision }) => revision.id === input.baseRevision)?.revision;
         if (!base || input.expectedDraftRevision !== (drafts.get(base.relativePath)?.revision ?? null)) {
@@ -168,6 +256,55 @@ async function editor(path: string) {
 function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
+
+it("opens a closed note in the chosen group and saves only that group's dirty notes after resolving a conflict", async () => {
+  const appendix = "notes/Appendix.md";
+  const service = mockRepository([documentAt(appendix, "appendix-1", "# Appendix\n")]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const edit = async (path: string, addition: string) => {
+    const view = await editor(path);
+    act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: addition } }));
+  };
+  const groupOf = (name: string) => screen.getByRole("button", { name: `Close ${name}` }).closest<HTMLElement>(".dv-groupview")!;
+  await edit(release, "Release draft\n");
+  fireEvent.click(await screen.findByRole("button", { name: "notes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Checklist.md" }));
+  await edit(checklist, "Checklist draft\n");
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Close Checklist.md" }).closest(".file-tab-label")!);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move tab" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New group to the right" }));
+  expect(groupOf("Release.md")).not.toBe(groupOf("Checklist.md"));
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Appendix.md" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Open in editor group" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: /Group \d+ · Release\.md/ }));
+  await edit(appendix, "Appendix draft\n");
+  expect(groupOf("Appendix.md")).toBe(groupOf("Release.md"));
+  fireEvent.click(screen.getByRole("button", { name: "Checklist.md" }));
+  await waitFor(() => expect(groupOf("Checklist.md").classList.contains("dv-active-group")).toBe(true));
+
+  const saveGroup = async () => {
+    fireEvent.contextMenu(within(groupOf("Release.md")).getByRole("button", { name: "Actions for Editor group" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Save all tabs in group" }));
+  };
+  await waitFor(() => {
+    expect(service.drafts.size).toBe(3);
+    expect(service.isWatched(release)).toBe(true);
+  });
+  act(() => service.externalChange(documentAt(release, "release-external", "# External revision\n")));
+  await saveGroup();
+  const conflict = await screen.findByRole("dialog", { name: "Note revision conflict" });
+  expect(service.writes).not.toHaveBeenCalled();
+  expect(service.drafts.get(appendix)?.markdown).toContain("Appendix draft");
+  fireEvent.click(within(conflict).getByRole("button", { name: "Keep local edits" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Note revision conflict" })).toBeNull());
+
+  await saveGroup();
+  await waitFor(() => expect(service.writes.mock.calls.map(([args]) => args.path)).toEqual([release, appendix]));
+  expect(service.drafts.get(checklist)?.markdown).toContain("Checklist draft");
+  expect(groupOf("Checklist.md")).not.toBe(groupOf("Release.md"));
+});
 
 it("adds only the selected unsaved Markdown to an existing conversation draft", async () => {
   mockRepository();
@@ -324,6 +461,88 @@ it("previews a closed note and opens only that note when explicitly requested", 
   const opened = await editor(checklist);
   expect(opened.state.doc.toString()).toBe(checklistSource);
   expect(active.state.doc.toString()).toBe(releaseSource);
+});
+
+it("copies a Markdown link, opens Reading to the side and shows the Outline for the clicked note", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const original = await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  const target = await tree.findByRole("button", { name: "Checklist.md" });
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy Markdown link" }));
+  expect(await navigator.clipboard.readText()).toBe("[Checklist](/notes/Checklist.md)");
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Open Reading to the side" }));
+  const reading = await screen.findByLabelText(`Reading view for ${checklist}`);
+  expect(within(reading).getByRole("heading", { name: "Launch notes" })).toBeTruthy();
+  expect(reading.closest(".dv-groupview")).not.toBe(original.dom.closest(".dv-groupview"));
+  expect(original.contentDOM.closest("[hidden]")).toBeNull();
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Show Outline" }));
+  const outline = within(await screen.findByRole("region", { name: "Outline" }));
+  expect(await outline.findByRole("button", { name: "Launch notes" })).toBeTruthy();
+  expect(outline.queryByRole("button", { name: "Release notes" })).toBeNull();
+});
+
+it("compares a closed note on disk with the selected branch tip even when it has no history there", async () => {
+  mockRepository();
+  const base = { name: "other", reference: "refs/heads/other", sha: "c".repeat(40) };
+  const initial = "a".repeat(40);
+  let review = { checkoutId, root: props.checkout.checkoutRoot, managed: false,
+    revision: { branch: "refs/heads/main", head: initial, index: "index" }, changes: [], branches: [base], worktrees: [] };
+  let diskText = checklistSource;
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_checkout_review") return review;
+    if (command === "git_checkout_file_history") return { head: (args as { pinnedHead: string }).pinnedHead,
+      entries: [], hasMore: false };
+    if (command === "git_compare_file_versions") {
+      const { base: revision } = args as { base: { sha: string } };
+      return { original: revision.sha === base.sha ? { status: "missing" } : { status: "text", content: "# Saved at initial HEAD" },
+        modified: { status: "text", content: diskText } };
+    }
+    return backend(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await tree.findByRole("button", { name: "Checklist.md" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare file on disk with branch or commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare file on disk with Git revision" }));
+  await user.selectOptions(await dialog.findByLabelText("History branch"), base.reference);
+  expect(await dialog.findByText("This path did not exist at the selected revision.")).toBeTruthy();
+  expect(dialog.getByLabelText("Compared note versions").textContent).toBe(checklistSource);
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId, path: checklist, base: { kind: "commit", sha: base.sha, path: checklist }, revised: { kind: "worktree" },
+  });
+  expect(invoke).toHaveBeenCalledWith("git_checkout_file_history", {
+    checkoutId, path: checklist, branch: base.reference, pinnedHead: base.sha, offset: 0,
+  });
+
+  const moved = { ...base, sha: "d".repeat(40) };
+  review = { ...review, branches: [moved] };
+  await act(async () => { client.setQueryData(["git-review", checkoutId], review); });
+  diskText += "Refreshed on disk.\n";
+  await user.click(dialog.getByRole("button", { name: "Refresh disk version" }));
+  await waitFor(() => expect(dialog.getByLabelText("Compared note versions").textContent).toBe(diskText));
+  expect(invoke).not.toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId, path: checklist, base: { kind: "commit", sha: moved.sha, path: checklist }, revised: { kind: "worktree" },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
 });
 
 
@@ -586,6 +805,101 @@ it("starts Plan Mode delivery from the reviewed note revision and opens only its
   await act(() => client.invalidateQueries({ queryKey: ["repository-note-planning"] }));
   await user.click(await screen.findByRole("button", { name: "Open linked task" }));
   expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "real-task");
+});
+
+it("opens existing planning and a real linked Task for the clicked note's saved revision without launching work", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "repository_note_planning" && (args as { revisionId: string }).revisionId === "checklist-1") {
+      expect(args).toEqual({ projectId: props.checkout.projectId, checkoutId, revisionId: "checklist-1" });
+      return [{ runId: "earlier-planning-run", task: null },
+        { runId: "delivery-run", task: { id: "linked-task", title: "Verify checklist" } }];
+    }
+    return repository(command, args);
+  });
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  const note = await tree.findByRole("button", { name: "Checklist.md" });
+  async function planningDialog() {
+    fireEvent.contextMenu(note);
+    await user.click(await screen.findByRole("menuitem", { name: "Open linked planning / delivery…" }));
+    return within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
+  }
+  const dialog = await planningDialog();
+  expect(dialog.getByText(/notes\/Checklist\.md · checklist-1/)).toBeTruthy();
+  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
+  expect(openWorkspace).not.toHaveBeenCalled();
+  await user.click(await dialog.findByRole("button", { name: "Open planning · earlier-" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", "earlier-planning-run");
+
+  const reopened = await planningDialog();
+  await user.click(await reopened.findByRole("button", { name: "Open Task Verify checklist" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "linked-task");
+  expect(ipc).not.toHaveBeenCalledWith("start_repository_delivery", expect.anything());
+  expect(ipc).not.toHaveBeenCalledWith("launch_workflow_manual", expect.anything());
+});
+
+it("shows the saved revision's empty planning links while the tab has a draft", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Unpublished decision." } }));
+  fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
+  const plan = await screen.findByRole("menuitem", { name: "Plan from note…" });
+  expect(plan.getAttribute("aria-disabled")).toBe("true");
+  await user.click(screen.getByRole("menuitem", { name: "Open linked planning / delivery…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
+  expect(await dialog.findByText("No planning runs are linked to this saved revision.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("repository_note_planning", { projectId: props.checkout.projectId, checkoutId, revisionId: "release-1" });
+  expect(view.state.doc.toString()).toBe(releaseSource + "Unpublished decision.");
+});
+
+it("hands off the saved revision for both a conflicted draft and a different clicked closed note", async () => {
+  const repository = mockRepository();
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  await waitFor(() => expect(repository.isWatched(release)).toBe(true));
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Unsaved specification." } }));
+  await waitFor(() => expect(repository.drafts.get(release)?.markdown).toBe(releaseSource + "Unsaved specification."));
+  act(() => repository.externalChange(documentAt(release, "release-2", "# New content on disk")));
+  expect(await screen.findByRole("button", { name: "Review external change" })).toBeTruthy();
+  fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
+  expect((await screen.findByRole("menuitem", { name: "Plan from note…" })).getAttribute("aria-disabled")).toBe("true");
+  expect(screen.getByRole("menuitem", { name: "Run workflow from note…" }).getAttribute("aria-disabled")).toBe("true");
+  await user.click(screen.getByRole("menuitem", { name: "Compare models from note…" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(1));
+  expect(readWorkflowComparisonNoteTarget(openWorkspace.mock.calls[0]?.[1])).toEqual({
+    checkoutId, revisionId: "release-1", relativePath: release, sha256: "release-1-sha256",
+  });
+
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await tree.findByRole("button", { name: "Checklist.md" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare models from note…" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(2));
+  const [workspace, target] = openWorkspace.mock.calls[1]!;
+  expect(workspace).toBe("pipelines");
+  expect(readWorkflowComparisonNoteTarget(target)).toEqual({
+    checkoutId, revisionId: "checklist-1", relativePath: checklist, sha256: "checklist-1-sha256",
+  });
+  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
+  expect(view.state.doc.toString()).toBe(releaseSource + "Unsaved specification.");
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison_from_markdown", expect.anything());
 });
 
 it.each(["Live Preview", "Reading"])("opens an unopened note from the full-text index in %s", async (mode) => {

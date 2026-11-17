@@ -241,6 +241,7 @@
 .ide-terminal-pane { display: grid; grid-template-rows: auto minmax(0, 1fr); flex: 1 1 0; min-width: 0; min-height: 0; }
 .ide-terminal-pane[data-side="right"] { border-left: 1px solid var(--border); padding-left: 8px; }
 .ide-terminal-title .fw-btn { display: block; min-width: 0; min-height: 20px; padding: 1px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-problem-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 13px 0; font-size: 12px; }
 .ide-problems { list-style: none; margin: 0; padding: 8px 13px; }
 .ide-problem-open { display: flex; align-items: center; width: 100%; min-width: 0; gap: 8px; text-align: left; padding: 5px 8px; border-radius: 5px; font-size: 12px; }
 .ide-problem-open:hover { background: var(--muted); }
@@ -294,6 +295,7 @@
 .note-reading-properties dt { color: var(--muted-foreground); }
 .note-file-view :is(.note-media-image, video), .note-pdf-preview { display: block; max-width: 100%; }
 .note-reading article :is(h1,h2,h3,h4,h5,h6) { font-weight: 600; line-height: 1.28; scroll-margin: 14px; }
+.note-reading [data-note-section-collapsed]::after { content: '…' / ''; margin-inline-start: .5em; color: var(--muted-foreground); }
 .note-reading article h1 { margin: 4px 0 19px; font-size: 27px; letter-spacing: -.025em; }
 .note-reading article h2 { margin: 27px 0 9px; font-size: 19px; letter-spacing: -.015em; }
 .note-reading article h3 { margin: 22px 0 6px; font-size: 15px; }

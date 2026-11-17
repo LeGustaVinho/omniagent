@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     attachments::{AttachmentDelivery, AttachmentSource},
+    dispatch::load_saved_native_attachment,
     protection,
     providers::configuration::plain_metadata,
     repository,
@@ -34,6 +35,17 @@ pub struct AttachmentDraft {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReuseSavedConversationAttachment {
+    pub source_conversation_id: String,
+    pub run_id: String,
+    pub ordinal: usize,
+    pub message_revision_id: String,
+    pub source_sha256: String,
+    pub destination_conversation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DraftAttachmentEdit {
     Remove,
@@ -43,6 +55,33 @@ pub enum DraftAttachmentEdit {
 }
 
 impl Store {
+    pub async fn reuse_saved_conversation_attachment(
+        &self,
+        request: ReuseSavedConversationAttachment,
+    ) -> Result<AttachmentDraft> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let destination = load_conversation(&tx, &request.destination_conversation_id)?;
+            let project = checkout_project(&tx, &destination.checkout_id)?;
+            let saved = load_saved_native_attachment(
+                &tx,
+                &project,
+                &request.source_conversation_id,
+                &request.run_id,
+                request.ordinal,
+                &request.message_revision_id,
+            )?;
+            ensure!(
+                saved.metadata.sha256 == request.source_sha256,
+                "The saved attachment differs from the selected evidence."
+            );
+            let draft = append_sources(&tx, &destination.id, [saved.metadata.source])?;
+            tx.commit()?;
+            Ok(draft)
+        })
+        .await
+    }
+
     pub async fn conversation_attachment_draft(
         &self,
         conversation_id: String,
@@ -125,26 +164,7 @@ impl Store {
                 conversation.checkout_id == checkout_id,
                 "The conversation checkout changed. Select the files again."
             );
-            let draft = load_draft(&tx, &conversation_id)?;
-            let mut files = draft.files;
-            let prior_len = files.len();
-            for source in sources {
-                if files.iter().all(|item| item.source != source) {
-                    files.push(DraftAttachment {
-                        id: new_id(),
-                        source,
-                        delivery: None,
-                    });
-                }
-            }
-            let draft = if files.len() == prior_len {
-                AttachmentDraft {
-                    revision: draft.revision,
-                    files,
-                }
-            } else {
-                save_draft(&tx, &conversation_id, files)?
-            };
+            let draft = append_sources(&tx, &conversation_id, sources)?;
             tx.commit()?;
             Ok(draft)
         })
@@ -184,6 +204,36 @@ impl Store {
         })
         .await
     }
+}
+
+fn checkout_project(db: &Connection, checkout: &str) -> Result<String> {
+    Ok(db.query_row(
+        "SELECT project_id FROM checkouts WHERE id = ?1",
+        [checkout],
+        |row| row.get(0),
+    )?)
+}
+
+fn append_sources(
+    db: &Connection,
+    conversation: &str,
+    sources: impl IntoIterator<Item = AttachmentSource>,
+) -> Result<AttachmentDraft> {
+    let mut draft = load_draft(db, conversation)?;
+    let prior_len = draft.files.len();
+    for source in sources {
+        if draft.files.iter().all(|item| item.source != source) {
+            draft.files.push(DraftAttachment {
+                id: new_id(),
+                source,
+                delivery: None,
+            });
+        }
+    }
+    if draft.files.len() == prior_len {
+        return Ok(draft);
+    }
+    save_draft(db, conversation, draft.files)
 }
 
 fn selected_source(checkout: &Path, selected: &Path) -> Result<AttachmentSource> {

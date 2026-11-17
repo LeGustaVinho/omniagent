@@ -45,6 +45,41 @@ it("maps a source-line jump after frontmatter and an expanded embed to the rende
   expect(container.querySelector("[data-note-line-target]")?.nextElementSibling).toBe(screen.getByText("Jump here."));
 });
 
+it("folds duplicate reading sections independently and reveals a hidden target when navigating", () => {
+  const content = "# Release\n\nFirst section.\n\n## Nested\n\nChild section.[^root]\n\n# Release\n\nSecond section.\n\n## Empty\n\n[^root]: Document footnote.";
+  const props = { path: "Release.md", content, files: [], onLink: vi.fn(), onAttachment: vi.fn(), contextActions: () => [] };
+  const { rerender } = render(<NoteReading {...props} />);
+  const [first, second] = screen.getAllByRole("heading", { name: "Release" });
+  if (!first || !second) throw new Error("Both reading headings are required");
+  const firstBody = () => screen.getByText("First section.").closest("[hidden]");
+  const childBody = () => screen.getByText("Child section.").closest("[hidden]");
+  const secondBody = () => screen.getByText("Second section.").closest("[hidden]");
+
+  fireEvent.contextMenu(second);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Collapse section" }));
+  expect(firstBody()).toBeNull();
+  expect(secondBody()).toBeTruthy();
+  expect(screen.getByText("Document footnote.").closest("[hidden]")).toBeNull();
+  fireEvent.keyDown(second, { key: "F10", shiftKey: true });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Expand section" }));
+  expect(secondBody()).toBeNull();
+
+  fireEvent.contextMenu(first);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Collapse section" }));
+  expect(childBody()).toBeTruthy();
+  fireEvent.contextMenu(second);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Collapse section" }));
+  rerender(<NoteReading {...props} jump={{ line: 5, anchor: "Nested", token: 1 }} />);
+  expect(firstBody()).toBeNull();
+  expect(childBody()).toBeNull();
+  expect(secondBody()).toBeTruthy();
+
+  fireEvent.contextMenu(second);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Expand section" }));
+  fireEvent.contextMenu(screen.getByRole("heading", { name: "Empty" }));
+  expect(screen.queryByRole("menuitem", { name: "Collapse section" })).toBeNull();
+});
+
 it("keeps embedded links and rendered selections tied to their original note and source line", () => {
   const source = "---\nstatus: ready\n---\n# Launch\n\n![[ops/Checks#Verify]]\n\nAfter the embed.";
   const embedded = "---\nstatus: draft\n---\n# Preparation\n\n## Verify\n\nRead the checklist.\nSee [the handoff](./handoff%20%231.md#Ready).\n";

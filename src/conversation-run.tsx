@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Activity, Square, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { SubagentAuditGap } from "@/bindings/SubagentAuditGap";
 import { Button } from "@/components/ui/button";
 import { ConversationAgentTree, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
+import type { AttachmentDraftDestination } from "@/conversation-attachment-evidence";
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { ConversationInventory } from "@/conversation-inventory";
@@ -13,6 +14,7 @@ import { ConversationSidePanel } from "@/conversation-layout";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 import { RunOrchestrationPanel } from "@/run-orchestration";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { ConversationQuestionTimeline, QuestionSource, questionSaveReasons, useConversationQuestions } from "@/conversation-question-timeline";
 import {
   ConversationResponseEvidence, cloneTurnResponseEvidence, newTurnResponseEvidence, recordResponseEvidence,
@@ -21,6 +23,7 @@ import {
 import type { QuestionFocus, WorkspaceProps } from "@/workbench-contract";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 import { AttemptSubagentAudit } from "@/subagent-audit-controls";
+import { useWorkspace } from "@/workspace-state";
 
 type EventData =
   | { type: "dispatch_submitted"; dispatch_id: string }
@@ -252,6 +255,11 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
   projection?: Projection;
   onClose: () => void;
 }) {
+  const checkout = useWorkspace((state) => state.checkout);
+  const openWorkspace = useContext(RunInspectorNavigation)?.openWorkspace;
+  const draftDestination = openWorkspace && checkout?.projectId === run.projectId ? {
+    checkoutId: checkout.checkoutId, open: (id: string) => { openWorkspace("conversations", id); onClose(); },
+  } : undefined;
   const [showInput, setShowInput] = useState(false);
   const heading = useRef<HTMLButtonElement>(null);
   const live = isLiveRun(run);
@@ -278,10 +286,11 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
       <ConversationActivityAgents {...scope} projection={projection} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       <ConversationActivityTimeline {...scope} projection={projection} />
-      <ConversationResponseEvidence conversationId={conversationId} runId={run.id} live={live} evidence={projection} />
+      <ConversationResponseEvidence {...scope} evidence={projection}
+        draftSource={draftDestination && { conversationId, run, destination: draftDestination }} />
       <ConversationActivityContext {...scope} projectId={run.projectId} projection={projection} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
-      {showInput && <ConversationExactInput {...scope} checkoutId={run.checkoutId} />}
+      {showInput && <ConversationExactInput {...scope} checkoutId={run.checkoutId} draftDestination={draftDestination} />}
       </div>
     </ConversationSidePanel>
   );
@@ -330,7 +339,9 @@ export function ConversationActivityContext({ projectId, projection, ...scope }:
   </>;
 }
 
-export function ConversationExactInput({ conversationId, runId, live, checkoutId }: ConversationActivityScope & { checkoutId?: string }) {
+export function ConversationExactInput({ conversationId, runId, live, checkoutId, draftDestination }: ConversationActivityScope & {
+  checkoutId?: string; draftDestination?: AttachmentDraftDestination;
+}) {
   const input = useQuery({
     queryKey: ["conversation-run", runId, "input"],
     refetchInterval: live ? 400 : false,
@@ -340,6 +351,7 @@ export function ConversationExactInput({ conversationId, runId, live, checkoutId
     {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
     {input.error && <p role="alert" className="text-sm text-red-300">{String(input.error)}</p>}
     {input.data === null && <p className="text-xs text-muted-foreground">No input has been prepared.</p>}
-    {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={runId} live={live} checkoutId={checkoutId} />}
+    {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={runId} live={live}
+      checkoutId={checkoutId} draftDestination={draftDestination} />}
   </section>;
 }

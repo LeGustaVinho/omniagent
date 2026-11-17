@@ -4,16 +4,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { Plus } from "lucide-react";
 import { Dialog } from "radix-ui";
 import type { JobInspection } from "@/bindings/JobInspection";
-import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkRelations, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
+import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkDialog, AgileWorkRelations, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
 import { Button } from "@/components/ui/button";
-import type { MenuGroups } from "@/components/ui/context-actions";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants, taskParticipantsQuery } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
 import { ProjectDescription } from "@/project-description";
 import { AgileParticipantFilters, hasParticipantFilter, matchesParticipant, type ParticipantFilter } from "@/project-agile-filters";
 import { ProjectAgileTable, ProjectKanban, TaskJobLinks } from "@/project-agile-views";
-import { ProjectWorkModes, TaskWorkSettings } from "@/project-agile-settings";
+import { ProjectWorkModes, TaskWorkSettings, type ChecklistRunRequest } from "@/project-agile-settings";
 import { ProjectWorkEditor, type ProjectEditorSelection, type WorkspaceWorkInput } from "@/project-work-editor";
 import { projectQueueQuery } from "@/queue-model";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
@@ -28,14 +28,40 @@ import { WorkflowLaunchPicker } from "@/workflow-launch";
 
 type Change = (operation: () => Promise<unknown>) => void;
 type DeliveryLink = { taskId: string; title: string; deliveryId: string };
+type ChecklistMenu = (taskId: string, item: Item, previous?: Item, next?: Item) => MenuGroups;
+type DependencyMenu = (taskId: string, blockerId: string) => MenuGroups;
+type WorkflowFocus = { kind: "assignment" } | { kind: "checklist"; item: ChecklistRunRequest };
+
+function ChecklistEditor({ item, busy, error, close, save }: {
+  item: Item; busy: boolean; error: Error | null; close: () => void; save: (body: string) => void;
+}) {
+  const [body, setBody] = useState(item.body);
+  const canSave = Boolean(body.trim() && body !== item.body && !busy);
+  return <AgileWorkDialog title="Edit checklist item" description="Update the text of this checklist item."
+    closeLabel="Close checklist editor" busy={busy}>
+    <form className="agile-create-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (canSave) save(body);
+    }}>
+      <label className="delivery-field">Checklist text<textarea className="delivery-filter" rows={3}
+        value={body} disabled={busy} onChange={(event) => setBody(event.currentTarget.value)} /></label>
+      {error && <p role="alert">{String(error)}</p>}
+      <div className="agile-dialog-actions">
+        <Button type="button" variant="outline" onClick={close} disabled={busy}>Cancel</Button>
+        <Button type="submit" disabled={!canSave}>Save checklist item</Button>
+      </div>
+    </form>
+  </AgileWorkDialog>;
+}
 
 function LiveTaskDetails({
   projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check,
-  relatedWork, parentWork, childWork, view, selectView, close, edit,
+  relatedWork, parentWork, childWork, view, selectView, close, edit, checklistMenu, dependencyMenu, workflowFocus,
 }: {
   projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps; contributors: DeliveryLink[];
   selectedEvidence?: EvidenceTarget; selectedDeliveryId?: string; openDelivery: (link: DeliveryLink) => void; openWork: (id: string) => void;
   move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
+  checklistMenu: ChecklistMenu; dependencyMenu: DependencyMenu; workflowFocus?: WorkflowFocus;
   relatedWork: Work[]; parentWork?: AgileRow; childWork: AgileRow[];
   view: WorkDetailView; selectView: (view: WorkDetailView) => void; close: () => void; edit: () => void;
 }) {
@@ -43,6 +69,7 @@ function LiveTaskDetails({
   const [itemText, setItemText] = useState("");
   const state = useQuery(taskStateQuery(projectId, task.id));
   const checklist = useQuery(checklistQuery(projectId, task.id));
+  const checklistItems = checklist.data?.items ?? [];
   const deliveries = useQuery(deliveryQuery(projectId, task.id));
   const units = useQuery(workDeliveryUnitsQuery(projectId, task.id));
   const saved = state.data;
@@ -70,7 +97,9 @@ function LiveTaskDetails({
       </section>}
       {Boolean(saved?.prerequisiteBlockers?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task dependency blockers">
         <h4>Waiting for dependencies</h4>
-        {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <Button key={taskId} type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>)}
+        {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <ContextActions key={taskId} label={title} groups={dependencyMenu(task.id, taskId)}>
+          <Button type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>
+        </ContextActions>)}
       </section>}
       {Boolean(task.blockedJobs?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task job blockers">
         <h4>Job blockers</h4>
@@ -83,10 +112,11 @@ function LiveTaskDetails({
       <AgileWorkRelations parent={parentWork && workRelation(parentWork)} children={childWork.map(workRelation)} openWork={openWork} title="Sub-Tasks" />
       <section className="agile-checklist pipeline-form" aria-label="Task checklist">
         <h4 className="font-medium">Checklist</h4>
-        {checklist.data?.items.map((item) => <label key={item.id} className="agile-check">
-          <input type="checkbox" checked={item.checked} disabled={busy}
-            onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}
-        </label>)}
+        {checklistItems.map((item, index) => <ContextActions key={item.id} label={item.body}
+          groups={checklistMenu(task.id, item, checklistItems[index - 1], checklistItems[index + 1])}>
+          <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
+            onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}</label>
+        </ContextActions>)}
         <form className="pipeline-actions" onSubmit={(event) => {
           event.preventDefault();
           if (!itemText.trim()) return;
@@ -115,8 +145,9 @@ function LiveTaskDetails({
       {task.kind !== "epic" && <WorkflowLaunchPicker key={task.id} projectId={projectId}
         checkoutId={links.checkout.checkoutId} workId={task.id} openWorkspace={links.openWorkspace} />}
       {task.kind !== "epic" && <TaskWorkSettings scope={args} workKind={task.kind} candidates={relatedWork}
-        items={checklist.data?.items ?? []} openQueueJob={links.openQueueJob} />}
-      <TaskAssignment projectId={projectId} taskId={task.id} />
+        items={checklistItems} openQueueJob={links.openQueueJob}
+        checklistRun={workflowFocus?.kind === "checklist" ? workflowFocus.item : undefined} />}
+      <TaskAssignment projectId={projectId} taskId={task.id} focusRequest={workflowFocus?.kind === "assignment" ? workflowFocus : undefined} />
       <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
     </div>
     <div className="pipeline-stack" hidden={view !== "Context"}>
@@ -215,15 +246,18 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const [detailView, setDetailView] = useState<WorkDetailView>("Overview");
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceTarget>();
   const [selectedDelivery, setSelectedDelivery] = useState<DeliveryLink>();
+  const [workflowFocus, setWorkflowFocus] = useState<WorkflowFocus>();
   useEffect(() => {
-    setSelected(props.target); setDetailView("Overview"); setSelectedEvidence(undefined); setSelectedDelivery(undefined);
-  }, [props.target]);
+    setSelected(props.target); setDetailView("Overview"); setSelectedEvidence(undefined); setSelectedDelivery(undefined); setWorkflowFocus(undefined);
+  }, [projectId, props.target]);
   const [view, setView] = useState<"kanban" | "table">("kanban");
   const [level, setLevel] = useState<WorkKind>("task");
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [participantFilter, setParticipantFilter] = useState<ParticipantFilter>({ agent: "", provider: "", model: null });
   const [editing, setEditing] = useState<ProjectEditorSelection>();
+  const [checklistEditing, setChecklistEditing] = useState<{ projectId: string; taskId: string; item: Item }>();
+  const checklistEdit = checklistEditing?.projectId === projectId ? checklistEditing : undefined;
   const [menuError, setMenuError] = useState("");
   const hierarchy = useQuery({
     queryKey: ["project-tasks", projectId, "hierarchy"],
@@ -278,20 +312,22 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const kanbanRows = matched.filter(({ kind }) => kind === level);
   const matchIds = new Set(matched.map(({ id }) => id));
   const readError = [...states, ...epicStates, ...deliveries, ...checklists, ...commitReads, ...participants, queue].find(({ error }) => error)?.error;
-  function openWork(id: string, view: WorkDetailView = "Overview") {
+  function openWork(id: string, view: WorkDetailView = "Overview", focus?: WorkflowFocus) {
     setSelected(id);
     setDetailView(view);
+    setWorkflowFocus(focus);
     setSelectedEvidence(undefined);
     setSelectedDelivery(undefined);
   }
   function closeWork() {
     setSelected(undefined);
+    setWorkflowFocus(undefined);
     setSelectedEvidence(undefined);
     setSelectedDelivery(undefined);
   }
   const views = {
     selected, busy: mutation.isPending, openWork,
-    workMenu, copyWorkText,
+    workMenu, dependencyMenu,
     openHistory: (id: string) => openWork(id, "Work history"),
     openActivity: props.openActivity, openQueueJob: props.openQueueJob,
     openEvidence: (target: EvidenceTarget) => { openWork(target.taskId, "Changes"); setSelectedEvidence(target); },
@@ -304,6 +340,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   function startEditor(selection: ProjectEditorSelection) {
     if (mutation.isPending) return;
     mutation.reset();
+    setChecklistEditing(undefined);
     setEditing(selection);
   }
   function workMenu(row: AgileRow): MenuGroups {
@@ -314,6 +351,10 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     return [[
       { label: "Open details", run: () => openWork(row.id) },
       { label: "Edit work…", disabled: mutation.isPending, run: () => edit(row) },
+      ...(row.kind !== "epic" ? [
+        { label: "Change priority…", disabled: mutation.isPending, run: () => edit(row, "priority") },
+        { label: "Manage model assignments…", run: () => openWork(row.id, "Workflow", { kind: "assignment" }) },
+      ] : []),
       { label: "Duplicate work…", disabled: mutation.isPending, run: () => startEditor({ kind: row.kind, copyOf: row }) },
       ...(row.kind === "subtask" ? [] : [{ label: row.kind === "epic" ? "Add task…" : "Add sub-task…", disabled: mutation.isPending,
         run: () => startEditor({ kind: row.kind === "epic" ? "task" : "subtask", parentId: row.id }) }]),
@@ -322,6 +363,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     ], [
       { label: "Copy work ID", run: () => copyWorkText(row.id) },
       { label: "Copy title", run: () => copyWorkText(row.title) },
+      { label: "Open work context", run: () => openWork(row.id, "Context") },
       { label: "Open work history", run: () => views.openHistory(row.id) },
       ...(parent ? [{ label: "Open parent work", run: () => openWork(parent) }] : []),
       ...(workflow ? [{ label: "Open workflow", run: () => props.openWorkspace("pipelines", `run:${workflow}`) }] : []),
@@ -331,8 +373,52 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       })) }] : []),
     ]];
   }
+  function dependencyMenu(taskId: string, blockerId: string): MenuGroups {
+    const work = rows.find(({ id }) => id === taskId);
+    return [[
+      { label: "Open blocking work", run: () => openWork(blockerId) },
+      { label: "Copy blocking work ID", run: () => copyWorkText(blockerId) },
+      ...(work ? [{ label: "Edit dependencies…", disabled: mutation.isPending, run: () => edit(work, "dependencies") }] : []),
+    ]];
+  }
+  function checklistMenu(taskId: string, item: Item, previous?: Item, next?: Item): MenuGroups {
+    return [[
+      { label: item.checked ? "Reopen checklist item" : "Check checklist item", disabled: mutation.isPending,
+        run: () => check(taskId, item, !item.checked) },
+      { label: "Edit checklist item…", disabled: mutation.isPending, run: () => {
+        if (mutation.isPending) return;
+        mutation.reset();
+        setEditing(undefined);
+        setChecklistEditing({ projectId, taskId, item });
+      } },
+      { label: "Run checklist item…", run: () => openWork(taskId, "Workflow", { kind: "checklist", item }) },
+    ], [
+      ...(previous ? [{ label: "Move checklist item up", disabled: mutation.isPending, run: () => swapChecklistItems(taskId, previous, item) }] : []),
+      ...(next ? [{ label: "Move checklist item down", disabled: mutation.isPending, run: () => swapChecklistItems(taskId, item, next) }] : []),
+    ], [
+      { label: "Copy checklist text", run: () => copyWorkText(item.body) },
+      { label: "Open parent work", run: () => openWork(taskId) },
+    ]];
+  }
   function check(taskId: string, item: Item, checked: boolean) {
+    if (mutation.isPending) return;
     mutation.mutate(() => invoke("revise_project_checklist_item", { projectId, taskId, next: { ...item, checked } }));
+  }
+  function saveChecklist(body: string) {
+    if (!checklistEdit || mutation.isPending) return;
+    const { projectId, taskId, item } = checklistEdit;
+    mutation.mutate(async () => {
+      await invoke("revise_project_checklist_item", { projectId, taskId, next: { ...item, body } });
+      setChecklistEditing(undefined);
+    });
+  }
+  function swapChecklistItems(taskId: string, before: Item, after: Item) {
+    if (mutation.isPending) return;
+    mutation.mutate(() => invoke("swap_project_checklist_items", {
+      projectId, taskId,
+      before: { id: before.id, position: before.position, revision: before.revision },
+      after: { id: after.id, position: after.position, revision: after.revision },
+    }));
   }
   function move(row: AgileRow, nextState: WorkflowStatus) {
     if (!canMove(row, nextState) || mutation.isPending) return;
@@ -358,16 +444,16 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   function changeEditorOpen(next: boolean) {
     if (mutation.isPending) return;
     mutation.reset();
+    setChecklistEditing(undefined);
     setEditing(next ? { kind: view === "kanban" ? level : "task" } : undefined);
   }
-  function edit(work: AgileRow) {
-    mutation.reset();
-    setEditing({ kind: work.kind, work });
+  function edit(work: AgileRow, focusField?: ProjectEditorSelection["focusField"]) {
+    startEditor({ kind: work.kind, work, focusField });
   }
   const related = current ? rows.filter(({ parentId }) => parentId === current.id) : [];
   const relatedIds = new Set(related.map(({ id }) => id));
   const descendants = [...related, ...rows.filter(({ parentId }) => parentId && relatedIds.has(parentId))];
-  return <Dialog.Root open={Boolean(editing)} onOpenChange={changeEditorOpen}>
+  return <Dialog.Root open={Boolean(editing || checklistEdit)} onOpenChange={changeEditorOpen}>
     <AgileWorkspaceFrame title="Tasks" view={view} onViewChange={setView}
       action={<Dialog.Trigger asChild><Button type="button" className="px-3 py-1.5 text-xs aria-disabled:opacity-50" aria-disabled={mutation.isPending}>
         <Plus size={15} aria-hidden="true" /> New work
@@ -399,13 +485,15 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
               run: () => startEditor({ kind: level, state }) },
             { label: `Filter by ${label}`, run: () => setFilterStatus(state) },
           ]]} /> :
-            <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
+            <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} checklistMenu={checklistMenu} />}
         </div>
         {current && (current.kind === "epic" ?
           <EpicDetails key={current.id} epic={current} links={props} tasks={related} descendants={descendants} openWork={openWork}
             openEvidence={views.openEvidence} close={closeWork} edit={() => edit(current)} busy={mutation.isPending} view={detailView} selectView={setDetailView} /> :
           <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending} relatedWork={all.map(({ task }) => task)}
-            view={detailView} selectView={setDetailView} close={closeWork} edit={() => edit(current)} links={props} openWork={openWork} move={move} check={check}
+            view={detailView} selectView={(next) => { setDetailView(next); setWorkflowFocus(undefined); }}
+            close={closeWork} edit={() => edit(current)} links={props} openWork={openWork} move={move} check={check}
+            checklistMenu={checklistMenu} dependencyMenu={dependencyMenu} workflowFocus={workflowFocus}
             parentWork={rows.find(({ id }) => id === current.parentId)} childWork={related}
             change={(operation) => mutation.mutate(operation)}
             contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
@@ -415,5 +503,8 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     </AgileWorkspaceFrame>
     {editing && <ProjectWorkEditor checkout={props.checkout} selection={editing} rows={rows}
       close={() => changeEditorOpen(false)} busy={mutation.isPending} error={mutation.error} save={save} resetError={mutation.reset} />}
+    {checklistEdit && <ChecklistEditor key={JSON.stringify([checklistEdit.projectId, checklistEdit.taskId, checklistEdit.item.id])}
+      item={checklistEdit.item} busy={mutation.isPending} error={mutation.error}
+      close={() => changeEditorOpen(false)} save={saveChecklist} />}
   </Dialog.Root>;
 }

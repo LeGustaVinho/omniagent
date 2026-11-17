@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -67,22 +67,31 @@ function ModelAssignment({ assignment, disabled, save }: {
   </>;
 }
 
-export function TaskAssignment(scope: Scope) {
+export function TaskAssignment({ projectId, taskId, focusRequest }: Scope & { focusRequest?: object }) {
   const [expanded, setExpanded] = useState(false);
   const [role, setRole] = useState("implementer");
+  const details = useRef<HTMLDetailsElement>(null);
+  const summary = useRef<HTMLElement>(null);
   const client = useQueryClient();
-  const assignments = useTaskAssignments(scope.projectId, scope.taskId, expanded);
+  const assignments = useTaskAssignments(projectId, taskId, expanded);
   const save = useMutation({
     mutationFn: (selection: ModelSelection | null) =>
-      invoke<Assignment[]>("set_project_task_assignment", { ...scope, role, selection }),
-    onSuccess: (saved) => client.setQueryData(assignmentKey(scope.projectId, scope.taskId), saved),
+      invoke<Assignment[]>("set_project_task_assignment", { projectId, taskId, role, selection }),
+    onSuccess: (saved) => client.setQueryData(assignmentKey(projectId, taskId), saved),
   });
+  useEffect(() => {
+    if (!focusRequest || !details.current) return;
+    details.current.open = true;
+    setExpanded(true);
+    const frame = requestAnimationFrame(() => summary.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [focusRequest]);
   const declaredRoles = new Map(roles);
   for (const assignment of assignments.data ?? []) {
     if (!declaredRoles.has(assignment.role)) declaredRoles.set(assignment.role, assignment.role);
   }
-  return <details className="pipeline-form" onToggle={(event) => setExpanded(event.currentTarget.open)}>
-    <summary>Planned model assignments</summary>
+  return <details ref={details} className="pipeline-form" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <summary ref={summary}>Planned model assignments</summary>
     {expanded && <div className="pipeline-stack mt-3">
       {assignments.isPending && <p role="status">Loading model assignments…</p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}

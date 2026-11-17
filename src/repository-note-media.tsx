@@ -2,8 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { normalizeRepositoryPath } from "@/ide-knowledge-data";
+import { fileName, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import { useContextActionFeedback } from "@/components/ui/context-actions";
+import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 import { isContextKey, useNoteContextMenu } from "@/knowledge-context";
 import type { NoteAttachmentContent } from "@/repository-note-buffers";
 
@@ -16,6 +17,18 @@ export const isNoteMediaPath = (path: string) => fileExtension.test(path);
 
 export function isNoteMediaType(mimeType: string) {
   return mimeType === "application/pdf" || imageTypes.has(mimeType) || audioTypes.has(mimeType) || videoTypes.has(mimeType);
+}
+
+export async function readExactRepositoryAttachment(checkoutId: string, path: string) {
+  const file = await invoke<NoteAttachmentContent | null>("read_repository_attachment", { checkoutId, path });
+  if (file && file.relativePath.toLowerCase() !== path.toLowerCase()) {
+    throw new Error("The file now resolves to a different path.");
+  }
+  return file;
+}
+
+export function downloadRepositoryAttachment(file: NoteAttachmentContent) {
+  downloadArtifact(fileName(file.relativePath), new Blob([decodeArtifactBytes(file.contentBase64)], { type: file.mimeType }));
 }
 
 export function noteAttachmentCandidates(target: string, from: string, wiki: boolean) {
@@ -113,7 +126,10 @@ function PdfAttachment({ base64, title, relativePath }: { base64: string; title:
   </span>;
 }
 
-export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: string; paths: string[]; title: string }) {
+export function RepositoryNoteMedia({ checkoutId, paths, title, allowSaveCopy }: {
+  checkoutId: string; paths: string[]; title: string; allowSaveCopy?: boolean;
+}) {
+  const { run, feedback } = useContextActionFeedback();
   const attachment = useQuery({
     queryKey: ["repository-note-attachment", checkoutId, ...paths],
     enabled: paths.length > 0,
@@ -128,7 +144,13 @@ export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: 
   const file = attachment.data;
   if (!paths.length || attachment.error || file === null) return <span className="file-help">Attachment unavailable · {title}</span>;
   if (!file) return <span className="file-help" role="status">Loading attachment · {title}</span>;
-  return <SafeAttachmentMedia key={file.relativePath} base64={file.contentBase64} mimeType={file.mimeType} title={title} relativePath={file.relativePath} />;
+  return <>
+    <SafeAttachmentMedia key={file.relativePath} base64={file.contentBase64} mimeType={file.mimeType} title={title} relativePath={file.relativePath} />
+    {allowSaveCopy && <div className="file-dialog-footer">
+      {feedback && <span role={feedback.failed ? "alert" : "status"}>{feedback.text}</span>}
+      <button type="button" className="fw-btn" onClick={() => void run(async () => downloadRepositoryAttachment(file))}>Save a copy</button>
+    </div>}
+  </>;
 }
 
 export function SafeAttachmentMedia({ base64, mimeType, title, relativePath }: { base64: string; mimeType: string; title: string; relativePath?: string }) {

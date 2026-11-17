@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArchiveRestore, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
+import { ArchiveRestore, FileCode2, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
 import { useEffect, useId, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
+import { ExternalEditorSettings } from "@/external-editor-settings";
 import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
 import { QualificationMatrix } from "@/qualification-matrix";
 import { SystemInstallation } from "@/system-installation";
@@ -150,6 +151,9 @@ export function SystemSettings({
         <DesktopCliPrerequisites />
         <RipgrepSettings />
         <QualificationMatrix />
+      </SystemGroup>
+      <SystemGroup icon={<FileCode2 size={18} />} id="external-editor" title="External editor">
+        <ExternalEditorSettings />
       </SystemGroup>
       <SystemGroup icon={<ArchiveRestore size={18} />} id="backup" title="Backup and restore">
         <p>A backup includes local settings, run history and protected artifacts. Restore checks the original Windows account and OmniAgent installation.</p>

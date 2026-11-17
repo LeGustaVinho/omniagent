@@ -13,30 +13,35 @@ import { configurationProblem, connectionProblem, defaultConfiguration, graphPro
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const { fitView } = vi.hoisted(() => ({ fitView: vi.fn() }));
 
 vi.mock("@xyflow/react", async (importOriginal) => {
   type Position = { x: number; y: number };
-  type Card = { id: string; position: Position; data: { definition: WorkflowDefinition } };
+  type Card = { id: string; position: Position; selected?: boolean; data: { definition: WorkflowDefinition } };
   type Wire = { id: string };
   const update = () => undefined;
-  const flow = { screenToFlowPosition: (point: Position) => point };
+  const flow = { screenToFlowPosition: (point: Position) => point, fitView };
   return {
     ...await importOriginal<typeof import("@xyflow/react")>(),
     Background: () => null,
     Controls: () => null,
     Handle: ({ id, type }: { id: string; type: string }) => <span data-port-handle={`${type}:${id}`} />,
     useUpdateNodeInternals: () => update,
-    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu, onInit }: {
+    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu, onSelectionContextMenu, onInit }: {
       nodes: Card[]; nodeTypes: { workflow: ComponentType<Card> };
       edges: Wire[];
       onNodesChange: (changes: ({ type: "position"; id: string; position: Position } | { type: "select"; id: string; selected: boolean })[]) => void;
       onNodeContextMenu?: (event: MouseEvent, node: Card) => void;
       onEdgeContextMenu?: (event: MouseEvent, wire: Wire) => void;
       onPaneContextMenu?: (event: MouseEvent) => void;
+      onSelectionContextMenu?: (event: MouseEvent, nodes: Card[]) => void;
       onInit?: (instance: typeof flow) => void;
     }) => {
       useEffect(() => { onInit?.(flow); }, [onInit]);
+      const selected = nodes.filter((node) => node.selected);
       return <div data-testid="test-pipeline-pane" onContextMenu={onPaneContextMenu}>
+      {selected.length > 1 && <div data-testid="pipeline-selection" className="react-flow__nodesselection-rect"
+        onContextMenu={(event) => onSelectionContextMenu?.(event, selected)} />}
       {nodes.map(({ id, ...card }) => <div key={id} className="react-flow__node" data-id={id} data-testid={`node-${id}`}
         data-position={JSON.stringify(card.position)} onContextMenu={(event) => onNodeContextMenu?.(event, { id, ...card })}>
         <nodeTypes.workflow id={id} {...card} />
@@ -260,6 +265,90 @@ it("duplicates the selected graph with its internal wires, exact old pin and und
   expect(observed.layout["plan-3"]).toEqual({ x: 600, y: 310 });
   expect(observed.definitionCopies?.["context-3"]).toEqual({ sourceId: "context", revision: 1 });
   expect(observed.graph.wires[3]).toEqual(wire("context-3", "loaded", "plan-3", "ready"));
+});
+
+it("fits and removes the exact node selection in one undoable operation", async () => {
+  const original: WorkflowEditorState = { graph: { name: "Exact selection", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "context", kind: "load_context", configuration: { kind: "none" } },
+    { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "Planner" } },
+    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+  ], wires: [
+    wire("start", "start", "context", "ready"), wire("context", "loaded", "plan", "ready"),
+    wire("start", "start", "other", "ready"),
+  ] },
+  layout: { context: { x: 10, y: 20 }, plan: { x: 180, y: 90 } }, updateDefinitions: { context: 2 },
+  definitionCopies: { plan: { sourceId: "published-plan", revision: 1 } },
+  nodeBindings: { context: { reference: { source: "draft", key: "local-context" } } } };
+  let observed = original;
+  function Editor() {
+    const [state, setState] = useState(original);
+    observed = state;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={{ start, context, plan, other: context }}
+      catalog={[start, context, plan]} problems={[]} disabled={false} />;
+  }
+  render(<QueryClientProvider client={new QueryClient()}><Editor /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Select context" }));
+  await user.click(screen.getByRole("button", { name: "Select plan" }));
+
+  fireEvent.contextMenu(screen.getByTestId("node-other"));
+  await user.click(await screen.findByRole("menuitem", { name: "Remove node" }));
+  expect(observed.graph.nodes.map(({ id }) => id)).toEqual(["start", "context", "plan"]);
+  await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
+  expect(observed).toEqual(original);
+
+  fireEvent.contextMenu(screen.getByTestId("node-context"));
+  expect(await screen.findByRole("menuitem", { name: "Remove 2 selected nodes" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Remove node" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  fireEvent.contextMenu(screen.getByTestId("pipeline-selection"));
+  const group = within(await screen.findByRole("menu", { name: "2 selected nodes" }));
+  await user.click(group.getByRole("menuitem", { name: "Fit selection to view" }));
+  expect(fitView).toHaveBeenCalledWith({ nodes: [{ id: "context" }, { id: "plan" }], padding: 0.15, maxZoom: 1 });
+  expect(observed).toEqual(original);
+  fireEvent.keyDown(screen.getByTestId("pipeline-selection"), { key: "F10", shiftKey: true });
+  await user.click(await screen.findByRole("menuitem", { name: "Remove 2 selected nodes" }));
+  expect(observed.graph.nodes.map(({ id }) => id)).toEqual(["start", "other"]);
+  expect(observed.graph.wires).toEqual([wire("start", "start", "other", "ready")]);
+  expect(observed.layout).toEqual({});
+  expect(observed.updateDefinitions).toEqual({});
+  expect(observed.definitionCopies).toBeUndefined();
+  expect(observed.nodeBindings).toEqual({});
+  await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
+  expect(observed).toEqual(original);
+});
+
+it("reconnects only the edge source after validating the new output", async () => {
+  const oldEdge = wire("start", "document", "context", "document");
+  const newEdge = wire("other", "context", "context", "document");
+  const original: WorkflowEditorState = { graph: { name: "Reconnect source", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "context", kind: "load_context", configuration: { kind: "none" } },
+    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+  ], wires: [oldEdge] }, layout: {}, updateDefinitions: {} };
+  let observed = original;
+  function Editor() {
+    const [state, setState] = useState(original);
+    observed = state;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={{ start, context, other: context }}
+      catalog={[start, context]} problems={[]} disabled={false} />;
+  }
+  render(<Editor />);
+  const user = userEvent.setup();
+  fireEvent.contextMenu(screen.getByTestId(`edge-${wireKey(oldEdge)}`));
+  await user.click(await screen.findByRole("menuitem", { name: "Reconnect source…" }));
+  expect(screen.getByRole("status").textContent).toBe("Select an output port for context.document.");
+  await user.click(screen.getByRole("button", { name: "Connect from other.loaded" }));
+  expect(screen.getByRole("alert").textContent).toContain("cannot connect to context.document");
+  expect(observed).toEqual(original);
+  await user.click(screen.getByRole("button", { name: "Connect from other.context" }));
+  expect(observed.graph.wires).toEqual([newEdge]);
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
+  expect(observed).toEqual(original);
 });
 
 it("opens the graph from the exact saved workflow revision in Roles & templates", async () => {

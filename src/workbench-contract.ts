@@ -21,6 +21,7 @@ export interface WorkspaceProps {
   simulation: SimulationSession | null;
   startSimulation: (scenario?: ScenarioId) => void;
   openWorkspace: (workspace: WorkspaceId, target?: string) => void;
+  openCheckoutWorkspace?: (checkout: ProjectCheckout, destination: WorkspaceDestination) => Promise<void>;
   openActivity: (runId: string, conversationId?: string, requestId?: RequestId) => void;
   openChanges: (target: "saved" | "working") => void;
   openQueueJob?: (jobId: string) => void;

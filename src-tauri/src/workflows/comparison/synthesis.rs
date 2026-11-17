@@ -12,11 +12,12 @@ use crate::{
     model_catalog::ModelSelection,
     protection,
     providers::SessionMode,
+    repository::bind_job_markdown,
     store::Store,
 };
 
 use super::{
-    ComparisonInput, ComparisonSelection, selected_model,
+    ComparisonInput, ComparisonSelection, markdown, selected_model,
     selection::{bind_inputs, load_inputs, select_inputs},
 };
 
@@ -72,6 +73,9 @@ impl Store {
                 checkout_id: Some(checkout), task_id: None, mode: SessionMode::ReadOnly,
                 instructions: instructions.clone(), dependencies: Vec::new(), requires_bridge: false,
             })?;
+            if let Some(source) = markdown::load_source(&tx, &sources.group_id)? {
+                bind_job_markdown(&tx, &job.id, &source.id)?;
+            }
             let id = Uuid::new_v4().to_string();
             tx.execute("INSERT INTO model_comparison_syntheses VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![id, sources.group_id, job.id, serde_json::to_string(&selection)?, protection::protect(instructions.as_bytes())?])?;

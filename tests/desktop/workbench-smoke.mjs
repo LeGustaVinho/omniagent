@@ -896,23 +896,23 @@ async function verifyPendingInstructions(browser, application, scratch) {
       await clickConversation(browser, title);
       return browser.$(`section[aria-label="${title}"]`);
     };
-    const panel = await open();
-    await panel.$("button=Stop").waitForDisplayed();
+    const initialPanel = await open();
+    await initialPanel.$("button=Stop").waitForDisplayed();
     await browser.waitUntil(() => access(join(repo, "desktop-slot-1")).then(() => true, () => false),
       { timeout: 30_000, timeoutMsg: "The active turn did not reach the CLI" });
-    await panel.$(".model-picker-trigger").click();
+    await initialPanel.$(".model-picker-trigger").click();
     await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label="${fixture.option.name}"]`);
     const pending = () => invoke(browser, "pending_conversation_instructions", scope);
-    const instruction = (text) => panel.$(`.//li[p[text()="${text}"]]`);
-    const draft = panel.$("textarea[id^=draft-]");
+    const instruction = (panel, text) => panel.$(`.//li[p[text()="${text}"]]`);
+    const draft = initialPanel.$("textarea[id^=draft-]");
     const obsolete = "Replace this queued instruction";
     const removed = "Remove this queued instruction";
     for (const text of [obsolete, removed]) {
       await draft.setValue(text);
-      const queue = panel.$("button=Queue for next turn");
+      const queue = initialPanel.$("button=Queue for next turn");
       await queue.waitForEnabled();
       await queue.click();
-      await instruction(text).waitForDisplayed();
+      await instruction(initialPanel, text).waitForDisplayed();
       await draft.waitForEnabled();
     }
     const original = await pending();
@@ -922,20 +922,43 @@ async function verifyPendingInstructions(browser, application, scratch) {
 
     await browser.refresh();
     await waitForRuntime(browser);
-    await open();
+    const panel = await open();
     assert.deepEqual((await pending()).map(({ id, contextId }) => [id, contextId]),
       original.map(({ id, contextId }) => [id, contextId]));
-    await instruction(obsolete).$("button=Edit instruction").click();
+    await click(instruction(panel, obsolete), "button=Edit instruction");
     const edited = "Run the revised queued instruction";
-    await panel.$('textarea[aria-label="Pending instruction text"]').setValue(edited);
-    await panel.$("button=Save instruction").click();
-    await instruction(edited).waitForDisplayed();
-    await instruction(removed).$("button=Remove instruction").click();
-    await instruction(removed).waitForExist({ reverse: true });
-    const [updated] = await pending();
+    const editField = panel.$('textarea[aria-label="Pending instruction text"]');
+    await editField.waitForEnabled();
+    await editField.setValue(edited);
+    assert.equal(await editField.getValue(), edited);
+    await click(panel, "button=Save instruction");
+
+    const first = original[0];
+    let observed;
+    await browser.waitUntil(async () => {
+      observed = (await pending()).find(({ id }) => id === first.id);
+      return observed?.text === edited && observed.revisionId !== first.revisionId;
+    }, { timeout: 15_000, timeoutMsg: "Saving from the editor did not persist the revised queued instruction" }).catch(async (cause) => {
+      const alerts = await browser.execute(() => Array.from(
+        document.querySelectorAll('section[aria-label="Edit pending instructions"] [role="alert"]'),
+        (alert) => alert.textContent,
+      )).catch(() => []);
+      const state = observed && { revisionId: observed.revisionId, text: observed.text, editable: observed.editable, delivery: observed.delivery };
+      throw new Error(`Queued instruction persistence was not confirmed (${JSON.stringify({ state: state ?? null, alerts })})`, { cause });
+    });
+    assert.equal(observed.contextId, first.contextId);
+    await instruction(panel, edited).waitForDisplayed({
+      timeout: 10_000, timeoutMsg: `The persisted revision ${observed.revisionId} did not appear in the pending instructions panel`,
+    });
+
+    await click(instruction(panel, removed), "button=Remove instruction");
+    await instruction(panel, removed).waitForExist({ reverse: true });
+    const [updated, ...remaining] = await pending();
     assert.equal(updated.id, original[0].id);
     assert.notEqual(updated.revisionId, original[0].revisionId);
     assert.equal(updated.contextId, original[0].contextId);
+    assert.equal(updated.revisionId, observed.revisionId);
+    assert.deepEqual(remaining, []);
     await writeFile(release, "");
     await panel.$("p=The revised instruction ran.").waitForDisplayed({ timeout: 30_000 });
     assert.equal(await readFile(join(repo, "queued-instruction-dispatched"), "utf8"), edited);
@@ -2083,7 +2106,11 @@ test("compares committed branches and registers a manual worktree in the real Gi
   await writeFile(join(repo, "README.md"), "# Topic branch\n");
   git(repo, "commit", "-qam", "Topic revision");
   git(repo, "switch", "-q", "main");
+  await writeFile(join(repo, "README.md"), "# Staged checkout version\n");
+  git(repo, "add", "README.md");
   await writeFile(join(repo, "README.md"), "# Unsaved working tree edit\n");
+  await writeFile(join(repo, "local-only.md"), "# Untracked checkout file\n");
+  const originalIndex = await readFile(join(repo, ".git", "index"));
 
   const driver = startTestDriver(application);
   let browser;
@@ -2109,6 +2136,41 @@ test("compares committed branches and registers a manual worktree in the real Gi
       return /Main\s+branch/.test(rendered) && /Topic\s+branch/.test(rendered) && !rendered.includes("Unsaved working tree edit");
     }, { timeout: 10_000, timeoutMsg: "The branch comparison should show committed versions, not dirty checkout content" });
     await capture(browser, "real-git-branch-comparison");
+
+    await click(gitView, "button=History");
+    const historyBranch = gitView.$('.//label[starts-with(normalize-space(.), "History branch")]/select');
+    await historyBranch.waitForEnabled();
+    await historyBranch.selectByAttribute("value", "refs/heads/topic");
+    const topic = gitView.$("button*=Topic revision");
+    await topic.waitForDisplayed();
+    await topic.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Compare with local checkout…"]');
+    const localComparison = browser.$('//*[@role="dialog"][./header/h2[normalize-space(.)="Compare commit with local checkout"]]');
+    await localComparison.waitForDisplayed();
+    const untrackedSelector = './/button[contains(@class, "diff-file-row")][.//span[@title="local-only.md"]]';
+    const untracked = localComparison.$(untrackedSelector);
+    await untracked.waitForDisplayed();
+    assert.match(await untracked.getText(), /Untracked/);
+    const expectLocalComparison = async (version, revised, excluded) => {
+      await browser.waitUntil(async () => {
+        const content = await browser.execute(() => {
+          const dialog = document.querySelector('[role="dialog"].file-comparison-dialog');
+          return {
+            revisions: dialog?.querySelector('[aria-label="Comparison revisions"]')?.textContent ?? "",
+            text: dialog?.querySelector('[aria-label="Diff editor for README.md"]')?.textContent?.replace(/\s+/g, " ") ?? "",
+          };
+        });
+        return content.revisions.includes(version) && content.text.includes("Topic branch") && content.text.includes(revised)
+          && !content.text.includes("Main branch") && !content.text.includes(excluded);
+      }, { timeout: 20_000, timeoutMsg: `The local comparison should show the clicked commit and ${version}` });
+    };
+    await expectLocalComparison("Files on disk", "Unsaved working tree edit", "Staged checkout version");
+    await localComparison.$('.//label[starts-with(normalize-space(.), "Checkout version")]/select').selectByAttribute("value", "staged");
+    await expectLocalComparison("Staged index", "Staged checkout version", "Unsaved working tree edit");
+    assert.equal(await localComparison.$(untrackedSelector).isExisting(), false);
+    await click(localComparison, 'button[aria-label="Close dialog"]');
+    await localComparison.waitForExist({ reverse: true });
+    assert.deepEqual(await readFile(join(repo, ".git", "index")), originalIndex);
 
     await click(gitView, "button=Worktrees");
     await click(gitView, "button=New worktree");
@@ -2457,19 +2519,25 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move tab to new window"]');
     await browser.waitUntil(async () => (await browser.getWindowHandles()).some((handle) => handle !== main));
     const labels = () => invoke(browser, "plugin:window|get_all_windows");
-    const waitForMainOnly = () => browser.waitUntil(async () =>
-      (await browser.getWindowHandles()).length === 1 && (await labels()).every((label) => !label.startsWith("editor-")),
-    { timeoutMsg: "The detached editor's native or browser window stayed open." });
-    const switchToDetached = async (path) => {
-      await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
-      const handle = (await browser.getWindowHandles()).find((candidate) => candidate !== main);
-      await browser.switchToWindow(handle);
-      await browser.waitUntil(() => browser.execute((file) => {
-        return [...document.querySelectorAll(".file-tab-label")].some((tab) => tab.getAttribute("title") === file);
-      }, path).catch(() => false), { timeoutMsg: `The detached editor did not load the tab for ${path}.` });
-    };
+    const waitForMainOnly = () => browser.waitUntil(async () => {
+      const handles = await browser.getWindowHandles();
+      return handles.length === 1 && handles[0] === main && (await labels()).every((label) => !label.startsWith("editor-"));
+    }, { timeoutMsg: "The detached editor's native or browser window stayed open." });
+    const switchToEditorWindow = (path) => browser.waitUntil(async () => {
+      await browser.switchToWindow(main);
+      const handles = await browser.getWindowHandles();
+      if (handles.length !== 2 || !handles.includes(main)) return false;
+      const detached = handles.find((handle) => handle !== main);
+      try {
+        await browser.switchToWindow(detached);
+        return await browser.$(`.file-tab-label[title=${JSON.stringify(path)}]`).isDisplayed();
+      } catch (error) {
+        if (!/no such window|web view not found/i.test(String(error))) throw error;
+        return false;
+      }
+    }, { timeoutMsg: `The detached window for ${path} did not become ready.` });
     assert.ok((await labels()).some((label) => label.startsWith("editor-")));
-    await switchToDetached(file);
+    await switchToEditorWindow(file);
     const popupTab = browser.$(`.file-tab-label[title="${file}"]`);
     await popupTab.waitForDisplayed();
     const detachedEditor = browser.$(".code-editor .view-line:first-child");
@@ -2494,7 +2562,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
 
     await ide.$(".file-dock-group-menu").click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move group to new window"]');
-    await switchToDetached(file);
+    await switchToEditorWindow(file);
     await browser.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
     await browser.$(`.file-tab-label[title="${other}"]`).waitForDisplayed();
     await browser.$(".file-dock-group-menu").click({ button: "right" });
@@ -2504,7 +2572,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
 
     await ide.$(`button[title="${note}"]`).click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Open in new window"]');
-    await switchToDetached(note);
+    await switchToEditorWindow(note);
     const noteTab = browser.$(`.file-tab-label[title="${note}"]`);
     await noteTab.waitForDisplayed();
     const noteEditor = browser.$(`[aria-label="Markdown editor for ${note}"] .cm-line:first-child`);
@@ -2748,6 +2816,22 @@ test("persists real conversation organization through a desktop restart", { time
     await clickConversation(browser, title);
     await browser.waitUntil(async () => (await readTabs(browser)).active === title);
     await browser.waitUntil(async () => await row().getAttribute("aria-description") !== "Unread");
+
+    await click(library(), 'button[aria-label="New conversation"]');
+    await browser.waitUntil(async () => {
+      const { groups, active } = await readTabs(browser);
+      return groups.flat().length === 2 && Boolean(active && active !== title);
+    });
+    const activeBeforeMenu = (await readTabs(browser)).active;
+    const originalTab = browser.$(`//*[@role="tab"][.//*[contains(@class, "dv-default-tab-content")][normalize-space(.)=${JSON.stringify(title)}]]`);
+    await originalTab.waitForDisplayed();
+    await originalTab.click({ button: "right" });
+    const tabMenu = browser.$(`[role="menu"][aria-label=${JSON.stringify(`${title} tab`)}]`);
+    await click(tabMenu, './/*[@role="menuitem"][normalize-space(.)="Close tab"]');
+    await browser.waitUntil(async () => {
+      const { groups, active } = await readTabs(browser);
+      return active === activeBeforeMenu && groups.flat().length === 1 && !groups.flat().includes(title);
+    }, { timeoutMsg: "The tab context menu should close the clicked conversation and keep the active tab" });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();
@@ -2758,9 +2842,12 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Saved notes repository");
   const path = "Release plan.md";
+  const comparisonPath = "Saved comparison source.md";
+  const comparisonText = "# Comparação de revisão\r\n\r\nExactly this saved note is the shared input.\r\n";
   git(scratch, "init", "-q", repo);
   await writeFile(join(repo, path), "# Release plan\n\nReview the saved rollout and verify its recovery step.\n");
-  git(repo, "add", path);
+  await writeFile(join(repo, comparisonPath), comparisonText);
+  git(repo, "add", "--", path, comparisonPath);
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-qm", "Save planning note");
 
@@ -2769,6 +2856,7 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
   try {
     browser = await connectTestDriver(driver, application);
     const { projectId, checkoutId } = await invoke(browser, "register_project", { directory: repo });
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
     await selectCheckout(browser, { projectId, checkoutId });
     const opened = await invoke(browser, "open_repository_document", { checkoutId, path });
     assert.equal(opened.status, "document");
@@ -2806,6 +2894,70 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
     await click(browser, 'button[aria-label="Back to Knowledge"]');
     await knowledge.$("button=Plan from note").waitForDisplayed();
     assert.equal(await browser.$('.work-rail button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
+
+    const comparisonDocument = await invoke(browser, "open_repository_document", { checkoutId, path: comparisonPath });
+    assert.equal(comparisonDocument.status, "document");
+    const comparisonRevision = comparisonDocument.document.revision;
+    assert.equal(comparisonRevision.sha256, createHash("sha256").update(comparisonText).digest("hex"));
+    const unsavedNote = "# This unsaved draft must not be sent\n";
+    await invoke(browser, "save_repository_markdown_draft", { checkoutId, baseRevision: comparisonRevision.id,
+      expectedDraftRevision: null, markdown: unsavedNote });
+    await click(browser, '.work-rail button[aria-label="Knowledge"]');
+    await knowledge.$(`.file-tab-label[title=${JSON.stringify(path)}]`).waitForDisplayed();
+    const comparisonRow = knowledge.$(`button=${comparisonPath}`);
+    await comparisonRow.waitForDisplayed();
+    await comparisonRow.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Compare models from note…"]');
+    const compare = browser.$('section[aria-label="Model comparisons"]');
+    const source = compare.$('[aria-label="Saved note input"]');
+    await source.waitForDisplayed();
+    const fields = [];
+    for (const field of await source.$$("dd")) fields.push(await field.getText());
+    assert.deepEqual(fields, [
+      comparisonPath, comparisonRevision.id, comparisonRevision.sha256, comparisonRevision.baseCommit,
+    ]);
+    assert.equal(await compare.$('input[placeholder="Full commit SHA"]').isExisting(), false);
+    await click(compare, "summary=Read saved Markdown");
+    const preview = compare.$("details.pipeline-evidence pre");
+    await preview.waitForDisplayed();
+    assert.equal(await preview.getProperty("textContent"), comparisonText);
+
+    const modelIds = ["desktop-fixture", "gpt-6-luna"];
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    await click(compare, '.model-picker-trigger[aria-label^="Comparison candidates · "]');
+    for (const modelId of modelIds) {
+      const option = models.find(({ option }) => option.selectable && option.selection.modelId === modelId)?.option;
+      assert.ok(option, `Missing desktop fixture candidate ${modelId}`);
+      await click(browser, `.model-picker-menu [role="menuitemcheckbox"][aria-label=${JSON.stringify(option.name)}]`);
+    }
+    await browser.keys(Key.Escape);
+    const request = "Compare the recovery steps described in the saved review.";
+    await compare.$("label=Shared request").$("textarea").setValue(request);
+    // The desktop provider fixture only completes its predetermined prompts. Keep these jobs queued.
+    await invoke(browser, "set_job_queue_paused", { paused: true });
+    const comparisons = () => invoke(browser, "model_comparisons", { projectId });
+    assert.deepEqual(await comparisons(), []);
+    await click(compare, "button=Start comparison");
+    const saved = compare.$('section[aria-label="Saved comparison"]');
+    await saved.waitForDisplayed();
+    const [group] = await comparisons();
+    assert.equal(group.sourceCheckoutId, checkoutId);
+    assert.deepEqual(group.sourceDocument, comparisonRevision);
+    assert.equal(group.commit, comparisonRevision.baseCommit);
+    assert.equal(group.prompt, request);
+    assert.deepEqual(group.candidates.map(({ selection, state, runId }) => [selection.modelId, state, runId]),
+      modelIds.map((id) => [id, "queued", null]));
+
+    await browser.refresh();
+    await click(browser, '.work-rail button[aria-label="Pipelines"]');
+    await click(browser, "button=Compare models");
+    await saved.waitForDisplayed();
+    assert.equal(await saved.$("label=Comparison").$("select").getValue(), group.id);
+    assert.ok((await saved.getText()).includes(comparisonRevision.sha256));
+    assert.deepEqual(await comparisons(), [group]);
+    assert.equal((await invoke(browser, "read_repository_markdown_draft", { checkoutId, path: comparisonPath })).markdown, unsavedNote);
+    assert.equal(await readFile(join(repo, comparisonPath), "utf8"), comparisonText);
+    await capture(browser, "real-comparison-from-saved-note");
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

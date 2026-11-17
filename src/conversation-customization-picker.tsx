@@ -18,6 +18,15 @@ export type ComposerCustomization = {
 const skillToken = /^@(?:skill|command):[0-9a-f]{64}:[0-9a-f]{64}$/;
 const stageToken = /^@stage:([^:\s]+):((?:skill|command):[0-9a-f]{64}:[0-9a-f]{64})$/;
 
+export function composerCustomizationsQuery(conversationId: string, selection: ModelSelection | null, effort: string | null, mode: SessionMode) {
+  return {
+    queryKey: ["conversation", conversationId, "composer-customizations", selection, effort, mode],
+    queryFn: () => invoke<ComposerCustomization[]>("composer_customizations", { conversationId, selection, effort, mode }),
+    staleTime: 3000,
+    retry: false as const,
+  };
+}
+
 export function hasComposerSkills(draft: string) {
   return draft.split(/\s+/).some((token) => skillToken.test(token));
 }
@@ -59,11 +68,8 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
   const pinnedTokens = draft.split(/\s+/).filter((token) => skillToken.test(token));
   const active = enabled && Boolean(selection && (manual || (trigger && dismissed !== completionKey)));
   const query = useQuery({
-    queryKey: ["conversation", conversationId, "composer-customizations", selection, effort, mode],
-    queryFn: () => invoke<ComposerCustomization[]>("composer_customizations", { conversationId, selection, effort, mode }),
+    ...composerCustomizationsQuery(conversationId, selection, effort, mode),
     enabled: enabled && Boolean(selection && (active || pinnedTokens.length)),
-    staleTime: 3000,
-    retry: false,
   });
   const available = query.data ?? [];
   const needle = (manual ? "" : trigger?.query ?? "").toLocaleLowerCase();

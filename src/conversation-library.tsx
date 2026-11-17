@@ -9,7 +9,9 @@ import type { JobInspection } from "@/bindings/JobInspection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
+import type { MenuGroups } from "@/components/ui/context-actions";
 import { ConversationLibraryGroup, ConversationLibraryLayout } from "@/conversation-layout";
+import { LibraryBatchMoveDialog, type LibraryMoveItem, type LibraryMoveTarget } from "@/conversation-library-batch";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import { useConversationTranscriptExport } from "@/conversation-transcript-export";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
@@ -30,6 +32,9 @@ type ConversationLibraryEntry = {
 };
 
 type ConversationLibrarySection = { id: string; projectId: string; name: string };
+type SectionChange = { type: "rename"; expectedName: string; name: string }
+  | { type: "move"; neighborId: string; before: boolean };
+type BatchSelection = { projectId: string; items: LibraryMoveItem[] };
 type OrganizationChange =
   | { type: "pin"; pinned: boolean }
   | { type: "read"; unread: boolean }
@@ -177,21 +182,67 @@ function LibraryFork({ entry, onClose, onOpen }: {
   </>;
 }
 
-function libraryGroups(entries: ConversationLibraryEntry[], archived: boolean) {
-  const groups = new Map<string, { id: string; title: string; pinned: boolean; entries: ConversationLibraryEntry[] }>();
+function libraryGroups(entries: ConversationLibraryEntry[], sections: ConversationLibrarySection[], projects: Map<string, string>,
+  allProjects: boolean, archived: boolean, showEmpty: boolean) {
+  type Group = { id: string; title: string; pinned: boolean; project: string; projectId: string;
+    section?: ConversationLibrarySection; entries: ConversationLibraryEntry[] };
+  const groups = new Map<string, Group>();
+  const sectionOrder = new Map(sections.map((section, index) => [section.id, index]));
+  const names = new Map(sections.map((section) => [section.id, section]));
   for (const entry of entries) {
     const { pinned, section } = entry.organization;
     const isPinned = pinned && !archived;
-    const id = isPinned ? "pinned" : `section:${section?.id ?? ""}`;
-    const title = isPinned ? "Pinned" : section?.name ?? "Conversations";
+    const projectId = entry.checkout.projectId;
+    const id = isPinned ? "pinned" : `${projectId}:${section?.id ?? ""}`;
+    const currentSection = section && (names.get(section.id) ?? section);
+    const title = isPinned ? "Pinned" : [allProjects ? entry.projectName : null, currentSection?.name ?? "Conversations"].filter(Boolean).join(" · ");
     const group = groups.get(id);
     if (group) group.entries.push(entry);
-    else groups.set(id, { id, title, pinned: isPinned, entries: [entry] });
+    else groups.set(id, { id, title, pinned: isPinned, project: entry.projectName, projectId, section: isPinned ? undefined : currentSection ?? undefined, entries: [entry] });
   }
-  return [...groups.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
+  if (showEmpty) for (const section of sections) {
+    const id = `${section.projectId}:${section.id}`;
+    if (groups.has(id)) continue;
+    const project = projects.get(section.projectId) ?? section.projectId;
+    groups.set(id, { id, title: allProjects ? `${project} · ${section.name}` : section.name, pinned: false,
+      project, projectId: section.projectId, section, entries: [] });
+  }
+  const rank = ({ section }: Group) => section ? sectionOrder.get(section.id) ?? Number.MAX_SAFE_INTEGER : -1;
+  return [...groups.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.project.localeCompare(b.project)
+    || a.projectId.localeCompare(b.projectId) || rank(a) - rank(b) || a.title.localeCompare(b.title));
 }
 
-export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen, onOpenBeside }: {
+function SectionNameDialog({ title, description, initialName = "", busy, error, restoreFocus, onClose, onSave }: {
+  title: string; description: string; initialName?: string; busy: boolean; error: Error | null;
+  restoreFocus: (event: Event) => void; onClose: () => void; onSave: (name: string) => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const trimmed = name.trim();
+  const canSave = Boolean(trimmed && trimmed !== initialName && !busy);
+  return <Dialog.Root open onOpenChange={(shown) => { if (!shown && !busy) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="conv-dialog-scrim" />
+      <Dialog.Content className="conv-dialog" onCloseAutoFocus={restoreFocus}>
+        <Dialog.Title>{title}</Dialog.Title>
+        <Dialog.Description>{description}</Dialog.Description>
+        <form className="conv-dialog-form" onSubmit={(event) => {
+          event.preventDefault();
+          if (canSave) onSave(trimmed);
+        }}>
+          <label>Section name<input value={name} maxLength={96} required disabled={busy}
+            onChange={(event) => setName(event.currentTarget.value)} /></label>
+          {error && <p role="alert" className="text-destructive">{String(error)}</p>}
+          <footer>
+            <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={busy}>Cancel</button></Dialog.Close>
+            <button type="submit" className="conv-primary-button" disabled={!canSave}>Save <ArrowUp size={14} aria-hidden /></button>
+          </footer>
+        </form>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
+}
+
+export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen, onOpenBeside, onOpenCheckoutInIde }: {
   checkout: ProjectCheckout;
   activeId?: string;
   startPending: boolean;
@@ -199,6 +250,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   onStart: () => void;
   onOpen: OpenLibraryConversation;
   onOpenBeside?: OpenLibraryConversation;
+  onOpenCheckoutInIde?: (checkout: ProjectCheckout) => Promise<void>;
 }) {
   const client = useQueryClient();
   const inspector = useContext(RunInspectorNavigation);
@@ -209,7 +261,9 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const [renaming, setRenaming] = useState<ConversationIdentity>();
   const [forking, setForking] = useState<ConversationLibraryEntry>();
   const [sectionConversation, setSectionConversation] = useState<ConversationIdentity>();
-  const [sectionName, setSectionName] = useState("");
+  const [renamingSection, setRenamingSection] = useState<ConversationLibrarySection>();
+  const [batch, setBatch] = useState<BatchSelection>();
+  const [showBatchDialog, setShowBatchDialog] = useState(false);
   const [notice, setNotice] = useState("");
   const exportTranscript = useConversationTranscriptExport(setNotice);
   const list = useConversationLibrary(query, projectId, true, archived);
@@ -220,6 +274,12 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const open = useMutation({
     mutationFn: ({ entry, beside }: { entry: ConversationLibraryEntry; beside?: boolean }) =>
       openEntry(beside && onOpenBeside ? onOpenBeside : onOpen, entry),
+  });
+  const openWorktree = useMutation({
+    mutationFn: async ({ source, folder }: { source: ProjectCheckout; folder: boolean }) => {
+      if (folder) await invoke<void>("open_checkout_item_in_shell", { checkoutId: source.checkoutId, relativePath: "", action: "open" });
+      else await onOpenCheckoutInIde?.(source);
+    },
   });
   const openFork = useMutation({ mutationFn: ({ source, id }: { source: ProjectCheckout; id: string }) => onOpen(source, id) });
   const inspect = useMutation({
@@ -242,20 +302,98 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       if (change.type === "archive") setNotice(change.archived ? "Conversation moved to Archived." : "Conversation restored.");
     },
   });
-  const error = open.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? sections.error ?? startError ??
-    (!sectionConversation ? organize.error : undefined);
+  const organizeSection = useMutation({
+    mutationFn: ({ section, change }: { section: ConversationLibrarySection; change: SectionChange }) =>
+      invoke<void>("organize_conversation_library_section", { projectId: section.projectId, sectionId: section.id, change }),
+    onSuccess: async (_, { change }) => {
+      await Promise.all([client.invalidateQueries({ queryKey: sectionKey }), client.invalidateQueries({ queryKey: conversationLibraryKey })]);
+      if (change.type === "rename") setRenamingSection(undefined);
+      setNotice(change.type === "rename" ? "Section renamed." : "Section order updated.");
+    },
+    onError: () => { void client.invalidateQueries({ queryKey: sectionKey }); },
+  });
+  const moveBatch = useMutation({
+    mutationFn: (request: { projectId: string; sectionId: string | null; selection: LibraryMoveTarget[] }) =>
+      invoke<number>("move_conversations_to_library_section", request),
+    onSuccess: async (moved) => {
+      await client.invalidateQueries({ queryKey: conversationLibraryKey });
+      setShowBatchDialog(false);
+      setBatch(undefined);
+      setNotice(moved === 1 ? "Moved 1 conversation." : `Moved ${moved} conversations.`);
+    },
+    onError: () => { void client.invalidateQueries({ queryKey: conversationLibraryKey }); },
+  });
+  const registered = useQuery({
+    queryKey: ["registered-checkouts"],
+    queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
+  });
+  const projects = new Map([checkout, ...(registered.data ?? [])].map((item) => [
+    item.projectId, item.repositoryRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? item.repositoryRoot,
+  ]));
+  const error = open.error ?? openWorktree.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
+    (!sectionConversation ? organize.error : undefined) ?? (!renamingSection ? organizeSection.error : undefined);
+  const groups = libraryGroups(list.data ?? [], sections.data ?? [], projects, false, archived, !query.trim() && !archived);
+
+  function restoreLibraryFocus(event: Event, selector: string, matches: (element: HTMLElement) => boolean) {
+    const library = libraryRef.current;
+    const target = Array.from(library?.querySelectorAll<HTMLElement>(selector) ?? []).find(matches)
+      ?? library?.querySelector<HTMLElement>('input[type="search"]');
+    if (target) { event.preventDefault(); target.focus(); }
+  }
+
+  function selectForMove(entries: readonly ConversationLibraryEntry[]) {
+    const projectId = entries[0]?.checkout.projectId;
+    if (!projectId || (batch && batch.projectId !== projectId)) return;
+    setNotice("");
+    setBatch((current) => {
+      if (current && current.projectId !== projectId) return current;
+      const items = new Map(current?.items.map((item) => [item.conversationId, item]));
+      for (const { conversation, checkout, organization } of entries) {
+        if (checkout.projectId === projectId && !items.has(conversation.id)) {
+          items.set(conversation.id, { title: conversation.title, checkoutId: conversation.checkoutId, worktree: checkout.checkoutRoot,
+            conversationId: conversation.id, expectedSectionId: organization.section?.id ?? null });
+        }
+      }
+      return { projectId, items: [...items.values()] };
+    });
+  }
+
+  function sectionActions(entries: readonly ConversationLibraryEntry[], section?: ConversationLibrarySection): MenuGroups | undefined {
+    if (!section) return;
+    const siblings = sections.data?.filter(({ projectId }) => projectId === section.projectId) ?? [];
+    const index = siblings.findIndex(({ id }) => id === section.id);
+    if (index < 0) return;
+    const neighborBefore = siblings[index - 1];
+    const neighborAfter = siblings[index + 1];
+    const pending = organizeSection.isPending;
+    return [[{ label: "Rename section…", disabled: pending, run: () => {
+      setNotice("");
+      organizeSection.reset();
+      setRenamingSection(section);
+    } }], [
+      { label: "Move section up", disabled: pending || !neighborBefore, run: () => {
+        if (neighborBefore) organizeSection.mutate({ section, change: { type: "move", neighborId: neighborBefore.id, before: true } });
+      } },
+      { label: "Move section down", disabled: pending || !neighborAfter, run: () => {
+        if (neighborAfter) organizeSection.mutate({ section, change: { type: "move", neighborId: neighborAfter.id, before: false } });
+      } },
+    ], [{ label: "Select visible conversations to move…", disabled: !entries.length || Boolean(batch && batch.projectId !== section.projectId),
+      run: () => selectForMove(entries) }]];
+  }
 
   function rowAction(action: ConversationAction, entry: ConversationLibraryEntry, sectionId?: string) {
     const { conversation, organization } = entry;
     if (action === "open") open.mutate({ entry });
     if (action === "open-beside" && onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId) open.mutate({ entry, beside: true });
+    if (action === "open-worktree" && onOpenCheckoutInIde) openWorktree.mutate({ source: entry.checkout, folder: false });
+    if (action === "open-worktree-folder") openWorktree.mutate({ source: entry.checkout, folder: true });
     if (action === "activity") inspect.mutate(entry);
     if (action === "fork") setForking(entry);
     if (action === "export-markdown") exportTranscript.mutate(conversation);
     if (action === "rename") setRenaming(conversation);
+    if (action === "select-to-move") selectForMove([entry]);
     if (action === "new-section") {
       organize.reset();
-      setSectionName("");
       setSectionConversation(conversation);
     }
     if (action === "copy-title" || action === "copy-id" || action === "copy-worktree") {
@@ -273,20 +411,30 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   }
 
   return <ConversationLibraryLayout sectionRef={libraryRef} query={query} searchLabel="Search conversation titles" onQuery={setQuery}
-    onCreate={() => { setArchived(false); setQuery(""); onStart(); }} creating={startPending} searchAction={
-      <button type="button" className="conv-icon-button aria-pressed:bg-muted aria-pressed:text-primary" aria-label="Archived" aria-pressed={archived}
-        title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
-    }>
+    onCreate={() => { setBatch(undefined); setArchived(false); setQuery(""); onStart(); }} creating={startPending} searchAction={<>
+      <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
+        title="Archived" onClick={() => { setBatch(undefined); setArchived(!archived); }}><Archive aria-hidden /></button>
+    </>} tools={batch && <div role="group" aria-label="Conversation selection" className="flex flex-wrap items-center gap-1 py-1">
+      <span role="status" className="pl-1 text-xs text-muted-foreground">{batch.items.length} selected</span>
+      <button type="button" className="conv-quiet-button" disabled={!batch.items.length} onClick={() => {
+        moveBatch.reset();
+        setShowBatchDialog(true);
+      }}>Move selected conversations…</button>
+      <button type="button" className="conv-quiet-button" onClick={() => setBatch(undefined)}>Cancel selection</button>
+    </div>}>
     {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
     {list.isPending && <p role="status" className="conv-sidebar-note">Loading conversations…</p>}
-    {list.data?.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
-      : query.trim() ? "No matching conversations." : "No conversations in this project."}</p>}
-    {libraryGroups(list.data ?? [], archived).map(({ id, title, entries }) =>
-      <ConversationLibraryGroup key={id} title={title}>
+    {list.data?.length === 0 && groups.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
+      : query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
+    {groups.map(({ id, title, section, entries }) =>
+      <ConversationLibraryGroup key={id} title={title} sectionId={section?.id} actions={sectionActions(entries, section)}>
+        {!entries.length && <li className="conv-sidebar-note">No conversations in this section.</li>}
         {entries.map((entry) => {
           const { conversation, organization } = entry;
           const metadataId = `library-metadata-${conversation.id}`;
           const unreadId = `library-unread-${conversation.id}`;
+          const batchProject = batch?.projectId === entry.checkout.projectId;
+          const selected = Boolean(batchProject && batch?.items.some(({ conversationId }) => conversationId === conversation.id));
           return <li key={conversation.id}>
             {renaming?.id === conversation.id
               ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
@@ -295,11 +443,19 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                 available={(action) => ["rename", "copy-title", "copy-id", "copy-worktree"].includes(action) ||
                   (action === "open" && !open.isPending) ||
                   (action === "open-beside" && !open.isPending && Boolean(onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId)) ||
+                  (action === "open-worktree" && !openWorktree.isPending && Boolean(onOpenCheckoutInIde)) ||
+                  (action === "open-worktree-folder" && !openWorktree.isPending) ||
                   (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
                   (action === "fork" && !openFork.isPending) ||
                   (action === "export-markdown" && !exportTranscript.isPending) ||
+                  (action === "select-to-move" && (!batch || batchProject) && !selected) ||
                   (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
                 onAction={(action, sectionId) => rowAction(action, entry, sectionId)}>
+                {batchProject && <input type="checkbox" className="ml-2 shrink-0 accent-primary" aria-label={`Select ${conversation.title}`}
+                  checked={selected} onChange={({ currentTarget }) => {
+                    if (currentTarget.checked) selectForMove([entry]);
+                    else setBatch((current) => current && ({ ...current, items: current.items.filter(({ conversationId }) => conversationId !== conversation.id) }));
+                  }} />}
                 <button type="button" className="conv-session-button items-start" disabled={open.isPending}
                   data-conversation-id={conversation.id} aria-description={organization.unread ? "Unread" : undefined}
                   aria-label={conversation.title} aria-describedby={organization.unread ? `${unreadId} ${metadataId}` : metadataId}
@@ -321,38 +477,22 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}
     {forking && <LibraryFork key={forking.conversation.id} entry={forking} onClose={() => setForking(undefined)}
       onOpen={async (source, id) => { openFork.mutate({ source, id }); }} />}
-    {sectionConversation && <Dialog.Root open onOpenChange={(shown) => {
-      if (!shown && !organize.isPending) { setSectionConversation(undefined); organize.reset(); }
-    }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="conv-dialog-scrim" />
-        <Dialog.Content className="conv-dialog" onCloseAutoFocus={(event) => {
-          const library = libraryRef.current;
-          const row = Array.from(library?.querySelectorAll<HTMLElement>("[data-conversation-id]") ?? [])
-            .find(({ dataset }) => dataset.conversationId === sectionConversation.id);
-          const focus = row ?? library?.querySelector<HTMLElement>('input[type="search"]');
-          if (focus) { event.preventDefault(); focus.focus(); }
-        }}>
-          <Dialog.Title>Create section</Dialog.Title>
-          <Dialog.Description>{sectionConversation.title}</Dialog.Description>
-          <form className="conv-dialog-form" onSubmit={(event) => {
-            event.preventDefault();
-            if (sectionName.trim() && !organize.isPending) organize.mutate({ conversation: sectionConversation,
-              change: { type: "newSection", name: sectionName.trim() } });
-          }}>
-            <label>Section name<input value={sectionName} maxLength={96} required disabled={organize.isPending}
-              onChange={(event) => setSectionName(event.currentTarget.value)} /></label>
-            {organize.error && <p role="alert" className="text-destructive">{String(organize.error)}</p>}
-            <footer>
-              <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={organize.isPending}>Cancel</button></Dialog.Close>
-              <button type="submit" className="conv-primary-button" disabled={!sectionName.trim() || organize.isPending}>
-                Save <ArrowUp size={14} aria-hidden />
-              </button>
-            </footer>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>}
+    {sectionConversation && <SectionNameDialog title="Create section" description={sectionConversation.title}
+      busy={organize.isPending} error={organize.error}
+      onSave={(name) => organize.mutate({ conversation: sectionConversation, change: { type: "newSection", name } })}
+      onClose={() => { setSectionConversation(undefined); organize.reset(); }}
+      restoreFocus={(event) => restoreLibraryFocus(event, "[data-conversation-id]", ({ dataset }) => dataset.conversationId === sectionConversation.id)} />}
+    {renamingSection && <SectionNameDialog title="Rename section" description={renamingSection.name} initialName={renamingSection.name}
+      busy={organizeSection.isPending} error={organizeSection.error}
+      onSave={(name) => organizeSection.mutate({ section: renamingSection, change: { type: "rename", expectedName: renamingSection.name, name } })}
+      onClose={() => { setRenamingSection(undefined); organizeSection.reset(); }}
+      restoreFocus={(event) => restoreLibraryFocus(event, "[data-library-section-id]", ({ dataset }) => dataset.librarySectionId === renamingSection.id)} />}
+    {batch && showBatchDialog && <LibraryBatchMoveDialog items={batch.items}
+      sections={(sections.data ?? []).filter(({ projectId }) => projectId === batch.projectId)} busy={moveBatch.isPending} error={moveBatch.error}
+      onClose={() => { setShowBatchDialog(false); moveBatch.reset(); }}
+      onMove={(sectionId) => moveBatch.mutate({ projectId: batch.projectId, sectionId,
+        selection: batch.items.map(({ checkoutId, conversationId, expectedSectionId }) => ({ checkoutId, conversationId, expectedSectionId })) })}
+      restoreFocus={(event) => restoreLibraryFocus(event, "[data-conversation-id]", ({ dataset }) => dataset.conversationId === batch.items[0]?.conversationId)} />}
   </ConversationLibraryLayout>;
 }
 

@@ -55,13 +55,14 @@ function NavigationMessage({ pending, error, loading, children }: NavigationStat
 }
 
 export function KnowledgeSearch({
-  query, onQueryChange, results, onOpen, pending, error, focusRequest,
+  query, onQueryChange, results, onOpen, pending, error, focusRequest, filter,
 }: NavigationState & {
   query: string;
   onQueryChange: (query: string) => void;
   results: readonly KnowledgeSearchHit[];
   onOpen: OpenNote;
   focusRequest?: number;
+  filter?: ReactNode;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const listId = useId();
@@ -108,6 +109,7 @@ export function KnowledgeSearch({
   };
 
   return <div className="file-search">
+    {filter}
     <label className="file-field">
       <Search size={15} aria-hidden />
       <input ref={input} type="search" role="combobox" aria-label="Find notes and content" placeholder="Find notes and content"
@@ -121,7 +123,7 @@ export function KnowledgeSearch({
         }} />
     </label>
     <NavigationMessage pending={pending} error={error} loading="Searching notes…">
-      {query.trim() && !results.length && <p role="status" className="file-help">No notes match your search.</p>}
+      {(query.trim() || filter) && !results.length && <p role="status" className="file-help">No notes match your search.</p>}
       {expanded && <ul id={listId} role="listbox" aria-label="Note search results" className="file-search-results">
         {results.map((result, index) => <li role="presentation" key={`${locationKey(result)}:${index}`}>
           <button type="button" role="option" id={`${listId}-${index}`} tabIndex={-1}

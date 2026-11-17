@@ -30,7 +30,8 @@ function show() {
 it("requires a fresh preview when deletion scope changes and confirms the exact reviewed revision", async () => {
   vi.mocked(invoke)
     .mockResolvedValueOnce(emptyImpact)
-    .mockResolvedValueOnce({ ...emptyImpact, revision: "cascade-token", artifactIds: ["summary-1"], dispatchIds: ["dispatch-1"] })
+    .mockResolvedValueOnce({ ...emptyImpact, revision: "cascade-token", artifactIds: ["summary-1"], dispatchIds: ["dispatch-1"],
+      attachmentCopyDispatchCount: 1, attachmentCopyRevisionCount: 2 })
     .mockResolvedValueOnce(emptyImpact);
   const onDeleted = show();
   fireEvent.change(screen.getByLabelText("History item"), { target: { value: "message:prompt-r2" } });
@@ -42,6 +43,8 @@ it("requires a fresh preview when deletion scope changes and confirms the exact 
   fireEvent.click(screen.getByRole("button", { name: "Review deletion impact" }));
   expect(await screen.findByText("summary-1")).toBeTruthy();
   expect(screen.getByText("dispatch-1")).toBeTruthy();
+  expect(screen.getByText("Dispatches containing reused attachment copies").nextElementSibling?.textContent).toBe("1");
+  expect(screen.getByText("Message revisions containing reused attachment copies").nextElementSibling?.textContent).toBe("2");
   fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("confirm_conversation_history_deletion", {
     target, mode: "with_derived_copies", expectedRevision: "cascade-token",

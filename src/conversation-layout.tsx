@@ -59,7 +59,7 @@ export function ConversationSidePanel({ label, onKeyDown, children }: {
     resizeKey="conversation-side-panel" resizeLabel={label} onKeyDown={onKeyDown}>{children}</ResizablePanel>;
 }
 
-export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, searchAction, children }: {
+export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, searchAction, filters, tools, children }: {
   sectionRef?: Ref<HTMLElement>;
   className?: string;
   query: string;
@@ -68,6 +68,8 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
   onCreate: () => void;
   creating?: boolean;
   searchAction?: ReactNode;
+  filters?: ReactNode;
+  tools?: ReactNode;
   children: ReactNode;
 }) {
   return <section ref={sectionRef} className={`conv-sessions conv-library-frame${className ? ` ${className}` : ""}`} aria-label="Conversation library">
@@ -85,13 +87,21 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
       </label>
       {searchAction && <div className="shrink-0">{searchAction}</div>}
     </div>
+    {filters && <div className="conv-library-options">{filters}</div>}
+    {tools}
     <div className="conv-library-entries">{children}</div>
   </section>;
 }
 
-export function ConversationLibraryGroup({ title, children }: { title: string; children: ReactNode }) {
+export function ConversationLibraryGroup({ title, children, sectionId, actions }: {
+  title: string;
+  children: ReactNode;
+  sectionId?: string;
+  actions?: MenuGroups;
+}) {
+  const heading = <h3 className="conv-session-group" data-library-section-id={sectionId} tabIndex={sectionId ? -1 : undefined}>{title}</h3>;
   return <section aria-label={title}>
-    <h3 className="conv-session-group">{title}</h3>
+    {actions ? <ContextActions label={`${title} section`} groups={actions}>{heading}</ContextActions> : heading}
     <ul className="conv-session-list">{children}</ul>
   </section>;
 }

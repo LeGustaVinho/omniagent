@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn discovers_exact_properties_and_compares_yaml_values_without_coercing_types() -> Result<()> {
+    let markdown = concat!(
+        "\u{feff}---\r\n",
+        "'owner':   'Cíntia'  # comment\r\n",
+        "status: ready\r\n",
+        "'status': queued\r\n",
+        "tasks: [one, 1]\r\n",
+        "note: |-\r\n  preserve this\r\n",
+        "other: &anchor ready\r\n",
+        "reference: *anchor\r\n",
+        "---\r\n",
+        "owner: body text\r\n"
+    );
+    let rows = describe_markdown_properties(markdown)?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| (&*row.name, row.line))
+            .collect::<Vec<_>>(),
+        [
+            ("owner", 2),
+            ("status", 3),
+            ("status", 4),
+            ("tasks", 5),
+            ("note", 6),
+            ("other", 8),
+            ("reference", 9)
+        ]
+    );
+    let owner = &rows[0];
+    assert_eq!(owner.value, "'Cíntia'");
+    assert!(owner.editable && owner.filterable);
+    for row in [&rows[1], &rows[2], &rows[4], &rows[6]] {
+        assert!(!row.editable && !row.filterable);
+    }
+    assert_eq!(
+        matching_markdown_property(
+            markdown,
+            "owner",
+            &comparable_markdown_property("\"Cíntia\"")?
+        ),
+        Some((2, "'Cíntia'".into()))
+    );
+    assert_eq!(
+        matching_markdown_property(
+            markdown,
+            "tasks",
+            &comparable_markdown_property("['one', 1]")?
+        ),
+        Some((5, "[one, 1]".into()))
+    );
+    assert_eq!(
+        matching_markdown_property(
+            markdown,
+            "tasks",
+            &comparable_markdown_property("[one, '1']")?
+        ),
+        None
+    );
+    assert_eq!(
+        matching_markdown_property(markdown, "status", &comparable_markdown_property("ready")?),
+        None
+    );
+    assert_eq!(
+        matching_markdown_property(
+            markdown,
+            "owner",
+            &comparable_markdown_property("body text")?
+        ),
+        None
+    );
+    assert!(describe_markdown_properties("---\n# Comment\n---\n")?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn edits_one_quoted_key_without_touching_markdown_or_plugin_data() -> Result<()> {
     let original = concat!(
         "\u{feff}--- \t\r\n",

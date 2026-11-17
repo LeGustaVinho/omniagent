@@ -297,3 +297,175 @@ async fn organizes_by_project_and_retains_archived_history_across_reopen() -> Re
     assert_eq!(reopened.conversation_library_sections(None).await?.len(), 2);
     Ok(())
 }
+
+#[test]
+fn section_order_migration_preserves_members_and_the_prior_order() -> Result<()> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    db.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE projects(id TEXT PRIMARY KEY);
+         CREATE TABLE conversations(id TEXT PRIMARY KEY);
+         INSERT INTO projects VALUES ('one'), ('two');
+         INSERT INTO conversations VALUES ('chat');",
+    )?;
+    db.execute_batch(include_str!(
+        "../../../migrations/117-conversation-library-organization.sql"
+    ))?;
+    db.execute_batch(
+        "INSERT INTO conversation_library_sections (id, project_id, name, name_key) VALUES
+         ('z', 'one', 'Zeta', 'zeta'), ('a', 'one', 'Alpha', 'alpha'), ('b', 'two', 'Beta', 'beta');
+         INSERT INTO conversation_library_organization VALUES ('chat', 'z', 1, 1, 1);",
+    )?;
+    db.execute_batch(include_str!(
+        "../../../migrations/121-conversation-library-section-order.sql"
+    ))?;
+    let positions = db.prepare("SELECT id, display_order FROM conversation_library_sections ORDER BY project_id, display_order")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(
+        positions,
+        [("a".into(), 0), ("z".into(), 1), ("b".into(), 0)]
+    );
+    let membership = db.query_row("SELECT section_id, pinned, unread, archived FROM conversation_library_organization WHERE conversation_id = 'chat'",
+        [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?)))?;
+    assert_eq!(membership, ("z".into(), true, true, true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn renames_and_reorders_only_exact_project_sections_and_preserves_membership() -> Result<()> {
+    use ConversationLibrarySectionChange::{Move, Rename};
+
+    let fixture = tempfile::tempdir()?;
+    let database = fixture.path().join("app.sqlite");
+    let store = Store::open(database.clone())?;
+    let first = repo(&store, fixture.path().join("First")).await?;
+    let other = repo(&store, fixture.path().join("Other")).await?;
+    let original = store
+        .create_conversation(first.checkout_id.clone(), "Release conversation".into())
+        .await?;
+    let project = &first.project_id;
+    for name in ["Checklist", "Entregáveis", "Archive"] {
+        store
+            .organize_conversation(
+                first.checkout_id.clone(),
+                original.id.clone(),
+                ConversationLibraryChange::NewSection { name: name.into() },
+            )
+            .await?;
+    }
+    let sections = store
+        .conversation_library_sections(Some(project.clone()))
+        .await?;
+    let names = sections
+        .iter()
+        .map(|section| section.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Checklist", "Entregáveis", "Archive"]);
+    let (one, two, three) = (&sections[0], &sections[1], &sections[2]);
+    assert!(
+        store
+            .organize_conversation_library_section(
+                other.project_id,
+                three.id.clone(),
+                Rename {
+                    expected_name: three.name.clone(),
+                    name: "Wrong project".into()
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .organize_conversation_library_section(
+                project.clone(),
+                three.id.clone(),
+                Rename {
+                    expected_name: three.name.clone(),
+                    name: "ENTREGA\u{301}VEIS".into()
+                },
+            )
+            .await
+            .is_err()
+    );
+    store
+        .organize_conversation_library_section(
+            project.clone(),
+            three.id.clone(),
+            Rename {
+                expected_name: three.name.clone(),
+                name: "  Results  ".into(),
+            },
+        )
+        .await?;
+    assert!(
+        store
+            .organize_conversation_library_section(
+                project.clone(),
+                three.id.clone(),
+                Rename {
+                    expected_name: three.name.clone(),
+                    name: "Stale".into()
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .organize_conversation_library_section(
+                project.clone(),
+                three.id.clone(),
+                Move {
+                    neighbor_id: one.id.clone(),
+                    before: true
+                },
+            )
+            .await
+            .is_err()
+    );
+    store
+        .organize_conversation_library_section(
+            project.clone(),
+            three.id.clone(),
+            Move {
+                neighbor_id: two.id.clone(),
+                before: true,
+            },
+        )
+        .await?;
+    assert!(
+        store
+            .organize_conversation_library_section(
+                project.clone(),
+                three.id.clone(),
+                Move {
+                    neighbor_id: two.id.clone(),
+                    before: true
+                },
+            )
+            .await
+            .is_err()
+    );
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    let reordered = reopened
+        .conversation_library_sections(Some(project.clone()))
+        .await?;
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|section| section.id.as_str())
+            .collect::<Vec<_>>(),
+        [&one.id, &three.id, &two.id]
+    );
+    assert_eq!(reordered[1].name, "Results");
+    let entries = reopened
+        .conversation_library(None, Some(project.clone()))
+        .await?;
+    let member = entries[0].organization.section.as_ref().unwrap();
+    assert_eq!((&member.id, member.name.as_str()), (&three.id, "Results"));
+    Ok(())
+}

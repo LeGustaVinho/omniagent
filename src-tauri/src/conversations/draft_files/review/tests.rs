@@ -6,6 +6,16 @@ use crate::providers::Provider;
 
 use super::*;
 
+fn local(files: Vec<DraftAttachment>) -> Vec<DraftFileInput> {
+    files
+        .into_iter()
+        .map(|file| DraftFileInput {
+            file,
+            saved: Ok(None),
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn native_defaults_are_qualified_and_budget_blockers_leave_reviewable_fallbacks() -> Result<()>
 {
@@ -56,7 +66,7 @@ async fn native_defaults_are_qualified_and_budget_blockers_leave_reviewable_fall
     };
     let (reviewed, sealed) = build_review(
         &scope,
-        vec![image.clone(), notes.clone()],
+        local(vec![image.clone(), notes.clone()]),
         project,
         qualifies(1000, 9000, 2, 1000),
         "Explain",
@@ -73,7 +83,7 @@ async fn native_defaults_are_qualified_and_budget_blockers_leave_reviewable_fall
 
     let (limited, _) = build_review(
         &scope,
-        vec![image.clone(), notes.clone()],
+        local(vec![image.clone(), notes.clone()]),
         project,
         qualifies(10, 9000, 1, 1000),
         "Explain",
@@ -98,7 +108,7 @@ async fn native_defaults_are_qualified_and_budget_blockers_leave_reviewable_fall
     );
     let (encoded, _) = build_review(
         &scope,
-        vec![image.clone()],
+        local(vec![image.clone()]),
         project,
         qualifies(1000, 40, 2, 1000),
         "Explain",
@@ -117,7 +127,7 @@ async fn native_defaults_are_qualified_and_budget_blockers_leave_reviewable_fall
     );
     let (context, _) = build_review(
         &scope,
-        vec![image],
+        local(vec![image]),
         project,
         qualifies(1000, 9000, 2, 110),
         "Explain",

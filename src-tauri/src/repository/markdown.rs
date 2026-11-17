@@ -41,6 +41,14 @@ pub struct RepositoryMarkdown {
 }
 
 impl RepositoryMarkdown {
+    pub(crate) fn verify_checksum(&self) -> Result<()> {
+        ensure!(
+            format!("{:x}", Sha256::digest(self.markdown.as_bytes())) == self.revision.sha256,
+            "The saved Markdown revision does not match its checksum"
+        );
+        Ok(())
+    }
+
     pub(crate) fn append_to_prompt(&self, prompt: &mut String) -> Result<()> {
         let content = serde_json::to_string(self)?;
         prompt.push_str("\n\nRepository Markdown source\n");
@@ -153,7 +161,9 @@ impl Store {
                 [run], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
             binding.map(|(checkout, revision)| {
-                load_markdown(db, &checkout, &revision)?.context("the pinned Markdown revision is unavailable")
+                let markdown = load_markdown(db, &checkout, &revision)?.context("the pinned Markdown revision is unavailable")?;
+                markdown.verify_checksum()?;
+                Ok(markdown)
             }).transpose()
         }).await
     }

@@ -43,7 +43,8 @@ pub use continuation::{
 };
 pub use history::ConversationHistoryInspection;
 pub use library::{
-    ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
+    ConversationLibraryChange, ConversationLibraryEntry, ConversationLibraryMoveTarget,
+    ConversationLibrarySection, ConversationLibrarySectionChange,
 };
 pub use pipeline::{ConversationPipeline, ConversationPipelineChoice, ConversationPipelineOption};
 pub(crate) use pipeline::{

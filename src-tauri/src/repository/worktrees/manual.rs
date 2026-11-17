@@ -27,6 +27,7 @@ pub struct ManualGitWorktree {
     pub branch: String,
     pub existing: bool,
     pub base_reference: Option<String>,
+    pub history_reference: Option<String>,
     pub expected_head: String,
     pub path: Option<PathBuf>,
 }
@@ -141,6 +142,12 @@ fn plan(
     )
     .context("choose a valid local branch name")?;
     let existing = branch_head(git, &source.root, branch)?;
+    let base = request.base_reference.as_deref();
+    ensure!(
+        request.history_reference.is_none()
+            || (!request.existing && base.is_some_and(|revision| validate_oid(revision).is_ok())),
+        "a history reference requires an exact starting commit for a new branch"
+    );
     let head = if request.existing {
         ensure!(
             request.base_reference.is_none(),
@@ -149,21 +156,26 @@ fn plan(
         existing.context("the selected local branch no longer exists")?
     } else {
         ensure!(existing.is_none(), "this local branch already exists");
-        match &request.base_reference {
-            Some(reference)
-                if matches!(reference.len(), 40 | 64)
-                    && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
-            {
-                let tip =
-                    base_commit(&source.root)?.context("the source checkout has no base commit")?;
+        match base {
+            Some(reference) if validate_oid(reference).is_ok() => {
+                let tip = match request.history_reference.as_deref() {
+                    Some(history) => branch_reference(&source.root, history)?.sha,
+                    None => base_commit(&source.root)?
+                        .context("the source checkout has no base commit")?,
+                };
+                ensure!(
+                    git_query(git, &source.root, &["cat-file", "-t", reference])?.trim()
+                        == "commit",
+                    "select an exact Git commit as the starting revision"
+                );
                 let output = git_command(git, &source.root)
                     .args(["merge-base", "--is-ancestor", reference, &tip])
                     .output()?;
                 ensure!(
                     output.status.success(),
-                    "the selected commit is not in the source checkout history"
+                    "the selected commit is not in the chosen starting history"
                 );
-                reference.clone()
+                reference.to_owned()
             }
             Some(reference) => branch_reference(&source.root, reference)?.sha,
             None => base_commit(&source.root)?.context("the source checkout has no base commit")?,

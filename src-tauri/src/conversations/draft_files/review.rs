@@ -10,10 +10,10 @@ use crate::{
         AttachmentAssessment, AttachmentBudget, AttachmentDecision, AttachmentDispatch,
         AttachmentFormat, AttachmentInput, AttachmentLimits, AttachmentMetadata, AttachmentPreview,
         AttachmentReference, NativeAttachmentEncoding, QualifiedAttachmentLimits, ReferencePreview,
-        TextExcerpt, TurnAttachment, limits_for_checkout,
+        SavedNativeAttachment, TextExcerpt, TurnAttachment, limits_for_checkout,
     },
     conversations::{SessionScope, load_conversation},
-    dispatch::ContextSnapshot,
+    dispatch::{ContextSnapshot, saved_native_from_source, verify_saved_native_metadata},
     jobs::{FrozenAttachments, freeze_attachments},
     providers::{
         capabilities::{
@@ -82,12 +82,18 @@ struct ReviewedFile {
     qualification: Option<String>,
 }
 
+struct DraftFileInput {
+    file: DraftAttachment,
+    saved: Result<Option<SavedNativeAttachment>>,
+}
+
 pub(crate) struct PreparedAttachmentDraft {
     revision: String,
     context_id: String,
     pub(crate) preview_id: String,
     pub(crate) checkout_id: String,
     pub(crate) files: FrozenAttachments,
+    saved: Vec<AttachmentMetadata>,
 }
 
 #[derive(Default)]
@@ -122,7 +128,7 @@ impl Store {
         text: String,
         target_checkout_id: Option<String>,
     ) -> Result<AttachmentDraftReview> {
-        let (conversation, checkout, draft, limits) = self
+        let (context_id, checkout, project, revision, files, limits) = self
             .execute({
                 let conversation_id = conversation_id.clone();
                 move |db| {
@@ -135,20 +141,34 @@ impl Store {
                         )?;
                     let draft = load_draft(db, &conversation_id)?;
                     let limits = limits_for_checkout(db, &checkout.checkout_id)?;
-                    Ok((conversation, checkout.checkout_id, draft, limits))
+                    let files = draft
+                        .files
+                        .into_iter()
+                        .map(|file| DraftFileInput {
+                            saved: saved_native_from_source(db, &checkout.project_id, &file.source),
+                            file,
+                        })
+                        .collect::<Vec<_>>();
+                    Ok((
+                        conversation.context_id,
+                        checkout.checkout_id,
+                        checkout.project_id,
+                        draft.revision,
+                        files,
+                        limits,
+                    ))
                 }
             })
             .await?;
         ensure!(
-            draft.revision.as_deref() == Some(&expected_revision),
+            revision.as_deref() == Some(&expected_revision),
             "The attachment draft changed. Review it again."
         );
         let qualification = attachment_qualification(self, &checkout, &scope).await?;
         let reviewed_scope = scope.clone();
-        let context_id = conversation.context_id;
         let (mut reviewed, files) = tokio::task::spawn_blocking(move || {
             let qualified_limits = qualification.limits.clone();
-            build_review(&reviewed_scope, draft.files, limits, qualification, &text).map(
+            build_review(&reviewed_scope, files, limits, qualification, &text).map(
                 |(reviewed, files)| {
                     (
                         reviewed,
@@ -174,12 +194,17 @@ impl Store {
             .transpose()?;
         reviewed.preview_id = id.clone();
         self.execute(move |db| {
-            ensure!(db.execute(
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for file in &files.files {
+                verify_saved_native_metadata(&tx, &project, &file.metadata)?;
+            }
+            ensure!(tx.execute(
                 "UPDATE conversation_attachment_drafts SET preview_id = ?3, preview_payload = ?4
                  WHERE conversation_id = ?1 AND revision = ?2 AND EXISTS (
                     SELECT 1 FROM conversations WHERE id = ?1 AND active_context_id = ?5)",
                 params![conversation_id, expected_revision, id, payload, files.context_id],
             )? == 1, "The attachment draft or conversation changed. Review it again.");
+            tx.commit()?;
             Ok(())
         })
         .await?;
@@ -196,7 +221,7 @@ impl Store {
         let Some(preview_id) = preview_id else {
             return Ok(None);
         };
-        let (owner, checkout, revision, seal, limits) = self.execute({
+        let (owner, checkout, revision, seal, limits, saved) = self.execute({
             let preview_id = preview_id.clone();
             move |db| {
                 let owner = load_conversation(db, &conversation)?;
@@ -207,7 +232,14 @@ impl Store {
                 let seal: ReviewSeal = serde_json::from_slice(&protection::unprotect(&payload)?)?;
                 let checkout = crate::conversations::fork_checkout::resolve_continuation_checkout(db, &owner, seal.target_checkout_id.as_deref())?;
                 let limits = limits_for_checkout(db, &checkout.checkout_id)?;
-                Ok((owner, checkout.checkout_id, revision, seal, limits))
+                let saved = seal.files.iter().map(|item| {
+                    let saved = saved_native_from_source(db, &checkout.project_id, &item.metadata.source)?;
+                    if let Some(saved) = &saved {
+                        ensure!(saved.metadata == item.metadata, "The saved attachment changed. Review it again.");
+                    }
+                    Ok(saved)
+                }).collect::<Result<Vec<_>>>()?;
+                Ok((owner, checkout.checkout_id, revision, seal, limits, saved))
             }
         }).await?;
         let digest: [u8; 32] = Sha256::digest(text).into();
@@ -224,12 +256,18 @@ impl Store {
         );
         let root = scope.checkout.clone();
         let context_id = seal.context_id;
+        let saved_metadata = saved
+            .iter()
+            .flatten()
+            .map(|file| file.metadata.clone())
+            .collect();
         let previews = tokio::task::spawn_blocking({
             let root = root.clone();
             move || {
                 seal.files
                     .into_iter()
-                    .map(|item| {
+                    .zip(saved)
+                    .map(|(item, saved)| {
                         if let Some(approved) = &item.qualification {
                             ensure!(
                                 qualification
@@ -240,12 +278,20 @@ impl Store {
                                 "Native qualification changed. Review the files again."
                             );
                         }
-                        AttachmentPreview::prepare_draft_file(
-                            &root,
-                            &item.metadata,
-                            item.delivery,
-                            limits,
-                        )
+                        match saved {
+                            Some(saved) => AttachmentPreview::prepare_saved_file(
+                                &root,
+                                saved,
+                                item.delivery,
+                                limits,
+                            ),
+                            None => AttachmentPreview::prepare_draft_file(
+                                &root,
+                                &item.metadata,
+                                item.delivery,
+                                limits,
+                            ),
+                        }
                     })
                     .collect::<Result<Vec<_>>>()
             }
@@ -260,6 +306,7 @@ impl Store {
             preview_id,
             checkout_id: checkout,
             files,
+            saved: saved_metadata,
         }))
     }
 }
@@ -284,6 +331,12 @@ pub(crate) fn verify_attachment_draft(
         },
         "The attachment draft changed. Review the files again."
     );
+    if let Some(prepared) = prepared.filter(|prepared| !prepared.saved.is_empty()) {
+        let project = checkout_project(db, &prepared.checkout_id)?;
+        for metadata in &prepared.saved {
+            verify_saved_native_metadata(db, &project, metadata)?;
+        }
+    }
     Ok(())
 }
 
@@ -397,7 +450,7 @@ async fn attachment_qualification(
 
 fn build_review(
     scope: &SessionScope,
-    files: Vec<DraftAttachment>,
+    files: Vec<DraftFileInput>,
     limits: AttachmentLimits,
     qualification: Qualification,
     text: &str,
@@ -418,7 +471,7 @@ fn build_review(
         provider_history_usage_unknown: true,
     };
     let mut wire_bytes = text.len() as u64;
-    for (index, file) in files.into_iter().enumerate() {
+    for (index, DraftFileInput { file, saved }) in files.into_iter().enumerate() {
         let mut row = AttachmentFileReview {
             id: file.id,
             metadata: None,
@@ -431,11 +484,18 @@ fn build_review(
             media: None,
         };
         let result = (|| -> Result<()> {
-            let (metadata, suggested_end) = AttachmentPreview::describe_draft_file(
-                &scope.checkout,
-                &file.source,
-                limits.utf8_bytes_per_excerpt,
-            )?;
+            let saved = saved?;
+            let (metadata, suggested_end) = match &saved {
+                Some(saved) => (
+                    saved.metadata.clone(),
+                    saved.suggested_excerpt_end(limits.utf8_bytes_per_excerpt),
+                ),
+                None => AttachmentPreview::describe_draft_file(
+                    &scope.checkout,
+                    &file.source,
+                    limits.utf8_bytes_per_excerpt,
+                )?,
+            };
             row.metadata = Some(metadata.clone());
             let native = qualification
                 .native
@@ -489,12 +549,17 @@ fn build_review(
             if let Some(limits) = &qualification.limits {
                 limits.check_file(index, &metadata, native.map(|entry| entry.1))?;
             }
-            let preview = AttachmentPreview::prepare_draft_file(
-                &scope.checkout,
-                &metadata,
-                delivery,
-                limits,
-            )?;
+            let preview = match saved {
+                Some(saved) => {
+                    AttachmentPreview::prepare_saved_file(&scope.checkout, saved, delivery, limits)?
+                }
+                None => AttachmentPreview::prepare_draft_file(
+                    &scope.checkout,
+                    &metadata,
+                    delivery,
+                    limits,
+                )?,
+            };
             row.excerpt = preview.excerpt().cloned();
             row.reference = preview.reference_target().map(|target| match target {
                 ReferencePreview::CheckoutPath(path) => AttachmentTarget::CheckoutPath(path.into()),

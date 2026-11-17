@@ -9,6 +9,8 @@
 .agile-search > input { width: 100%; }
 
 .agile-column-heading { position: sticky; inset-block-start: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: .35rem; padding: 6px 8px; border-radius: 4px; background: var(--card); }
+.delivery-column[data-collapsed="true"] { min-height: 0; }
+.agile-column-cards:not([hidden]) { display: grid; gap: .5rem; }
 .agile-column-count { color: var(--muted-foreground); font-size: .75rem; font-variant-numeric: tabular-nums; }
 .agile-filter-reset span { margin-inline-start: 4px; padding-inline: 5px; border-radius: 4px; background: var(--muted); font-variant-numeric: tabular-nums; }
 .agile-work-card { position: relative; }

@@ -93,6 +93,7 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
             .iter()
             .all(|candidate| candidate.state == "queued" && candidate.run_id.is_none())
     );
+    assert!(comparison.source_document.is_none());
 
     let environment = AdmissionEnvironment {
         runner: scope.runner.clone(),
@@ -232,6 +233,315 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
             .as_array()
             .unwrap()
             .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_markdown_comparison_pins_the_archived_revision_and_submits_it_once_to_every_model()
+-> Result<()> {
+    use crate::{
+        dispatch::DispatchSourceRevision, repository::documents::RepositoryDocumentOpen,
+        workflows::comparison::ComparisonMarkdownSource,
+    };
+
+    let (_directory, store, repo, scope, _) = comparison_repository().await?;
+    let storage = tempfile::tempdir()?;
+    let git = |arguments: &[&str]| -> Result<()> {
+        let run = Command::new("git.exe")
+            .current_dir(&scope.checkout)
+            .args(arguments)
+            .output()?;
+        ensure!(
+            run.status.success(),
+            "Fixture Git command failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        Ok(())
+    };
+    let path = "review.md";
+    let note = scope.checkout.join(path);
+    let tracked = "The base Git tree's version";
+    let archived = "\u{feff}# Archived revisão\r\nThe exact saved note.\r\n";
+    let current = "# Current file is different\n";
+    let commit_note = |message: &str| -> Result<()> {
+        git(&["add", "--", path])?;
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            message,
+        ])
+    };
+    std::fs::write(&note, tracked)?;
+    commit_note("Baseline for the archived note")?;
+    std::fs::write(&note, archived)?;
+    let RepositoryDocumentOpen::Document { document: saved } = store
+        .open_repository_document(repo.checkout_id.clone(), path.into())
+        .await?
+    else {
+        anyhow::bail!("Note revision was not archived");
+    };
+    let base = saved
+        .revision
+        .base_commit
+        .clone()
+        .context("Archived base is missing")?;
+    std::fs::write(&note, current)?;
+    commit_note("Advance HEAD after retaining the note")?;
+    assert_ne!(
+        crate::repository::base_commit(&scope.checkout)?.as_deref(),
+        Some(base.as_str())
+    );
+    let linked_path = storage.path().join("sibling worktree");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        linked_path.to_str().context("Linked path")?,
+    ])?;
+    let linked = crate::repository::register(&store, linked_path).await?;
+    assert_eq!(linked.project_id, repo.project_id);
+    assert_ne!(linked.checkout_id, repo.checkout_id);
+
+    let source = || ComparisonMarkdownSource {
+        revision_id: saved.revision.id.clone(),
+        relative_path: path.into(),
+        sha256: saved.revision.sha256.clone(),
+    };
+    let prompt = "Compare the archived note's reasoning.";
+    let mut second = scope.clone();
+    second.model = Some("other-model".into());
+    let profiles = || vec![(scope.clone(), None), (second.clone(), None)];
+    let comparison_folder = storage.path().join("comparison checkouts");
+    for (project, checkout, request) in [
+        (
+            "unrelated-project".into(),
+            repo.checkout_id.clone(),
+            source(),
+        ),
+        (repo.project_id.clone(), linked.checkout_id, source()),
+        (
+            repo.project_id.clone(),
+            repo.checkout_id.clone(),
+            ComparisonMarkdownSource {
+                relative_path: "other.md".into(),
+                ..source()
+            },
+        ),
+        (
+            repo.project_id.clone(),
+            repo.checkout_id.clone(),
+            ComparisonMarkdownSource {
+                sha256: "f".repeat(64),
+                ..source()
+            },
+        ),
+    ] {
+        assert!(
+            store
+                .start_model_comparison_from_markdown(
+                    project,
+                    checkout,
+                    request,
+                    prompt.into(),
+                    profiles(),
+                    comparison_folder.clone()
+                )
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        store
+            .model_comparisons(repo.project_id.clone())
+            .await?
+            .is_empty()
+    );
+    let replace_archived_body = |bytes: &'static [u8]| {
+        let revision = saved.revision.clone();
+        store.execute(move |db| {
+            db.execute("UPDATE repository_markdown_revisions SET body = ?3 WHERE checkout_id = ?1 AND id = ?2",
+                params![revision.checkout_id, revision.id, crate::protection::protect(bytes)?])?;
+            Ok(())
+        })
+    };
+    replace_archived_body(b"a different stored body").await?;
+    let rejected = store
+        .start_model_comparison_from_markdown(
+            repo.project_id.clone(),
+            repo.checkout_id.clone(),
+            source(),
+            prompt.into(),
+            profiles(),
+            comparison_folder.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("does not match its checksum"));
+    assert!(
+        store
+            .model_comparisons(repo.project_id.clone())
+            .await?
+            .is_empty()
+    );
+    replace_archived_body(archived.as_bytes()).await?;
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let group = store
+        .start_model_comparison_from_markdown(
+            repo.project_id.clone(),
+            repo.checkout_id.clone(),
+            source(),
+            prompt.into(),
+            profiles(),
+            comparison_folder,
+        )
+        .await?;
+    assert_eq!(group.commit, base);
+    assert_eq!(group.prompt, prompt);
+    assert_eq!(group.source_document.as_ref(), Some(&saved.revision));
+    let output = serde_json::to_value(&group)?;
+    assert_eq!(output["sourceDocument"]["relativePath"], path);
+    assert_eq!(output["sourceDocument"]["sha256"], saved.revision.sha256);
+
+    let environment = AdmissionEnvironment {
+        runner: scope.runner.clone(),
+        bridge_available: false,
+    };
+    let mut transmitted = Vec::new();
+    let mut runs = Vec::new();
+    for candidate in &group.candidates {
+        let plan = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Candidate was not queued")?;
+        let owner = plan.conversation_id.clone();
+        let run = plan.run.id.clone();
+        let pin = store
+            .model_comparison_pin_for_run(run.clone())
+            .await?
+            .context("Missing comparison context")?;
+        assert_eq!(pin.source_document.as_ref(), Some(&saved.revision));
+        assert_eq!(pin.commit, base);
+        assert_eq!(
+            std::fs::read_to_string(pin.checkout()?.root.join(path))?,
+            tracked
+        );
+        assert_eq!(plan.input[0].text, prompt);
+        assert_eq!(
+            plan.scope.model.as_deref(),
+            Some(candidate.selection.model_id.as_str())
+        );
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: owner.clone(),
+            frames: Arc::default(),
+        }));
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let saved_dispatch = store
+            .agent_dispatch(owner.clone(), run.clone())
+            .await?
+            .context("Candidate was not submitted")?;
+        assert_eq!(saved_dispatch.delivery, Delivery::Submitted);
+        assert_eq!(
+            saved_dispatch.snapshot.base_commit.as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(saved_dispatch.snapshot.submitted_messages[0].text, prompt);
+        let document = saved_dispatch
+            .snapshot
+            .repository_markdown
+            .context("Missing dispatch Markdown")?;
+        assert_eq!(document.revision, saved.revision);
+        assert_eq!(document.markdown, archived);
+        let evidence: Value = serde_json::from_slice(&saved_dispatch.frames[0])?;
+        let text = evidence["params"]["input"][0]["text"]
+            .as_str()
+            .context("Missing wire prompt")?;
+        let (request, archive) = text
+            .split_once("\n\nRepository Markdown source\n")
+            .context("Missing archive in wire prompt")?;
+        assert_eq!(request, prompt);
+        assert_eq!(
+            serde_json::from_str::<crate::repository::RepositoryMarkdown>(archive)?,
+            document
+        );
+        transmitted.push(text.to_owned());
+        let lineage = store
+            .dispatch_lineage(owner, run.clone())
+            .await?
+            .context("Dispatch lineage was not saved")?;
+        assert!(
+            lineage
+                .sources
+                .contains(&DispatchSourceRevision::RepositoryMarkdown {
+                    revision: saved.revision.clone()
+                })
+        );
+        runs.push(run);
+    }
+    assert_eq!(transmitted.len(), 2);
+    assert_eq!(transmitted[0], transmitted[1]);
+    assert_eq!(std::fs::read_to_string(note)?, current);
+    let database = scope.checkout.join("store.sqlite");
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    let groups = reopened.model_comparisons(repo.project_id.clone()).await?;
+    assert_eq!(groups[0].source_document, group.source_document);
+    let outcomes = reopened
+        .model_comparison_outcomes(repo.project_id.clone(), group.id.clone())
+        .await?;
+    assert!(
+        serde_json::to_value(outcomes)?
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["response"] == "Fixture answer")
+    );
+    let synthesis = reopened
+        .start_model_comparison_synthesis(
+            repo.project_id.clone(),
+            crate::workflows::comparison::ComparisonSelection {
+                group_id: group.id.clone(),
+                run_ids: runs,
+            },
+            scope,
+        )
+        .await?;
+    let plan = reopened
+        .claim_next_job(environment)
+        .await?
+        .context("Synthesis was not queued")?;
+    let claimed = reopened
+        .model_comparison_syntheses(repo.project_id.clone(), group.id.clone())
+        .await?;
+    assert_eq!(claimed[0].job_id, synthesis.job_id);
+    assert_eq!(claimed[0].run_id.as_deref(), Some(plan.run.id.as_str()));
+    assert_eq!(
+        reopened
+            .dispatch_repository_markdown(plan.run.id)
+            .await?
+            .context("Synthesis lost the archive")?
+            .markdown,
+        archived
     );
     Ok(())
 }

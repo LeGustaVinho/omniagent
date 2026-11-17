@@ -54,3 +54,17 @@ it("does not let a delayed property response replace newer Source edits", async 
   expect(update).not.toHaveBeenCalled();
   expect((input as HTMLInputElement).value).toBe("done");
 });
+
+it("requires the context menu snapshot to still match before applying", () => {
+  const reviewed = "---\nstatus: ready\n---\n";
+  const current = reviewed.replace("ready", "queued");
+  const update = vi.fn();
+  render(<NotePropertyEditor name="status" value="ready" expectedSource={reviewed} read={() => current} update={update} />);
+  const input = screen.getByRole("textbox", { name: "status" });
+  fireEvent.change(input, { target: { value: "done" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(screen.getByRole("alert").textContent).toContain("Reopen the latest property");
+  expect(invoke).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+  expect(input).toHaveProperty("value", "done");
+});

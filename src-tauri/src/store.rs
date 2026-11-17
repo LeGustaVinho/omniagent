@@ -147,6 +147,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/130-workflow-delivery-attempts.sql"),
     include_str!("../migrations/131-workflow-agent-review-reuse.sql"),
     include_str!("../migrations/132-git-reviewed-hunks.sql"),
+    include_str!("../migrations/121-conversation-library-section-order.sql"),
+    include_str!("../migrations/122-saved-attachment-reuse-lineage.sql"),
+    include_str!("../migrations/123-model-comparison-markdown-source.sql"),
 ];
 // Branch snapshots used some numbers for different migrations. Table names identify the schema
 // already installed, regardless of the original number stored in user_version.
@@ -154,11 +157,16 @@ const BRANCH_MIGRATIONS: &[(usize, &str)] = &[
     (118, "workflow_automatic_runs"),
     (119, "workflow_backlog_epics"),
     (120, "workflow_backlog_executions"),
+    (121, "workflow_automatic_preparations"),
+    (122, "workflow_test_phase_actions"),
+    (123, "workflow_github_project_settings"),
     (128, "checkout_document_history"),
     (129, "git_review_comments"),
     (130, "workflow_delivery_attempts"),
     (131, "workflow_agent_review_reuses"),
     (132, "git_reviewed_hunks"),
+    (134, "saved_attachment_reuses"),
+    (135, "model_comparison_markdown_sources"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -343,7 +351,7 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
     if version as usize > MIGRATIONS.len() {
         bail!("SQLite schema {version} is newer than this build");
     }
-    if matches!(version, 118..=120 | 128..=129) && target >= 128 {
+    if matches!(version, 118..=123 | 128..=129) && target >= 128 {
         for &(number, table) in BRANCH_MIGRATIONS {
             if number <= version as usize && !has_table(&tx, table)? {
                 tx.execute_batch(MIGRATIONS[number - 1])
@@ -359,6 +367,10 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
     {
         let already_applied = match BRANCH_MIGRATIONS.iter().find(|(number, _)| *number == index + 1) {
             Some((_, table)) => has_table(&tx, table)?,
+            None if index + 1 == 133 => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conversation_library_sections') WHERE name = 'display_order')",
+                [], |row| row.get(0),
+            )?,
             None => false,
         };
         if !already_applied {
@@ -426,7 +438,7 @@ mod tests {
 
     #[test]
     fn reconciles_context_menu_database_versions_with_the_pipeline_schema() -> Result<()> {
-        for version in 118..=120 {
+        for version in 118..=123 {
             let mut db = Connection::open_in_memory()?;
             db.pragma_update(None, "foreign_keys", "ON")?;
             migrate(&mut db, 117)?;
@@ -451,6 +463,9 @@ mod tests {
                 db.execute_batch(
                     "INSERT INTO git_reviewed_hunks VALUES ('checkout', 'comparison', 'hunk');",
                 )?;
+            }
+            for number in 121..=version {
+                db.execute_batch(MIGRATIONS[(number + 11) as usize])?;
             }
             db.pragma_update(None, "user_version", version)?;
             migrate(&mut db, MIGRATIONS.len())?;

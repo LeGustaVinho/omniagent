@@ -2,12 +2,12 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
-import { fileHistoryTarget, newWorktreeTarget } from "@/file-context-actions";
+import { fileHistoryTarget, newWorktreeTarget, readTerminalFolderTarget } from "@/file-context-actions";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -40,7 +40,7 @@ function openGit(overrides: Partial<WorkspaceProps> = {}) {
     openActivity={openActivity}
     {...overrides}
   /></QueryClientProvider>);
-  return { openActivity };
+  return { client, openActivity };
 }
 
 afterEach(() => {
@@ -99,12 +99,13 @@ it("compares two tracked refs in the shared text diff without reading the worktr
     };
     if (command === "git_branch_comparison") {
       return args?.range?.headReference
-        ? { revisions, changes: [{ path: "notes.md", status: "M" }] }
+        ? { revisions, changes: [{ path: "notes.md", status: "M" }, { path: "added.md", status: "A" }] }
         : { revisions, changes: [] };
     }
-    if (command === "git_branch_comparison_diff") return {
-      path: "notes.md", original: { status: "text", content: "merge base text" }, modified: { status: "text", content: "feature text" },
-    };
+    if (command === "git_branch_comparison_diff") return (payload as { path: string }).path === "added.md"
+      ? { path: "added.md", original: { status: "missing" }, modified: { status: "text", content: "committed addition\n" },
+          patch: { status: "text", content: "diff --git a/added.md b/added.md\n+committed addition\n" } }
+      : { path: "notes.md", original: { status: "text", content: "merge base text" }, modified: { status: "text", content: "feature text" } };
     throw new Error(`Unexpected ${command}`);
   });
   const user = userEvent.setup();
@@ -119,7 +120,67 @@ it("compares two tracked refs in the shared text diff without reading the worktr
   expect(invoke).toHaveBeenCalledWith("git_branch_comparison_diff", {
     checkoutId: checkout.checkoutId, range, expected: revisions, path: "notes.md",
   });
+
+  const added = screen.getByRole("button", { name: /^added\.md/ });
+  fireEvent.contextMenu(added);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await navigator.clipboard.readText()).toBe("diff --git a/added.md b/added.md\n+committed addition\n");
+  expect(invoke).toHaveBeenCalledWith("git_branch_comparison_diff", {
+    checkoutId: checkout.checkoutId, range, expected: revisions, path: "added.md",
+  });
+  expect(added.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.contextMenu(added);
+  await user.click(await screen.findByRole("menuitem", { name: "Open base version" }));
+  const basePreview = within(await screen.findByRole("dialog", { name: "Base version" }));
+  expect(basePreview.getByText("This file does not exist in this version.")).toBeTruthy();
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("copies the displayed working patch and opens the exact sides without changing the selected diff", async () => {
+  const path = "notes[1].md";
+  const deleted = "docs/removed.md";
+  const patch = "diff --git a/notes[1].md b/notes[1].md\n-old\n+edit\n\\ No newline at end of file\n";
+  let changedRevision = false;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot, managed: false, revision: originalRevision,
+      changes: [{ path, working: "M", staged: "M" }, { path: deleted, working: "D", staged: null }],
+    };
+    if (command === "git_checkout_diff") return {
+      path: (payload as { path: string }).path,
+      revision: changedRevision ? { ...originalRevision, index: "different-index" } : originalRevision,
+      original: { status: "text", content: "old\n" }, modified: { status: "text", content: "edit" },
+      patch: { status: "text", content: patch },
+    };
+    if (command === "open_checkout_item_in_shell") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit();
+  const active = await screen.findByRole("button", { name: /^notes\[1\]\.md/ });
+  await screen.findByText("edit");
+  fireEvent.contextMenu(active);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await navigator.clipboard.readText()).toBe(patch);
+  fireEvent.contextMenu(active);
+  await user.click(await screen.findByRole("menuitem", { name: "Open revised version" }));
+  const revised = within(await screen.findByRole("dialog", { name: "Revised version" }));
+  expect(revised.getByText("Worktree")).toBeTruthy();
+  expect(revised.getByLabelText("Version contents").textContent).toBe("edit");
+  await user.click(revised.getByRole("button", { name: "Close dialog" }));
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "git_checkout_diff")).toHaveLength(1);
+
+  const removed = screen.getByRole("button", { name: /^docs\/removed\.md/ });
+  fireEvent.contextMenu(removed);
+  await user.click(await screen.findByRole("menuitem", { name: "Show containing folder in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: checkout.checkoutId, relativePath: "docs", action: "reveal" });
+
+  changedRevision = true;
+  fireEvent.contextMenu(removed);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await screen.findByText(/The checkout changed/)).toBeTruthy();
+  expect(active.getAttribute("aria-expanded")).toBe("true");
+  expect(removed.getAttribute("aria-expanded")).toBe("false");
 });
 
 it("opens file history at the selected worktree and compares a renamed file to its former path", async () => {
@@ -352,6 +413,292 @@ it("previews a chosen side and an edited combination before writing a working re
   expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
 });
 
+it("uses the clicked historical commit as the exact starting revision of a new worktree", async () => {
+  const newer = "a".repeat(40);
+  const earlier = "b".repeat(40);
+  const author = "Fixture";
+  const committedAt = "2026-11-17T11:00:00-03:00";
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: (payload as { checkoutId: string }).checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: { ...originalRevision, head: newer }, changes: [],
+    };
+    if (command === "git_checkout_history") return [
+      { sha: newer, author, committedAt, subject: "Latest revision" },
+      { sha: earlier, author, committedAt, subject: "Earlier revision" },
+    ];
+    if (command === "git_checkout_commit_details") return { message: "Latest revision\n", parents: [earlier], parent: earlier, files: [] };
+    if (command === "create_git_worktree") return { ...checkout, checkoutId: "new-worktree" };
+    throw new Error(command);
+  });
+  openGit({ target: "history" });
+  const user = userEvent.setup();
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Earlier revision/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Create worktree from this commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "New worktree" }));
+  expect(dialog.getByRole<HTMLSelectElement>("combobox", { name: "Base revision" }).value).toBe(earlier);
+  await user.type(dialog.getByLabelText("Branch", { exact: true }), "from-old");
+  await user.click(dialog.getByRole("button", { name: "Create worktree" }));
+  expect(invoke).toHaveBeenCalledWith("create_git_worktree", {
+    projectId: checkout.projectId, checkoutId: checkout.checkoutId,
+    request: { branch: "from-old", existing: false, baseReference: earlier, expectedHead: earlier, path: null },
+  });
+});
+
+it("creates a worktree from a clicked commit in the selected history ref rather than checkout HEAD", async () => {
+  const active = "a".repeat(40);
+  const topic = "b".repeat(40);
+  const earlier = "c".repeat(40);
+  const reference = "refs/heads/feature";
+  const details = { author: "Person", committedAt: "2026-11-17T12:00:00Z" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: (payload as { checkoutId: string }).checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [],
+      revision: { ...originalRevision, head: active }, branches: branches.map((branch) => ({ ...branch, sha: branch.reference === reference ? topic : active })),
+    };
+    if (command === "git_checkout_history") return (payload as { branch: string | null }).branch === reference
+      ? [{ ...details, sha: topic, subject: "Topic tip" }, { ...details, sha: earlier, subject: "Past topic commit" }]
+      : [{ ...details, sha: active, subject: "Main tip" }];
+    if (command === "git_checkout_commit_details") return { message: "Commit details", parents: [], parent: null, files: [] };
+    if (command === "create_git_worktree") return { ...checkout, checkoutId: "topic-worktree" };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "history" });
+  await user.selectOptions(await screen.findByLabelText("History branch"), reference);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Past topic commit/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Create worktree from this commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "New worktree" }));
+  expect(dialog.getByRole<HTMLSelectElement>("combobox", { name: "Base revision" }).value).toBe(earlier);
+  await user.type(dialog.getByLabelText("Branch", { exact: true }), "topic-review");
+  await user.click(dialog.getByRole("button", { name: "Create worktree" }));
+  expect(invoke).toHaveBeenCalledWith("create_git_worktree", {
+    projectId: checkout.projectId, checkoutId: checkout.checkoutId,
+    request: { branch: "topic-review", existing: false, baseReference: earlier, expectedHead: earlier, path: null, historyReference: reference },
+  });
+});
+
+it("opens the selected commit and compares the clicked file against the chosen merge parent in its checkout", async () => {
+  const path = "notes/new.md";
+  const previousPath = "notes/old.md";
+  const merge = "a".repeat(40);
+  const first = "b".repeat(40);
+  const second = "c".repeat(40);
+  const branch = "refs/heads/feature";
+  const message = "Merge the note updates\n\nRetain the introduction.\n\nCo-authored-by: Person\n";
+  const patch = "diff --git a/notes/old.md b/notes/new.md\nrename from notes/old.md\nrename to notes/new.md\n";
+  const subject = { sha: merge, author: "Author", committedAt: "2026-11-17T12:00:00Z", subject: "Merge the note updates" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { checkoutId?: string; branch?: string; request?: { sha: string; parent: string | null } };
+    if (command === "git_checkout_review") return {
+      checkoutId: args.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [],
+      revision: { ...originalRevision, head: merge },
+      branches: branches.map((entry) => entry.reference === branch ? { ...entry, sha: merge } : entry),
+    };
+    if (command === "git_checkout_history") return args.checkoutId === "linked-task" && args.branch === branch ? [subject] : [];
+    if (command === "git_checkout_commit_details") return {
+      message, parents: [first, second], parent: args.request?.parent ?? first,
+      files: args.request?.parent === second ? [{ path, previousPath, status: "R" }] : [{ path: "intro.md", previousPath: null, status: "M" }],
+    };
+    if (command === "git_checkout_commit_diff") return {
+      path, original: { status: "text", content: "text from second parent\n" }, modified: { status: "text", content: "committed text\n" },
+      patch: { status: "text", content: patch },
+    };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "history" });
+  const linked = await screen.findByRole("option", { name: /C:\/linked/ });
+  await user.selectOptions(screen.getByLabelText("Git worktree"), linked);
+  await user.selectOptions(await screen.findByLabelText("History branch"), branch);
+  const messageNode = await screen.findByLabelText("Commit message");
+  expect(messageNode.textContent).toBe(message);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Merge the note updates/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy full commit message" }));
+  expect(await navigator.clipboard.readText()).toBe(message);
+  await user.selectOptions(screen.getByLabelText("Compare with parent"), second);
+  const files = within(await screen.findByRole("region", { name: "Files changed in this commit" }));
+  fireEvent.contextMenu(await files.findByRole("button", { name: /notes\/old\.md.*notes\/new\.md/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with parent" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Committed file comparison" }));
+  expect(await dialog.findByText("text from second parent")).toBeTruthy();
+  expect(await dialog.findByText("committed text")).toBeTruthy();
+  const request = { branch, expectedHead: merge, sha: merge, parent: second };
+  expect(invoke).toHaveBeenCalledWith("git_checkout_commit_details", { checkoutId: "linked-task", request });
+  expect(invoke).toHaveBeenCalledWith("git_checkout_commit_diff", { checkoutId: "linked-task", request, path });
+  const changedFile = dialog.getByRole("button", { name: "notes/new.md · Renamed" });
+  expect(changedFile.title).toBe("notes/old.md → notes/new.md");
+  fireEvent.contextMenu(changedFile);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
+  expect(await navigator.clipboard.readText()).toBe(patch);
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("compares the clicked whole commit with captured refs and offers the checkout HEAD shortcut", async () => {
+  const base = "a".repeat(40);
+  const oldHead = "b".repeat(40);
+  const newerHead = "c".repeat(40);
+  const oldTopic = "d".repeat(40);
+  const newerTopic = "e".repeat(40);
+  const topic = "refs/heads/feature";
+  let currentHead = oldHead;
+  let currentTopic = oldTopic;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [],
+      revision: { ...originalRevision, head: currentHead },
+      branches: branches.map((entry) => ({ ...entry, sha: entry.reference === topic ? currentTopic : currentHead })),
+    };
+    if (command === "git_checkout_history") return [
+      { sha: currentHead, subject: "Latest commit", author: "Person", committedAt: "2026-11-17T12:00:00Z" },
+      { sha: base, subject: "Historical base", author: "Person", committedAt: "2026-11-16T12:00:00Z" },
+    ];
+    if (command === "git_checkout_commit_details") return { message: "Commit details", parents: [], parent: null, files: [] };
+    if (command === "git_compare_commits") return [{ path: "README.md", status: "M", previousPath: null }];
+    if (command === "git_compare_commit_file") return {
+      path: "README.md", original: { status: "text", content: "Selected historical text" },
+      modified: { status: "text", content: (payload as { range: { head: string } }).range.head === oldTopic ? "Frozen reference text" : "Checkout HEAD text" },
+    };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const { client } = openGit({ target: "history" });
+  const olderCommit = await screen.findByRole("button", { name: /^Historical base/ });
+  fireEvent.contextMenu(olderCommit);
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with another reference…" }));
+  let dialog = within(await screen.findByRole("dialog", { name: "Compare commits" }));
+  currentHead = newerHead;
+  currentTopic = newerTopic;
+  await act(async () => { await client.invalidateQueries({ queryKey: ["git-review", checkout.checkoutId] }); });
+  expect(dialog.getByRole("option", { name: `feature · ${oldTopic.slice(0, 12)}` })).toBeTruthy();
+  await user.selectOptions(dialog.getByLabelText("Compare with"), topic);
+  expect(await dialog.findByText("Frozen reference text")).toBeTruthy();
+  const range = { base, head: oldTopic };
+  expect(invoke).toHaveBeenCalledWith("git_compare_commits", { checkoutId: checkout.checkoutId, range });
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_file", { checkoutId: checkout.checkoutId, range, path: "README.md" });
+  await user.click(dialog.getByRole("button", { name: "Close dialog" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Historical base/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with checkout HEAD" }));
+  dialog = within(await screen.findByRole("dialog", { name: "Compare commits" }));
+  expect(await dialog.findByText("Checkout HEAD text")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commits", { checkoutId: checkout.checkoutId, range: { base, head: newerHead } });
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("compares the clicked commit with files on disk or the staged index of the selected checkout", async () => {
+  const base = "a".repeat(40);
+  const head = "b".repeat(40);
+  const revision = { branch: "refs/heads/feature", head, index: "checkout-index" };
+  const workingFile = { path: "changed.txt", status: "M", untracked: false, evidence: "before" };
+  const stagedFile = { ...workingFile, evidence: null };
+  const untracked = { path: "new.txt", status: "A", untracked: true, evidence: "new" };
+  let capture = 0;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { checkoutId: string; request?: { source?: string; comparison?: { source: string }; file?: typeof workingFile } };
+    if (command === "git_checkout_review") return {
+      checkoutId: args.checkoutId, worktrees, root: args.checkoutId === "linked-task" ? "C:/linked" : checkout.checkoutRoot,
+      managed: false, changes: [], revision, branches,
+    };
+    if (command === "git_checkout_history") return [{ sha: base, subject: "Historical commit", author: "Person", committedAt: "2026-11-17T12:00:00Z" }];
+    if (command === "git_checkout_commit_details") return { message: "Committed metadata", parents: [], parent: null, files: [] };
+    if (command === "git_compare_commit_checkout") return {
+      revision, files: args.request?.source === "working" ? [{ ...workingFile, evidence: ++capture === 1 ? "before" : "refreshed" }, untracked] : [stagedFile],
+    };
+    if (command === "git_compare_commit_checkout_file") {
+      const file = args.request?.file;
+      if (file?.evidence === "before") throw new Error("The working file changed. Refresh the comparison.");
+      return {
+        path: file?.path, original: { status: "text", content: "Historical file bytes" },
+        modified: { status: "text", content: args.request?.comparison?.source === "staged" ? "Staged file bytes" : "Disk file bytes" },
+      };
+    }
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "history" });
+  const linked = await screen.findByRole("option", { name: /C:\/linked/ });
+  await user.selectOptions(screen.getByLabelText("Git worktree"), linked);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Historical commit/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with local checkout…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare commit with local checkout" }));
+  expect(dialog.getByText("C:/linked")).toBeTruthy();
+  expect(await dialog.findByRole("button", { name: /new\.txt.*Untracked/ })).toBeTruthy();
+  expect(await dialog.findByText(/The working file changed/)).toBeTruthy();
+  await user.click(dialog.getByRole("button", { name: "Refresh checkout comparison" }));
+  expect(await dialog.findByText("Disk file bytes")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_checkout_file", {
+    checkoutId: "linked-task", request: { comparison: { base, source: "working" }, revision, file: { ...workingFile, evidence: "refreshed" } },
+  });
+  await user.selectOptions(dialog.getByLabelText("Checkout version"), "staged");
+  expect(await dialog.findByText("Staged file bytes")).toBeTruthy();
+  expect(dialog.queryByRole("button", { name: /new\.txt.*Untracked/ })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_checkout_file", {
+    checkoutId: "linked-task", request: { comparison: { base, source: "staged" }, revision, file: stagedFile },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("git_compare_commits", expect.anything());
+});
+
+it("creates a branch from the exact history ref even if it advances while the name is entered", async () => {
+  const ref = "refs/heads/feature";
+  const historical = "a".repeat(40);
+  const moved = "b".repeat(40);
+  let tip = historical;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [], revision: originalRevision,
+      branches: branches.map((entry) => entry.reference === ref ? { ...entry, sha: tip } : entry),
+    };
+    if (command === "git_checkout_history") return [];
+    if (command === "create_git_branch") {
+      if ((payload as { branch: string }).branch === "taken") throw new Error("The local branch already exists");
+      return;
+    }
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const { client } = openGit({ target: "history" });
+  const branchPicker = await screen.findByLabelText("History branch");
+  await user.selectOptions(branchPicker, ref);
+  fireEvent.contextMenu(branchPicker);
+  await user.click(await screen.findByRole("menuitem", { name: "Create branch from this ref…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Create local branch" }));
+  expect(dialog.getByText(historical)).toBeTruthy();
+  tip = moved;
+  await act(async () => { await client.invalidateQueries({ queryKey: ["git-review", checkout.checkoutId] }); });
+  const name = dialog.getByLabelText("Branch name");
+  await user.type(name, "taken");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await dialog.findByText(/branch already exists/i)).toBeTruthy();
+  await user.clear(name);
+  await user.type(name, "history/topic");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await screen.findByText("history/topic")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("create_git_branch", { checkoutId: checkout.checkoutId, branch: "history/topic", expectedHead: historical });
+  expect(invoke).not.toHaveBeenCalledWith("create_git_worktree", expect.anything());
+  expect((screen.getByLabelText("History branch") as HTMLSelectElement).value).toBe(ref);
+});
+
+it("creates a branch from the clicked registered worktree HEAD without selecting that worktree", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [], revision: originalRevision, branches,
+    };
+    if (command === "create_git_branch") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "worktrees" });
+  fireEvent.contextMenu(await screen.findByText("C:/linked"));
+  await user.click(await screen.findByRole("menuitem", { name: "Create branch from this HEAD…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Create local branch" }));
+  expect(dialog.getByText("current-feature")).toBeTruthy();
+  await user.type(dialog.getByLabelText("Branch name"), "linked-source");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await screen.findByText("linked-source")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("create_git_branch", { checkoutId: "linked-task", branch: "linked-source", expectedHead: "current-feature" });
+  expect((screen.getByLabelText("Git worktree") as HTMLSelectElement).value).toBe(checkout.checkoutId);
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;
@@ -387,6 +734,43 @@ it("registers a manual worktree from the shared dialog and selects the returned 
   expect(within(row).getByRole("button", { name: "Selected" })).toBeTruthy();
 });
 
+it("opens the clicked registered worktree in the IDE or terminal and filters its recorded Git attempts", async () => {
+  const linked = { ...checkout, checkoutId: "linked-task", checkoutRoot: "C:/linked" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, worktrees, branches, managed: false,
+      revision: originalRevision, changes: [],
+    };
+    if (command === "registered_checkouts") return [checkout, { ...linked, projectId: "foreign-project" }, linked];
+    if (command === "git_saved_attempts") return (payload as { checkoutId?: string }).checkoutId === linked.checkoutId
+      ? [{ runId: "linked-run", checkoutId: linked.checkoutId, label: "Linked attempt" }]
+      : [{ runId: "local-run", checkoutId: checkout.checkoutId, label: "Local attempt" }];
+    if (command === "attempt_worktree_evidence") return null;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const openCheckoutWorkspace = vi.fn<NonNullable<WorkspaceProps["openCheckoutWorkspace"]>>(async () => {});
+  openGit({ target: "worktrees", openCheckoutWorkspace });
+  const table = within(await screen.findByRole("table", { name: "Git worktrees" }));
+  fireEvent.contextMenu(table.getByText("C:/external"));
+  expect(screen.queryByRole("menuitem", { name: "Open worktree in IDE" })).toBeNull();
+  await user.keyboard("{Escape}");
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree in IDE" }));
+  await waitFor(() => expect(openCheckoutWorkspace).toHaveBeenCalledWith(linked, { workspace: "ide", target: undefined }));
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Open terminal in worktree" }));
+  await waitFor(() => expect(openCheckoutWorkspace).toHaveBeenLastCalledWith(linked, { workspace: "ide", target: expect.any(String) }));
+  expect(readTerminalFolderTarget(openCheckoutWorkspace.mock.lastCall?.[1].target)).toBe("");
+  fireEvent.contextMenu(table.getByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "View saved attempts for worktree" }));
+  expect(await screen.findByRole("option", { name: /^Linked attempt/ })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: /^Local attempt/ })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_saved_attempts", { projectId: checkout.projectId, checkoutId: linked.checkoutId });
+  await user.click(screen.getByRole("button", { name: "Saved attempts" }));
+  expect(await screen.findByRole("option", { name: /^Local attempt/ })).toBeTruthy();
+});
+
 it("compares live paths and sends the current index, branch and HEAD for each staging change", async () => {
   let staged = false;
   vi.mocked(invoke).mockImplementation(async (command, payload) => {
@@ -411,6 +795,7 @@ it("compares live paths and sends the current index, branch and HEAD for each st
     if (command === "git_checkout_history") return [{
       sha: "current-feature", author: "Person", committedAt: "2026-11-16T12:00:00Z", subject: "Linked history",
     }];
+    if (command === "git_checkout_commit_details") return { message: "Details of linked history\n", parents: [], parent: null, files: [] };
     throw new Error(`Unexpected ${command}`);
   });
   const user = userEvent.setup();

@@ -14,6 +14,24 @@ afterEach(() => { cleanup(); localStorage.clear(); vi.resetAllMocks(); });
 
 const root = () => screen.getByRole("button", { name: "Checkout root" });
 
+it("reveals the active file once without enabling automatic reveal", async () => {
+  const client = new QueryClient();
+  const tree = (active: string) => <QueryClientProvider client={client}>
+    <FileTree paths={["src/first.txt", "docs/other.md"]} folders={["src", "docs"]} active={active} onOpen={vi.fn()}
+      actions={() => []} checkoutId="reveal-worktree" workspace="ide" simulated={true} />
+  </QueryClientProvider>;
+  const { rerender } = render(tree("src/first.txt"));
+  expect(screen.queryByRole("button", { name: "first.txt" })).toBeNull();
+  fireEvent.contextMenu(root());
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Reveal active file" }));
+  expect((await screen.findByRole("button", { name: "first.txt" })).getAttribute("aria-current")).toBe("page");
+
+  rerender(tree("docs/other.md"));
+  expect(screen.queryByRole("button", { name: "other.md" })).toBeNull();
+  fireEvent.contextMenu(root());
+  expect(await screen.findByRole("menuitem", { name: "Auto-reveal active file" })).toBeTruthy();
+});
+
 it("loads Git-ignored directories lazily from the blank-area context menu", async () => {
   vi.mocked(invoke).mockImplementation(async (_command, args) => {
     switch ((args as { folder: string | null }).folder) {

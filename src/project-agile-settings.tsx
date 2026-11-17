@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Job } from "@/bindings/Job";
@@ -19,6 +19,7 @@ type WorkFields = { title: string; priority: number; acceptanceCriteria: string[
 type TaskModeSettings = { overrideMode: ChecklistMode | null; effectiveMode: ChecklistMode };
 type BranchSettings = { overrideStrategy: BranchStrategy | null; effectiveStrategy: BranchStrategy; locked: boolean };
 type DispatchTarget = { workflowRunId: string; checkoutId: string; planRevision: string; releaseId: string; unitId: string };
+export type ChecklistRunRequest = Pick<Item, "id" | "body">;
 
 const checklistLabels = { track_progress: "Track progress", run_by_item: "Run by item" } satisfies Record<ChecklistMode, string>;
 const branchLabels = { independent: "Independent", shared_branch_per_task: "Shared branch per Task" } satisfies Record<BranchStrategy, string>;
@@ -78,20 +79,27 @@ export function ProjectWorkModeControls({ projectId, settings = false }: { proje
   </div>;
 }
 
-export function TaskWorkSettings({ scope, workKind, candidates, items, openQueueJob }: {
+export function TaskWorkSettings({ scope, workKind, candidates, items, openQueueJob, checklistRun }: {
   scope: Scope; workKind: "task" | "subtask"; candidates: Work[]; items: Item[]; openQueueJob?: WorkspaceProps["openQueueJob"];
+  checklistRun?: ChecklistRunRequest;
 }) {
   const [open, setOpen] = useState(false);
+  const details = useRef<HTMLDetailsElement>(null);
   const fields = useQuery({ queryKey: ["project-tasks", scope.projectId, scope.taskId, "fields"],
     queryFn: () => invoke<WorkFields>("project_work_fields", scope), enabled: open,
   });
-  return <details className="pipeline-form" onToggle={(event) => setOpen(event.currentTarget.open)}>
+  useEffect(() => {
+    if (!checklistRun || !details.current) return;
+    details.current.open = true;
+    setOpen(true);
+  }, [checklistRun]);
+  return <details ref={details} className="pipeline-form" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer font-medium">Work fields and execution</summary>
     {open && <div className="pipeline-stack mt-2">
       {fields.isPending && <p role="status">Loading work fields…</p>}
       {fields.error && <p role="alert">{String(fields.error)}</p>}
       {fields.data && <TaskWorkFields scope={scope} displayed={fields.data} candidates={candidates} reload={() => fields.refetch()} />}
-      <TaskModeControls scope={scope} workKind={workKind} items={items} openQueueJob={openQueueJob} />
+      <TaskModeControls scope={scope} workKind={workKind} items={items} openQueueJob={openQueueJob} checklistRun={checklistRun} />
     </div>}
   </details>;
 }
@@ -141,8 +149,9 @@ function TaskWorkFields({ scope, displayed, candidates, reload }: { scope: Scope
   </form>;
 }
 
-function TaskModeControls({ scope, workKind, items, openQueueJob }: {
+function TaskModeControls({ scope, workKind, items, openQueueJob, checklistRun }: {
   scope: Scope; workKind: "task" | "subtask"; items: Item[]; openQueueJob?: WorkspaceProps["openQueueJob"];
+  checklistRun?: ChecklistRunRequest;
 }) {
   const client = useQueryClient();
   const key = ["project-tasks", scope.projectId, scope.taskId];
@@ -167,16 +176,26 @@ function TaskModeControls({ scope, workKind, items, openQueueJob }: {
     </select></label>}
     {branch.data && <p>Effective branch strategy · {branchLabels[branch.data.effectiveStrategy]}{branch.data.locked ? " · Locked after provisioning" : ""}</p>}
     {error && <p role="alert">{String(error)}</p>}
-    {checklist.data && items.length > 0 && <QueueChecklist scope={scope} mode={checklist.data.effectiveMode} items={items} openQueueJob={openQueueJob} />}
+    {checklist.data && (items.length > 0 || checklistRun) && <QueueChecklist key={checklistRun?.id ?? "all-items"}
+      scope={scope} mode={checklist.data.effectiveMode}
+      items={items} openQueueJob={openQueueJob} checklistRun={checklistRun} />}
   </section>;
 }
 
-function QueueChecklist({ scope, mode, items, openQueueJob }: {
+function QueueChecklist({ scope, mode, items, openQueueJob, checklistRun }: {
   scope: Scope; mode: ChecklistMode; items: Item[]; openQueueJob?: WorkspaceProps["openQueueJob"];
+  checklistRun?: ChecklistRunRequest;
 }) {
   const client = useQueryClient();
-  const [itemId, setItemId] = useState("");
+  const [chosenItemId, setChosenItemId] = useState("");
   const [chosenModel, setChosenModel] = useState<ModelSelection>();
+  const panel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!checklistRun) return;
+    const frame = requestAnimationFrame(() => panel.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [checklistRun]);
+  const itemId = checklistRun?.id ?? chosenItemId;
   const assignments = useTaskAssignments(scope.projectId, scope.taskId, true);
   const assignment = assignments.data?.find(({ role }) => role === "implementer");
   const target = useQuery({ queryKey: ["project-tasks", scope.projectId, scope.taskId, "checklist-release"],
@@ -193,22 +212,26 @@ function QueueChecklist({ scope, mode, items, openQueueJob }: {
     onSuccess: () => client.invalidateQueries({ queryKey: ["project-job-queue", scope.projectId] }),
     onError: () => target.refetch(),
   });
-  const available = mode === "track_progress" || items.some(({ id }) => id === itemId);
+  const itemExists = items.some(({ id }) => id === itemId);
+  const available = mode === "run_by_item" ? itemExists : !checklistRun;
   const error = assignments.error ?? target.error ?? queue.error;
-  return <section className="pipeline-stack" aria-label="Queue checklist work">
-    {mode === "run_by_item" && <label>Checklist item to run <select value={itemId} onChange={(event) => setItemId(event.currentTarget.value)}>
+  return <section ref={panel} tabIndex={-1} className="pipeline-stack" aria-label="Queue checklist work">
+    {mode === "run_by_item" && <label>Checklist item to run <select value={itemExists ? itemId : ""}
+      disabled={Boolean(checklistRun) || queue.isPending} onChange={(event) => setChosenItemId(event.currentTarget.value)}>
       <option value="">Choose a checklist item</option>{items.map(({ id, body }) => <option key={id} value={id}>{body}</option>)}
     </select></label>}
+    {checklistRun && !itemExists && <p role="status">The checklist item “{checklistRun.body}” is unavailable.</p>}
+    {checklistRun && mode === "track_progress" && <p role="status">Run by item mode is required to queue “{checklistRun.body}” individually.</p>}
     {target.data === null && <p>Approve and prepare repository delivery before queuing checklist work.</p>}
     {target.data && <ModelPicker label="Checklist run model" options={options} loading={loading} disabled={queue.isPending}
       selection={{ mode: "single", selected: model, onChange: setChosenModel }} />}
     {target.data && preferred && !model && !loading && <p>Model {preferred.modelId} is unavailable in its execution profile.</p>}
     <Button type="button" variant="outline" className="justify-self-start" disabled={!available || !target.data || !model || queue.isPending}
       onClick={() => {
-        if (!target.data || !model) return;
+        if (!available || !target.data || !model || queue.isPending) return;
         queue.mutate({ releaseId: target.data.releaseId, unitId: target.data.unitId, item: mode === "run_by_item" ? itemId : null,
           selection: model });
-      }}>{mode === "track_progress" ? "Queue checklist progress" : "Queue selected checklist item"}</Button>
+      }}>{mode === "track_progress" && !checklistRun ? "Queue checklist progress" : "Queue selected checklist item"}</Button>
     {queue.data && <p role="status">Checklist work queued. {openQueueJob && <button type="button" className="text-primary underline" onClick={() => openQueueJob(queue.data!.id)}>Open queued job</button>}</p>}
     {error && <p role="alert">{String(error)}</p>}
   </section>;

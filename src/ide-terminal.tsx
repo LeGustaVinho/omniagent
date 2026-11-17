@@ -5,7 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { markdownExcerpt } from "@/editor-context";
-import { parseTerminalFileReference, terminalFileAtPoint, terminalFileLinkProvider, trackTerminalDirectories, type TerminalFileReference } from "@/terminal-file-links";
+import { trackTerminalCommands, type TerminalCommand } from "@/terminal-command-capture";
+import { parseTerminalPathReference, terminalPathAtPoint, terminalPathLinkProvider, trackTerminalDirectories, type ResolvedTerminalPath, type TerminalPathReference } from "@/terminal-file-links";
 import "@xterm/xterm/css/xterm.css";
 
 const responses: Record<string, string[]> = {
@@ -114,7 +115,7 @@ type TerminalState = {
   status: "starting" | "running" | "closing" | "exited" | "failed";
   message?: string;
 };
-type TerminalAttachment = { terminal: Terminal; search: SearchAddon; layout: (focus: boolean) => void; close: () => void;
+type TerminalAttachment = { terminal: Terminal; search: SearchAddon; layout: (focus: boolean) => void; close: () => void; clear: () => void;
   directoryAt?: (line?: number) => string | undefined };
 
 function terminalOutput(terminal: Terminal) {
@@ -131,8 +132,13 @@ function terminalOutput(terminal: Terminal) {
   return lines.join("\n");
 }
 
+function failedCommandContext({ command, output }: TerminalCommand) {
+  return ["PowerShell reported failure.", `Command\n${command}`,
+    output?.trim() ? `Captured terminal output\n${output}` : undefined].filter(Boolean).join("\n\n");
+}
+
 export function ManualTerminal({ checkoutId, relativeDirectory, active, visible = active, autoStart, clearRevision = 0,
-  onContextText, onOpenFile, onFocus, sessionActions, reviewedInput }: {
+  onContextText, onOpenFile, onRevealFolder, onFocus, sessionActions, reviewedInput }: {
   checkoutId: string;
   relativeDirectory?: string;
   active: boolean;
@@ -141,6 +147,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   clearRevision?: number;
   onContextText?: (text: string) => void;
   onOpenFile?: (path: string, line?: number, column?: number) => void;
+  onRevealFolder?: (path: string) => void;
   onFocus?: () => void;
   sessionActions?: MenuGroups;
   reviewedInput?: string;
@@ -151,12 +158,14 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   const visibleRef = useRef(visible);
   const previousClear = useRef(clearRevision);
   const openFile = useRef(onOpenFile);
+  const revealFolder = useRef(onRevealFolder);
   const navigateSequence = useRef(0);
   const [request, setRequest] = useState<TerminalRequest>();
   const [state, setState] = useState<TerminalState>();
+  const [lastCommand, setLastCommand] = useState<{ request: TerminalRequest; result: TerminalCommand }>();
   const [clipboardError, setClipboardError] = useState("");
   const [fileError, setFileError] = useState("");
-  const [referenceMenu, setReferenceMenu] = useState<{ reference: TerminalFileReference; point: { x: number; y: number }; terminal: Terminal; directory?: string }>();
+  const [referenceMenu, setReferenceMenu] = useState<{ reference: TerminalPathReference; point: { x: number; y: number }; terminal: Terminal; directory?: string }>();
   const restoringTerminalFocus = useRef(true);
   const [hasSelection, setHasSelection] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
@@ -164,16 +173,23 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   const [found, setFound] = useState<boolean>();
   const findInput = useRef<HTMLInputElement>(null);
   const current = state?.request === request && request?.checkoutId === checkoutId ? state : undefined;
+  const lastExecuted = current && lastCommand && lastCommand.request === request ? lastCommand.result : undefined;
+  const lastOutput = lastExecuted?.output;
 
   useEffect(() => { openFile.current = onOpenFile; }, [onOpenFile]);
-  const openReference = useCallback((terminal: Terminal, { path, line, column }: TerminalFileReference, directory?: string) => {
-    if (!openFile.current || attachment.current?.terminal !== terminal || !visibleRef.current) return;
+  useEffect(() => { revealFolder.current = onRevealFolder; }, [onRevealFolder]);
+  const openReference = useCallback((terminal: Terminal, { path, line, column, expectedKind }: TerminalPathReference, directory?: string) => {
+    if ((!openFile.current && !revealFolder.current) || attachment.current?.terminal !== terminal || !visibleRef.current) return;
     const sequence = ++navigateSequence.current;
     setFileError("");
     const isCurrent = () => sequence === navigateSequence.current && attachment.current?.terminal === terminal && visibleRef.current;
-    void invoke<string>("resolve_manual_terminal_file", { checkoutId, path, ...(relativeDirectory ? { relativeDirectory } : {}),
+    void invoke<ResolvedTerminalPath>("resolve_manual_terminal_path", { checkoutId, path, expectedKind, ...(relativeDirectory ? { relativeDirectory } : {}),
       ...(directory !== undefined ? { observedDirectory: directory } : {}) })
-      .then((resolved) => { if (isCurrent()) openFile.current?.(resolved, line, column); })
+      .then((resolved) => {
+        if (!isCurrent()) return;
+        if (resolved.kind === "folder") revealFolder.current?.(resolved.path);
+        else openFile.current?.(resolved.path, line, column);
+      })
       .catch((error: unknown) => { if (isCurrent()) setFileError(String(error)); });
   }, [checkoutId, relativeDirectory]);
 
@@ -192,8 +208,12 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     const search = new SearchAddon();
     terminal.loadAddon(search);
     let session: Session | undefined;
-    const directories = openFile.current && trackTerminalDirectories(terminal, () => session?.terminalId);
-    const fileLinks = openFile.current && terminal.registerLinkProvider(terminalFileLinkProvider(terminal,
+    const commands = trackTerminalCommands(terminal, () => session?.terminalId, (result) => {
+      setLastCommand(result ? { request, result } : undefined);
+    });
+    const pathNavigation = openFile.current || revealFolder.current;
+    const directories = pathNavigation && trackTerminalDirectories(terminal, () => session?.terminalId);
+    const pathLinks = pathNavigation && terminal.registerLinkProvider(terminalPathLinkProvider(terminal,
       (reference) => openReference(terminal, reference, directories?.at(reference.bufferLine))));
     const selection = terminal.onSelectionChange(() => setHasSelection(terminal.hasSelection()));
     terminal.attachCustomKeyEventHandler((event) => {
@@ -259,7 +279,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       }
       if (focus && activeRef.current) terminal.focus();
     };
-    attachment.current = { terminal, search, layout, close, directoryAt: directories?.at };
+    const clear = () => { commands.discardOutputStart(); terminal.clear(); };
+    attachment.current = { terminal, search, layout, close, clear, directoryAt: directories?.at };
 
     layout(false);
     size = { cols: terminal.cols, rows: terminal.rows };
@@ -287,8 +308,9 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       resize.disconnect();
       stopTheme();
       selection.dispose();
+      commands.dispose();
       directories?.dispose();
-      fileLinks?.dispose();
+      pathLinks?.dispose();
       input.dispose();
       terminal.dispose();
       attachment.current = undefined;
@@ -308,7 +330,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
 
   useEffect(() => {
     if (previousClear.current !== clearRevision) {
-      attachment.current?.terminal.clear();
+      attachment.current?.clear();
       previousClear.current = clearRevision;
     }
   }, [clearRevision]);
@@ -342,11 +364,72 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     attachment.current?.search.clearDecorations();
     attachment.current?.terminal.focus();
   }
-  function showReferenceMenu(terminal: Terminal, reference: TerminalFileReference, x: number, y: number) {
+  function showReferenceMenu(terminal: Terminal, reference: TerminalPathReference, x: number, y: number) {
     restoringTerminalFocus.current = true;
     const directory = attachment.current?.directoryAt?.(reference.bufferLine);
     setReferenceMenu({ terminal, reference, point: { x, y }, directory });
   }
+  function openSelectedPath() {
+    const current = attachment.current;
+    if (!current) return;
+    const { terminal, directoryAt } = current;
+    const text = terminal.getSelection().trim();
+    if (!text) return;
+    if (text.length >= 32_767 || /[\r\n\0]/u.test(text)) {
+      navigateSequence.current++;
+      setFileError("Select a single checkout path.");
+      return;
+    }
+    const reference = parseTerminalPathReference(text, true) ?? { path: text, text };
+    const row = terminal.getSelectionPosition()?.start.y;
+    restoringTerminalFocus.current = false;
+    openReference(terminal, reference, directoryAt?.(row));
+  }
+  function addContext(text: string) {
+    restoringTerminalFocus.current = false;
+    onContextText?.(text);
+  }
+  const terminalActions: MenuGroups = [[
+    ...(onOpenFile || onRevealFolder ? [{ label: "Open selected checkout path", disabled: !hasSelection, run: openSelectedPath }] : []),
+    { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
+      const selection = terminal.getSelection();
+      return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
+    }) },
+    { label: "Copy selection as Markdown", disabled: !hasSelection, run: () => clipboard((terminal) =>
+      navigator.clipboard.writeText(markdownExcerpt({ text: terminal.getSelection() }))) },
+    { label: "Copy terminal output", disabled: !request, run: () => clipboard((terminal) => navigator.clipboard.writeText(terminalOutput(terminal))) },
+    { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
+      const text = await navigator.clipboard.readText();
+      if (attachment.current?.terminal === terminal) terminal.paste(text);
+    }) },
+    { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
+  ], [
+    { label: "Find in terminal", disabled: !request, run: () => {
+      restoringTerminalFocus.current = false;
+      setFindOpen(true);
+      requestAnimationFrame(() => findInput.current?.focus());
+    } },
+    { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
+    { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
+    { label: "Clear output", disabled: !request, run: () => attachment.current?.clear() },
+  ], lastExecuted ? [
+    { label: "Copy last PowerShell command", run: () => clipboard(() => navigator.clipboard.writeText(lastExecuted.command)) },
+    ...(lastOutput ? [{ label: "Copy last command output", run: () => clipboard(() => navigator.clipboard.writeText(lastOutput)) }] : []),
+    ...(onContextText && lastOutput?.trim() ? [{ label: "Add last command output to conversation…", run: () => addContext(lastOutput) }] : []),
+    ...(onContextText && lastExecuted.failed ? [{ label: "Add last command failure to conversation…", run: () => addContext(failedCommandContext(lastExecuted)) }] : []),
+  ] : [], onContextText ? [
+    { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
+      const text = attachment.current?.terminal.getSelection();
+      if (text) addContext(text);
+    } },
+    { label: "Add terminal output to conversation…", disabled: !request, run: () => {
+      const terminal = attachment.current?.terminal;
+      if (terminal) addContext(terminalOutput(terminal));
+    } },
+  ] : [], [
+    ...(canStart && reviewedInput === undefined ? [{ label: "Start PowerShell", run: () => start() }] : []),
+    ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
+  ], ...(sessionActions ?? [])];
   return <div className="flex h-full min-h-0 flex-col gap-2" onFocusCapture={onFocus} onPointerDownCapture={onFocus}>
     <div className="flex shrink-0 items-center gap-2">
       {canStart && reviewedInput === undefined && (
@@ -381,49 +464,19 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       <button type="button" className="fw-btn" onClick={dismissFind}>Close find</button>
       {found === false && <span role="status" className="file-help">No matching terminal output.</span>}
     </form>}
-    <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={[[
-      { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
-        const selection = terminal.getSelection();
-        return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
-      }) },
-      { label: "Copy selection as Markdown", disabled: !hasSelection, run: () => clipboard((terminal) =>
-        navigator.clipboard.writeText(markdownExcerpt({ text: terminal.getSelection() }))) },
-      { label: "Copy terminal output", disabled: !request, run: () => clipboard((terminal) => navigator.clipboard.writeText(terminalOutput(terminal))) },
-      { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
-        const text = await navigator.clipboard.readText();
-        if (attachment.current?.terminal === terminal) terminal.paste(text);
-      }) },
-      { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
-    ], [
-      { label: "Find in terminal", disabled: !request, run: () => { setFindOpen(true); findInput.current?.focus(); } },
-      { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
-      { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
-      { label: "Clear output", disabled: !request, run: () => attachment.current?.terminal.clear() },
-    ], onContextText ? [
-      { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
-        const text = attachment.current?.terminal.getSelection();
-        if (text) onContextText(text);
-      } },
-      { label: "Add terminal output to conversation…", disabled: !request, run: () => {
-        const terminal = attachment.current?.terminal;
-        if (terminal) onContextText(terminalOutput(terminal));
-      } },
-    ] : [], [
-      ...(canStart && reviewedInput === undefined ? [{ label: "Start PowerShell", run: () => start() }] : []),
-      ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
-    ], ...(sessionActions ?? [])]}>
+    <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={terminalActions}>
       <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" onContextMenu={(event) => {
         const terminal = attachment.current?.terminal;
-        if (!onOpenFile || !terminal) return;
-        const reference = terminalFileAtPoint(terminal, event);
+        if ((!onOpenFile && !onRevealFolder) || !terminal) return;
+        const reference = terminalPathAtPoint(terminal, event);
         if (!reference) return;
         event.preventDefault();
         event.stopPropagation();
         showReferenceMenu(terminal, reference, event.clientX, event.clientY);
       }} onKeyDownCapture={(event) => {
-        if (!onOpenFile || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+        if ((!onOpenFile && !onRevealFolder) || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
         const terminal = attachment.current?.terminal;
-        const reference = terminal && parseTerminalFileReference(terminal.getSelection().trim());
+        const reference = terminal && parseTerminalPathReference(terminal.getSelection().trim(), true);
         if (!terminal || !reference) return;
         event.preventDefault();
         event.stopPropagation();
@@ -436,12 +489,16 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       onClose={() => setReferenceMenu(undefined)} restoreFocus={() => {
         if (restoringTerminalFocus.current && attachment.current?.terminal === referenceMenu.terminal) referenceMenu.terminal.focus();
       }} groups={[[
-        { label: referenceMenu.reference.line ? "Open file at location" : "Open file", run: () => {
+        { label: referenceMenu.reference.expectedKind === "folder" ? "Reveal folder in Explorer tree"
+          : referenceMenu.reference.line ? "Open file at location" : "Open checkout path", run: () => {
           restoringTerminalFocus.current = false;
           openReference(referenceMenu.terminal, referenceMenu.reference, referenceMenu.directory);
         } },
-        { label: "Copy printed file reference", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.text)) },
+        ...(referenceMenu.reference.line || referenceMenu.reference.text !== referenceMenu.reference.path ? [{
+          label: referenceMenu.reference.line ? "Copy printed file reference" : "Copy printed reference",
+          run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.text)),
+        }] : []),
         { label: "Copy printed path", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.path)) },
-      ]]} />}
+      ], ...terminalActions]} />}
   </div>;
 }

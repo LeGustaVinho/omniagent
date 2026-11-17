@@ -801,6 +801,131 @@ async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Res
 }
 
 #[tokio::test]
+async fn previews_a_pinned_utf16_commit_and_disk_file_without_changing_git_evidence() -> Result<()>
+{
+    fn utf16_bytes(text: &str, little_endian: bool) -> Vec<u8> {
+        let bom = if little_endian {
+            [0xff, 0xfe]
+        } else {
+            [0xfe, 0xff]
+        };
+        let encode = if little_endian {
+            u16::to_le_bytes
+        } else {
+            u16::to_be_bytes
+        };
+        bom.into_iter()
+            .chain(text.encode_utf16().flat_map(encode))
+            .collect()
+    }
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("encoded comparison");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old_path = "revisão original.rs";
+    let path = "revisão atual.rs";
+    let utf8_path = "ordinary.txt";
+    let historical = "// Commit com Unicode 😀\r\nfn old() {}\n";
+    let saved = "// Disco com Unicode ☃\nfn changed() {}\r\n";
+    fs::write(root.join(old_path), utf16_bytes(historical, true))?;
+    fs::write(root.join(utf8_path), "original UTF-8\n")?;
+    let origin = commit_fixture(&root, "Original files")?;
+    git(&root, &["mv", "--", old_path, path])?;
+    let head = commit_fixture(&root, "Rename source")?;
+    let disk_bytes = utf16_bytes(saved, false);
+    fs::write(root.join(path), &disk_bytes)?;
+    fs::write(root.join(utf8_path), "modified UTF-8\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let before = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert!(matches!(
+        (&before.original, &before.modified),
+        (
+            GitFileSide::Unavailable { .. },
+            GitFileSide::Unavailable { .. }
+        )
+    ));
+    assert!(before.hunks.is_empty());
+    assert!(before.comment_scope.is_none());
+    assert!(
+        matches!(&before.patch, Some(super::patch::GitReviewPatch::Text { content }) if content.contains("GIT binary patch"))
+    );
+
+    let selected = GitFileVersion::Commit {
+        sha: origin,
+        path: old_path.into(),
+    };
+    let preview = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(selected.clone()),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert_eq!(
+        preview.original,
+        GitFileSide::Text {
+            content: format!("\u{feff}{historical}")
+        }
+    );
+    assert_eq!(
+        preview.modified,
+        GitFileSide::Text {
+            content: format!("\u{feff}{saved}")
+        }
+    );
+    assert!(preview.comment_scope.is_none());
+
+    let commit_only = store
+        .git_compare_file_versions(checkout.clone(), path.into(), None, selected.clone())
+        .await?;
+    assert!(matches!(
+        commit_only.modified,
+        GitFileSide::Unavailable { .. }
+    ));
+    let ordinary = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            utf8_path.into(),
+            Some(GitFileVersion::Commit {
+                sha: head.clone(),
+                path: utf8_path.into(),
+            }),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert!(ordinary.comment_scope.is_some());
+
+    let after = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert_eq!(serde_json::to_value(after)?, serde_json::to_value(before)?);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join(path))?, disk_bytes);
+
+    fs::write(root.join(path), [0xff, 0xfe, 0x00])?;
+    let invalid = store
+        .git_compare_file_versions(
+            checkout,
+            path.into(),
+            Some(selected),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert!(matches!(invalid.modified, GitFileSide::Unavailable { .. }));
+    assert!(invalid.comment_scope.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("hunks");
@@ -897,6 +1022,607 @@ async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> 
 }
 
 #[tokio::test]
+async fn creates_a_local_branch_from_the_frozen_commit_without_touching_the_checkout() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("local-branch");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    fs::write(root.join("notes.txt"), "initial\n")?;
+    let initial = commit_fixture(&root, "Historical revision")?;
+    fs::write(root.join("notes.txt"), "latest\n")?;
+    let latest = commit_fixture(&root, "Current revision")?;
+    git(&root, &["branch", "topic", &initial])?;
+    git(
+        &root,
+        &["update-ref", "refs/heads/topic", &latest, &initial],
+    )?;
+    fs::write(root.join("notes.txt"), "staged\n")?;
+    git(&root, &["add", "notes.txt"])?;
+    fs::write(root.join("notes.txt"), "draft\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("branches.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    store
+        .create_git_branch(checkout.clone(), "history/review".into(), initial.clone())
+        .await?;
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/history/review"])?,
+        initial
+    );
+
+    let duplicate = store
+        .create_git_branch(checkout.clone(), "history/review".into(), latest.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{duplicate:#}").contains("already exists"));
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/history/review"])?,
+        initial
+    );
+    for name in ["-danger", "invalid name", "HEAD"] {
+        assert!(
+            store
+                .create_git_branch(checkout.clone(), name.into(), initial.clone())
+                .await
+                .is_err()
+        );
+    }
+    git(
+        &root,
+        &["symbolic-ref", "refs/heads/alias", "refs/heads/missing"],
+    )?;
+    assert!(
+        store
+            .create_git_branch(checkout.clone(), "alias".into(), initial.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git(&root, &["symbolic-ref", "refs/heads/alias"])?,
+        "refs/heads/missing"
+    );
+    let blob = git(&root, &["rev-parse", "HEAD:notes.txt"])?;
+    assert!(
+        store
+            .create_git_branch(checkout.clone(), "invalid-start".into(), blob)
+            .await
+            .is_err()
+    );
+
+    let (from_initial, from_latest) = tokio::join!(
+        store.create_git_branch(checkout.clone(), "same-name".into(), initial.clone()),
+        store.create_git_branch(checkout, "same-name".into(), latest.clone()),
+    );
+    assert_ne!(from_initial.is_ok(), from_latest.is_ok());
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/same-name"])?,
+        if from_initial.is_ok() {
+            initial
+        } else {
+            latest.clone()
+        }
+    );
+    assert_eq!(git(&root, &["symbolic-ref", "HEAD"])?, "refs/heads/main");
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, latest);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join("notes.txt"))?, b"draft\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn compares_a_historical_commit_with_frozen_checkout_files_and_index_evidence() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("commit and checkout");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join(".gitignore"), "ignored.txt\nignored-shadow.txt\n")?;
+    fs::write(root.join("both.txt"), "historical file\n")?;
+    fs::write(root.join("reverted.txt"), "historical original\n")?;
+    fs::write(root.join("recreated.txt"), "old path\n")?;
+    fs::write(root.join("deleted.txt"), "removed afterwards\n")?;
+    fs::write(root.join("ignored-shadow.txt"), "previously tracked\n")?;
+    git(&root, &["add", "-f", "--", "ignored-shadow.txt"])?;
+    let base = commit_fixture(&root, "Historical commit")?;
+    fs::write(root.join("both.txt"), "later commit\n")?;
+    let head = commit_fixture(&root, "Different checkout HEAD")?;
+    fs::write(root.join("both.txt"), "staged file\n")?;
+    fs::write(root.join("reverted.txt"), "staged only edit\n")?;
+    git(&root, &["add", "--", "both.txt", "reverted.txt"])?;
+    git(
+        &root,
+        &[
+            "rm",
+            "--cached",
+            "--",
+            "recreated.txt",
+            "ignored-shadow.txt",
+        ],
+    )?;
+    fs::write(root.join("both.txt"), "working file\n")?;
+    fs::write(root.join("reverted.txt"), "historical original\n")?;
+    fs::write(root.join("recreated.txt"), "untracked at an old path\n")?;
+    fs::remove_file(root.join("deleted.txt"))?;
+    fs::write(root.join("new [1].txt"), "untracked file\n")?;
+    fs::write(root.join("ignored.txt"), "gitignored file\n")?;
+    fs::write(
+        root.join("ignored-shadow.txt"),
+        "a different ignored file\n",
+    )?;
+    let index = fs::read(root.join(".git/index"))?;
+    let objects = git(&root, &["count-objects", "-v"])?;
+    let store = Store::open(temp.path().join("comparison.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let working = GitCommitCheckoutRequest {
+        base: base.clone(),
+        source: GitDiffSource::Working,
+    };
+    let staged = GitCommitCheckoutRequest {
+        base,
+        source: GitDiffSource::Staged,
+    };
+    let worktree = store
+        .git_compare_commit_checkout(checkout.clone(), working.clone())
+        .await?;
+    let index_view = store
+        .git_compare_commit_checkout(checkout.clone(), staged.clone())
+        .await?;
+    assert_eq!(worktree.revision.head.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        worktree
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status, f.untracked))
+            .collect::<Vec<_>>(),
+        [
+            ("both.txt", 'M', false),
+            ("deleted.txt", 'D', false),
+            ("ignored-shadow.txt", 'D', false),
+            ("new [1].txt", 'A', true),
+            ("recreated.txt", 'M', true),
+        ]
+    );
+    assert_eq!(
+        index_view
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status))
+            .collect::<Vec<_>>(),
+        [
+            ("both.txt", 'M'),
+            ("ignored-shadow.txt", 'D'),
+            ("recreated.txt", 'D'),
+            ("reverted.txt", 'M')
+        ]
+    );
+    let request = |comparison: GitCommitCheckoutRequest,
+                   snapshot: &GitCommitCheckoutComparison,
+                   path: &str| GitCommitCheckoutFileRequest {
+        comparison,
+        revision: snapshot.revision.clone(),
+        file: snapshot
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .clone(),
+    };
+    let review_file = |request| store.git_compare_commit_checkout_file(checkout.clone(), request);
+    let unstaged = review_file(request(working.clone(), &worktree, "both.txt")).await?;
+    assert_eq!(
+        unstaged.original,
+        GitFileSide::Text {
+            content: "historical file\n".into()
+        }
+    );
+    assert_eq!(
+        unstaged.modified,
+        GitFileSide::Text {
+            content: "working file\n".into()
+        }
+    );
+    assert!(
+        matches!(unstaged.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-historical file\n+working file\n"))
+    );
+    let index_file = review_file(request(staged.clone(), &index_view, "both.txt")).await?;
+    assert_eq!(
+        index_file.modified,
+        GitFileSide::Text {
+            content: "staged file\n".into()
+        }
+    );
+    let recreated = review_file(request(working.clone(), &worktree, "recreated.txt")).await?;
+    assert!(
+        matches!(recreated.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-old path\n+untracked at an old path\n"))
+    );
+    let untracked = review_file(request(working.clone(), &worktree, "new [1].txt")).await?;
+    assert_eq!(untracked.original, GitFileSide::Missing);
+    assert!(
+        matches!(untracked.patch, super::patch::GitReviewPatch::Text { content } if content.contains("new file mode") && content.contains("+untracked file\n"))
+    );
+    let deleted = review_file(request(working.clone(), &worktree, "deleted.txt")).await?;
+    assert_eq!(deleted.modified, GitFileSide::Missing);
+    assert!(
+        matches!(deleted.patch, super::patch::GitReviewPatch::Text { content } if content.contains("deleted file mode"))
+    );
+    let ignored_shadow =
+        review_file(request(working.clone(), &worktree, "ignored-shadow.txt")).await?;
+    assert_eq!(ignored_shadow.modified, GitFileSide::Missing);
+    assert!(
+        matches!(ignored_shadow.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-previously tracked") && !content.contains("a different ignored file"))
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(git(&root, &["count-objects", "-v"])?, objects);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join("both.txt"))?, b"working file\n");
+
+    fs::write(root.join("both.txt"), "changed file\n")?;
+    let error = review_file(request(working, &worktree, "both.txt"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("working file changed"));
+    git(&root, &["add", "--", "both.txt"])?;
+    let error = review_file(request(staged, &index_view, "both.txt"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("index or HEAD changed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compares_frozen_commit_trees_even_after_their_refs_move() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("compared-trees");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("state.txt"), "common ancestor\n")?;
+    fs::write(root.join("previous guide.md"), "guide contents\n")?;
+    let common = commit_fixture(&root, "Shared ancestor")?;
+    git(&root, &["switch", "--quiet", "-c", "topic"])?;
+    fs::write(root.join("state.txt"), "compared topic tree\n")?;
+    fs::write(root.join("topic.txt"), "right only\n")?;
+    fs::rename(
+        root.join("previous guide.md"),
+        root.join("revised guide.md"),
+    )?;
+    let head = commit_fixture(&root, "Topic tree")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("state.txt"), "selected commit tree\n")?;
+    fs::write(root.join("main.txt"), "left only\n")?;
+    let base = commit_fixture(&root, "Selected tree")?;
+    fs::write(root.join("state.txt"), "working draft\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("review.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let range = GitCommitRange { base, head };
+    let files = store
+        .git_compare_commits(checkout.clone(), range.clone())
+        .await?;
+    let mut statuses = files
+        .iter()
+        .map(|f| (f.path.as_str(), f.status, f.previous_path.as_deref()))
+        .collect::<Vec<_>>();
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        vec![
+            ("main.txt", 'D', None),
+            ("revised guide.md", 'R', Some("previous guide.md")),
+            ("state.txt", 'M', None),
+            ("topic.txt", 'A', None),
+        ]
+    );
+    git(
+        &root,
+        &["update-ref", "refs/heads/topic", &common, &range.head],
+    )?;
+    git(
+        &root,
+        &["update-ref", "refs/heads/main", &common, &range.base],
+    )?;
+    let diff = store
+        .git_compare_commit_file(checkout.clone(), range.clone(), "state.txt".into())
+        .await?;
+    assert_eq!(
+        diff.original,
+        GitFileSide::Text {
+            content: "selected commit tree\n".into()
+        }
+    );
+    assert_eq!(
+        diff.modified,
+        GitFileSide::Text {
+            content: "compared topic tree\n".into()
+        }
+    );
+    assert!(
+        matches!(diff.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-selected commit tree\n+compared topic tree\n"))
+    );
+    let renamed = store
+        .git_compare_commit_file(checkout.clone(), range.clone(), "revised guide.md".into())
+        .await?;
+    assert_eq!(renamed.modified, renamed.original);
+    assert!(
+        store
+            .git_compare_commit_file(checkout.clone(), range, "previous guide.md".into())
+            .await
+            .is_err()
+    );
+    let blob = git(&root, &["rev-parse", "HEAD:state.txt"])?;
+    assert!(
+        store
+            .git_compare_commits(
+                checkout,
+                GitCommitRange {
+                    base: common,
+                    head: blob
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join("state.txt"))?, b"working draft\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn inspects_commit_messages_and_compares_exact_parent_files_in_the_selected_history()
+-> Result<()> {
+    use super::{GitHistoryCommitRequest, patch::GitReviewPatch};
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("history");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old = "a file.md";
+    let moved = "renamed [1].md";
+    fs::write(root.join(old), b"before rename\n")?;
+    fs::write(root.join("removed.txt"), b"original\n")?;
+    let message = "Initial files\n\nThe complete message keeps the body.\n\nSigned-off-by: Fixture <fixture@example.invalid>";
+    let initial = commit_fixture(&root, message)?;
+    git(&root, &["switch", "--quiet", "-c", "topic"])?;
+    fs::write(root.join("topic.txt"), b"topic addition\n")?;
+    let topic = commit_fixture(&root, "Topic files")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::rename(root.join(old), root.join(moved))?;
+    fs::remove_file(root.join("removed.txt"))?;
+    let main = commit_fixture(&root, "Move the original file")?;
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "--no-edit",
+            "topic",
+        ],
+    )?;
+    let head = git(&root, &["rev-parse", "HEAD"])?;
+    fs::write(root.join(moved), b"uncommitted edit after merge\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let request = |sha: &str, parent: Option<&str>| GitHistoryCommitRequest {
+        branch: Some("refs/heads/main".into()),
+        expected_head: head.clone(),
+        sha: sha.into(),
+        parent: parent.map(str::to_owned),
+    };
+
+    let initial_details = store
+        .git_checkout_commit_details(checkout.clone(), request(&initial, None))
+        .await?;
+    assert_eq!(initial_details.message, format!("{message}\n"));
+    assert!(initial_details.parents.is_empty() && initial_details.parent.is_none());
+    assert_eq!(
+        initial_details
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.status))
+            .collect::<Vec<_>>(),
+        vec![(old, 'A'), ("removed.txt", 'A')]
+    );
+    let root_diff = store
+        .git_checkout_commit_diff(checkout.clone(), request(&initial, None), old.into())
+        .await?;
+    assert_eq!(root_diff.original, GitFileSide::Missing);
+    assert!(
+        matches!(root_diff.patch, GitReviewPatch::Text { content } if content.contains("new file mode") && content.contains("+before rename\n"))
+    );
+
+    let moved_details = store
+        .git_checkout_commit_details(checkout.clone(), request(&main, None))
+        .await?;
+    assert_eq!(moved_details.parent.as_deref(), Some(initial.as_str()));
+    assert!(moved_details.files.iter().any(|file| file.path == moved
+        && file.status == 'R'
+        && file.previous_path.as_deref() == Some(old)));
+    let renamed = store
+        .git_checkout_commit_diff(
+            checkout.clone(),
+            request(&main, Some(&initial)),
+            moved.into(),
+        )
+        .await?;
+    assert_eq!(
+        renamed.original,
+        GitFileSide::Text {
+            content: "before rename\n".into()
+        }
+    );
+    assert_eq!(renamed.modified, renamed.original);
+    assert!(
+        matches!(renamed.patch, GitReviewPatch::Text { content } if content.contains("rename from a file.md\n") && content.contains("rename to renamed [1].md\n"))
+    );
+    let removed = store
+        .git_checkout_commit_diff(checkout.clone(), request(&main, None), "removed.txt".into())
+        .await?;
+    assert_eq!(removed.modified, GitFileSide::Missing);
+    assert!(
+        matches!(removed.patch, GitReviewPatch::Text { content } if content.contains("deleted file mode") && content.contains("-original\n"))
+    );
+
+    let first = store
+        .git_checkout_commit_details(checkout.clone(), request(&head, None))
+        .await?;
+    assert_eq!(first.parents, vec![main.clone(), topic.clone()]);
+    assert_eq!(first.parent.as_deref(), Some(main.as_str()));
+    assert_eq!(
+        first
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["topic.txt"]
+    );
+    let second = store
+        .git_checkout_commit_details(checkout.clone(), request(&head, Some(&topic)))
+        .await?;
+    assert_eq!(second.parent.as_deref(), Some(topic.as_str()));
+    assert!(second.files.iter().any(|file| file.path == moved));
+    assert!(
+        store
+            .git_checkout_commit_diff(
+                checkout.clone(),
+                request(&head, Some(&topic)),
+                "topic.txt".into()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .git_checkout_commit_details(checkout.clone(), request(&head, Some(&initial)))
+            .await
+            .is_err()
+    );
+
+    let topic_request = GitHistoryCommitRequest {
+        branch: Some("refs/heads/topic".into()),
+        expected_head: topic.clone(),
+        sha: main,
+        parent: None,
+    };
+    let outside = store
+        .git_checkout_commit_details(checkout.clone(), topic_request)
+        .await
+        .unwrap_err();
+    assert!(
+        outside
+            .to_string()
+            .contains("outside the selected Git history")
+    );
+    git(&root, &["update-ref", "refs/heads/topic", &head, &topic])?;
+    let stale = GitHistoryCommitRequest {
+        branch: Some("refs/heads/topic".into()),
+        expected_head: topic.clone(),
+        sha: topic,
+        parent: None,
+    };
+    let changed = store
+        .git_checkout_commit_details(checkout, stale)
+        .await
+        .unwrap_err();
+    assert!(changed.to_string().contains("The selected history changed"));
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(
+        fs::read(root.join(moved))?,
+        b"uncommitted edit after merge\n"
+    );
+
+    git(
+        temp.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--quiet",
+            "--depth=1",
+            "--no-local",
+            root.to_str().context("fixture repository path")?,
+            "shallow",
+        ],
+    )?;
+    let shallow = register(&store, temp.path().join("shallow"))
+        .await?
+        .checkout_id;
+    let shallow_details = store
+        .git_checkout_commit_details(shallow, request(&head, None))
+        .await?;
+    assert!(shallow_details.message.contains("Merge branch 'topic'"));
+    assert_eq!(
+        shallow_details.parent.as_deref(),
+        Some(first.parents[0].as_str())
+    );
+    assert!(shallow_details.files.is_empty() && shallow_details.comparison_unavailable.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn copies_exact_git_patches_for_working_and_staged_files_without_writes() -> Result<()> {
+    use super::patch::GitReviewPatch;
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("patches");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let text = "notes[1].md";
+    let binary = "data.bin";
+    let deleted = "deleted.md";
+    let untracked = "new file.md";
+    fs::write(root.join(text), b"base\nold ending")?;
+    fs::write(root.join(binary), b"\0original")?;
+    fs::write(root.join(deleted), b"deleted line\n")?;
+    let head = commit_fixture(&root, "Base files")?;
+    fs::write(root.join(text), b"staged\ncontent")?;
+    git(&root, &["--literal-pathspecs", "add", "--", text])?;
+    fs::write(root.join(text), b"working\ncontent")?;
+    fs::write(root.join(binary), b"\0modified")?;
+    fs::remove_file(root.join(deleted))?;
+    fs::write(root.join(untracked), b"new file\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+
+    for (path, source, tail, marker) in [
+        (text, GitDiffSource::Working, vec!["--", text], "+working"),
+        (text, GitDiffSource::Staged, vec!["--cached", "--", text], "+staged"),
+        (binary, GitDiffSource::Working, vec!["--", binary], "GIT binary patch"),
+        (deleted, GitDiffSource::Working, vec!["--", deleted], "deleted file mode"),
+        (untracked, GitDiffSource::Working, vec!["--no-index", "--", "/dev/null", untracked], "new file mode"),
+    ] {
+        let expected = passive_command(&root)?
+            .args(["--literal-pathspecs", "diff", "--binary", "--full-index", "--no-color",
+                "--no-ext-diff", "--no-textconv", "--no-renames", "--no-indent-heuristic",
+                "--inter-hunk-context=0", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/"])
+            .args(tail)
+            .output()?;
+        assert_eq!(expected.status.code(), Some(i32::from(path == untracked)));
+        let diff = store.git_checkout_diff(checkout.clone(), path.into(), source).await?;
+        let Some(GitReviewPatch::Text { content }) = diff.patch else {
+            panic!("expected a patch for {path}, got {:?}", diff.patch);
+        };
+        assert!(content.contains(marker), "{path}: {content}");
+        assert_eq!(content.as_bytes(), expected.stdout);
+    }
+
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join(text))?, b"working\ncontent");
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("comparison");
@@ -956,6 +1682,17 @@ async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content(
     let diff = store
         .git_branch_comparison_diff(checkout.clone(), range(), expected(), "README.md".into())
         .await?;
+    let expected_patch = passive_command(&root)?
+        .args(["--literal-pathspecs", "diff", "--binary", "--full-index", "--no-color",
+            "--no-ext-diff", "--no-textconv", "--no-renames", "--no-indent-heuristic",
+            "--inter-hunk-context=0", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/",
+            &ancestor, &feature, "--", "README.md"])
+        .output()?;
+    assert!(expected_patch.status.success());
+    let super::patch::GitReviewPatch::Text { content } = diff.patch else {
+        panic!("expected a patch between the compared commits, got {:?}", diff.patch);
+    };
+    assert_eq!(content.as_bytes(), expected_patch.stdout);
     assert_eq!(
         diff.original,
         GitFileSide::Text {
@@ -1047,6 +1784,7 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
         branch: branch.into(),
         existing: false,
         base_reference: Some(first.clone()),
+        history_reference: None,
         expected_head: first.clone(),
         path: Some(path.to_owned()),
     };
@@ -1082,6 +1820,7 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
         branch: "existing".into(),
         existing: true,
         base_reference: None,
+        history_reference: None,
         expected_head: head.clone(),
         path: None,
     })
@@ -1115,6 +1854,67 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
             &["show-ref", "--verify", "refs/heads/failed-registration"]
         )
         .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn creates_manual_worktrees_from_commits_in_the_selected_divergent_history() -> Result<()> {
+    use crate::repository::{ManualGitWorktree, create_git_worktree};
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("divergent worktree source");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("README.md"), "common ancestor\n")?;
+    let initial = commit_fixture(&root, "Common revision")?;
+    fs::write(root.join("README.md"), "active main branch\n")?;
+    let main = commit_fixture(&root, "Main revision")?;
+    git(&root, &["switch", "--quiet", "-c", "topic", &initial])?;
+    fs::write(root.join("README.md"), "clicked topic revision\n")?;
+    let clicked = commit_fixture(&root, "Earlier topic revision")?;
+    fs::write(root.join("README.md"), "current topic tip\n")?;
+    let tip = commit_fixture(&root, "Latest topic revision")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("README.md"), "unsaved main edit\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let destination = temporary.path().join("selected commit worktree");
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let source = register(&store, root.clone()).await?;
+    let make = |reference: Option<&str>, expected: &str| {
+        create_git_worktree(
+            &store,
+            temporary.path().join("worktrees"),
+            source.project_id.clone(),
+            source.checkout_id.clone(),
+            ManualGitWorktree {
+                branch: "selected-topic-commit".into(),
+                existing: false,
+                base_reference: Some(clicked.clone()),
+                history_reference: reference.map(str::to_owned),
+                expected_head: expected.into(),
+                path: Some(destination.clone()),
+            },
+        )
+    };
+    for history in [None, Some("refs/heads/main"), Some("refs/heads/missing")] {
+        assert!(make(history, &clicked).await.is_err());
+    }
+    assert!(make(Some("refs/heads/topic"), &tip).await.is_err());
+    assert!(!destination.exists());
+    let created = make(Some("refs/heads/topic"), &clicked).await?;
+    assert_eq!(created.project_id, source.project_id);
+    assert_eq!(git(&destination, &["rev-parse", "HEAD"])?, clicked);
+    assert_eq!(
+        fs::read_to_string(destination.join("README.md"))?,
+        "clicked topic revision\n"
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, main);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(
+        fs::read_to_string(root.join("README.md"))?,
+        "unsaved main edit\n"
     );
     Ok(())
 }
@@ -1375,7 +2175,7 @@ async fn reviews_real_worktrees_and_updates_only_the_selected_index_path() -> Re
         fs::read_to_string(root.join(changed))?,
         "second unsaved version\n"
     );
-    assert!(store.git_saved_attempts(main.project_id).await?.is_empty());
+    assert!(store.git_saved_attempts(main.project_id, None).await?.is_empty());
     Ok(())
 }
 

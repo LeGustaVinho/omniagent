@@ -16,7 +16,7 @@ export type DocumentOpen = { status: "document"; document: RepositoryDocument }
 type Recovery = { message: string; editedPath: string | null; displacedPath: string | null };
 type DocumentSave = { status: "saved"; document: RepositoryDocument }
   | { status: "conflict" | "recovery_required"; recovery: Recovery };
-type SavedDraft = { revision: string; base: NoteRevision; markdown: string };
+export type SavedDraft = { revision: string; base: NoteRevision; markdown: string };
 export type ReviewedNoteRevision = { path: string; revisionId: string };
 export type ReviewedNotesResult = { saved: string[]; pending: string[]; failure?: string };
 export type NoteExtractionDestination = { relativeDirectory: string; name: string; replaceWithLink: boolean };
@@ -297,6 +297,27 @@ function useRepositoryFileBuffers<CatalogEntry>(
     }
   }), [change, noun, persist, serialize]);
 
+  const readProtectedDraft = useCallback((path: string) =>
+    invoke<SavedDraft | null>(commands.readDraft, { checkoutId, path }), [checkoutId, commands]);
+
+  const restoreProtectedDraft = useCallback((path: string, reviewed: SavedDraft, editorText: string) =>
+    serialize(path, async () => {
+      const verifyEditor = () => {
+        const note = current.current.notes[path];
+        if (!mounted.current || !note || note.base.id !== reviewed.base.id || note.content !== editorText
+          || reviewed.base.checkoutId !== checkoutId || reviewed.base.relativePath !== path) {
+          throw new Error("The editor or the draft's base changed. Review the current draft again.");
+        }
+      };
+      verifyEditor();
+      const stored = await readProtectedDraft(path);
+      if (!stored || stored.revision !== reviewed.revision || stored.base.id !== reviewed.base.id || stored.markdown !== reviewed.markdown) {
+        throw new Error("The protected draft changed. Review it again.");
+      }
+      verifyEditor();
+      change(path, (note) => ({ ...note, content: stored.markdown, draftRevision: stored.revision }));
+    }), [change, checkoutId, readProtectedDraft, serialize]);
+
   const acceptSave = useCallback(async (path: string, result: DocumentSave, onFailure: (failure: unknown) => void) => {
     if (result.status !== "saved") {
       change(path, (current) => ({ ...current, recovery: result.recovery }));
@@ -472,5 +493,6 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed, renameReviewedTags, previewFormat, saveFormat };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching,
+    getNote, forget, extractSelection, loadLocalRevision, readProtectedDraft, restoreProtectedDraft, mergeReviewed, renameReviewedTags, previewFormat, saveFormat };
 }

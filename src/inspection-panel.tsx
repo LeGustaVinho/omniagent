@@ -7,8 +7,10 @@ import { SimulationFixture } from "@/fixture-panels";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { DownstreamWait } from "@/bindings/DownstreamWait";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { downloadArtifact } from "@/download-artifact";
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationApprovalEvidence, ObservedConversationResponse } from "@/conversation-response-evidence";
 import {
@@ -21,6 +23,7 @@ import { RunArtifactEvidence, RunOrchestrationPanel } from "@/run-orchestration"
 import { RunPlanHistory } from "@/run-plan-history";
 import { RunInspectionLayout } from "@/run-inspection-layout";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { RecordedTextActions } from "@/recorded-text-actions";
 import { SavedRunOutputComparison } from "@/saved-attempt-comparison";
 
 const steps: Record<DeliveryStep, string> = {
@@ -91,7 +94,7 @@ function RecordedExecutionRun(props: RecordedRunProps) {
 
 function RecordedCommandRun({ run, onClose, navigation }: {
   run: RunRecord; onClose: () => void;
-  navigation: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+  navigation: Pick<RecordedRunProps, "checkoutId" | "openActivity" | "openWorkspace">;
 }) {
   const { id: runId, projectId, status } = run;
   const live = isLiveRun(run);
@@ -107,49 +110,81 @@ function RecordedCommandRun({ run, onClose, navigation }: {
     actions={<Button type="button" variant="ghost" onClick={onClose}>Close</Button>}
     pages={live ? undefined : [
       { id: "overview", name: "Overview", content: overview },
-      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} runId={runId} openActivity={navigation.openActivity} /> },
+      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} checkoutId={run.checkoutId} runId={runId}
+        openActivity={navigation.openActivity} draftDestination={{ checkoutId: navigation.checkoutId, open: (id) => {
+          navigation.openWorkspace("conversations", id); onClose();
+        } }} /> },
     ]}>
     {overview}
   </RunInspectionLayout>;
 }
 
-function RecordedCommandOutput({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
-  const { copy, feedback } = useContextActionFeedback();
+function RecordedCommandOutput({ projectId, checkoutId, runId, openActivity, draftDestination }:
+  Pick<RecordedRunProps, "projectId" | "checkoutId" | "runId" | "openActivity"> & { draftDestination: { checkoutId: string; open: (id: string) => void } }) {
+  const { copy, feedback, run: perform } = useContextActionFeedback();
   const [compare, setCompare] = useState(false);
+  const draft = useCheckoutConversationActions(draftDestination.checkoutId, false, draftDestination.open);
+  const loadOutput = () => invoke<CommandJobOutput | null>("command_job_output", { projectId, runId });
   const outputs = useQuery({
     queryKey: ["command-job-output", projectId, runId],
-    queryFn: () => invoke<CommandJobOutput | null>("command_job_output", { projectId, runId }),
+    queryFn: loadOutput,
     staleTime: Infinity,
   });
   if (outputs.isPending) return <p role="status">Loading command output…</p>;
   if (outputs.isError) return <p role="alert">{String(outputs.error)}</p>;
   if (!outputs.data) return <p>Command output is unavailable.</p>;
-  const { process, truncated, stdout, stderr } = outputs.data;
+  const captured = outputs.data;
+  const { process, truncated, stdout, stderr } = captured;
   const streams = [
-    { name: "Standard output", text: stdout },
-    { name: "Standard error", text: stderr },
-  ].filter(({ text }) => text);
+    { name: "Standard output", channel: "stdout", text: stdout },
+    { name: "Standard error", channel: "stderr", text: stderr },
+  ] as const;
+  const presentStreams = streams.filter(({ text }) => text);
   const compareOutput = { label: "Compare saved attempt output…", run: () => setCompare(true) };
+  const suffix = truncated ? "-partial" : "";
+  const downloadRecord = { label: "Download captured output record (.json)", run: () => void perform(async () => {
+    const json = JSON.stringify({ projectId, checkoutId, runId, ...captured }, null, 2);
+    downloadArtifact(`run-${runId}-output${suffix}.json`, new Blob([json], { type: "application/json" }));
+  }) };
   return <>
-    {process && <ContextActions label="Command exit code" groups={[[compareOutput], [{ label: "Copy exit code", run: () => copy(String(process.code)) }]]}>
+    {process && <ContextActions label="Command exit code" groups={[[compareOutput], [
+      { label: "Copy exit code", run: () => copy(String(process.code)) }, downloadRecord,
+    ]]}>
       <p>Exit code {process.code}</p>
     </ContextActions>}
-    {truncated && <ContextActions label="Output capture" groups={process || streams.length ? [] : [[compareOutput]]}>
+    {truncated && <ContextActions label="Output capture" groups={process || presentStreams.length ? [] : [[compareOutput], [downloadRecord]]}>
       <p>Output capture is incomplete.</p>
     </ContextActions>}
-    {streams.map(({ name, text }) => <ContextActions key={name} label={name} groups={[[
+    {(Boolean(process) || truncated || presentStreams.length > 0) &&
+      <p className="text-xs text-muted-foreground">Downloads use the text saved for this attempt. The JSON record includes its project, checkout and run IDs and capture status.</p>}
+    {presentStreams.map(({ name, channel, text }) => <RecordedTextActions key={channel} label={name} text={text}
+      bodyClassName="whitespace-pre-wrap break-words" excerptAction="Investigate selected output…" onExcerpt={(excerpt) => {
+        const lines = excerpt.firstLine === excerpt.lastLine ? `Line ${excerpt.firstLine}` : `Lines ${excerpt.firstLine}–${excerpt.lastLine}`;
+        const reference = [name, lines, `Run ${runId}`, `Worktree ${checkoutId}`,
+          process && `Exit code ${process.code}`, truncated && "Incomplete recorded output"].filter(Boolean).join(" · ");
+        draft.startContextText({ title: "Command output review", reference, text: excerpt.text, confirmSource: async () => {
+          const fresh = await loadOutput();
+          if (fresh?.[channel] !== text || fresh.process?.code !== process?.code || fresh.truncated !== truncated) {
+            throw new Error("The recorded output is unavailable. Reopen the attempt.");
+          }
+        } }, "Investigate the selected command output. Explain what it shows and suggest the next checks.");
+      }} groups={[[
       compareOutput,
     ], [
       { label: `Copy ${name.toLowerCase()}`, run: () => copy(text) },
-      ...(streams.length > 1 ? [{ label: "Copy captured output", run: () => copy(
+      ...(presentStreams.length > 1 ? [{ label: "Copy captured output", run: () => copy(
         [process && `Exit code ${process.code}`, truncated && "Output capture is incomplete.",
-          ...streams.map(({ name, text }) => `${name}\n${text}`)].filter(Boolean).join("\n\n"),
+          ...presentStreams.map(({ name, text }) => `${name}\n${text}`)].filter(Boolean).join("\n\n"),
       ) }] : []),
-    ]]}>
-      <div className="min-w-0 flex-1"><h3>{name}</h3><pre>{text}</pre></div>
-    </ContextActions>)}
+    ], [
+      { label: `Download ${name.toLowerCase()} (.log)`, run: () => void perform(async () => {
+        downloadArtifact(`run-${runId}-${channel}${suffix}.log`, new Blob([text], { type: "text/plain;charset=utf-8" }));
+      }) },
+      downloadRecord,
+    ]]}>{(body) => <div className="min-w-0 flex-1"><h3>{name}</h3>{body}</div>}</RecordedTextActions>)}
     {!process && !truncated && !stdout && !stderr && <p>No output was captured.</p>}
     {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+    {draft.dialog}
     {compare && <SavedRunOutputComparison projectId={projectId} runId={runId} close={() => setCompare(false)} openActivity={openActivity} />}
   </>;
 }
@@ -199,11 +234,13 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
       { id: "timeline", name: "Timeline", content: <>
         <h3>Events</h3>
         <ConversationActivityTimeline {...scope} projection={projection} />
-        <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity} />
+        <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity}
+          draftDestination={{ checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } }} />
       </> },
       { id: "agents", name: "Agents", content: <ConversationActivityAgents {...scope} projection={projection} openActivity={openActivity} /> },
       { id: "context", name: "Context", content: <ConversationActivityContext {...scope} projectId={projectId} projection={projection} /> },
-      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId} /> },
+      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId}
+        draftDestination={{ checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } }} /> },
       { id: "approvals", name: "Approvals", content: <><h3>Approval history</h3><ConversationApprovalEvidence {...scope} /></> },
       { id: "artifacts", name: "Artifacts", content: <>
         <ContextActions label="Recorded output" groups={!live && Boolean(projection?.responses.items.length)
@@ -216,7 +253,8 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
         } }}>
           <RunArtifactEvidence scope={attempt} live={live} navigation={navigation} />
         </RunInspectorNavigation.Provider>
-        {projection && <ObservedConversationResponse evidence={projection} />}
+        {projection && <ObservedConversationResponse evidence={projection} draftSource={{ conversationId: owner, run,
+          destination: { checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } } }} />}
         {projection && !projection.responses.items.length && <p>No response text recorded.</p>}
         {comparedRun === runId && <SavedRunOutputComparison projectId={projectId} conversationId={owner} runId={runId}
           close={() => setComparedRun(undefined)} openActivity={openActivity} />}

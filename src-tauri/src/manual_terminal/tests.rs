@@ -198,6 +198,114 @@ async fn open_terminal(
 }
 
 #[tokio::test]
+async fn interactive_history_pairs_exact_input_with_execution_boundaries() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().join("terminal history");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet"])?;
+    let store = Store::open(fixture.path().join("profile.sqlite"))?;
+    let checkout = repository::register(&store, root).await?;
+    let terminals = ManualTerminals::default();
+    let (info, session, mut output) =
+        open_terminal(&terminals, &store, checkout.checkout_id).await?;
+    // Give ConPTY time to render between the shell's two authenticated markers.
+    let command = "Start-Sleep -Milliseconds 180; Write-Output ('OMNI'+'_COMMAND_BOUNDARY'); Start-Sleep -Milliseconds 180";
+    let start = format!("]633;P;OmniAgentCommandStart={};1;", info.terminal_id);
+    let end = format!("]633;P;OmniAgentCommandEnd={};1;", info.terminal_id);
+    let expected = format!(";0;succeeded;{}", STANDARD.encode(command));
+    let locate = |bytes: &[u8], prefix: &str| -> Option<(usize, usize, String)> {
+        let beginning = bytes
+            .windows(prefix.len())
+            .position(|window| window == prefix.as_bytes())?;
+        let payload = beginning + prefix.len();
+        let end = payload + bytes.get(payload..)?.iter().position(|byte| *byte == 7)?;
+        Some((
+            beginning,
+            end + 1,
+            String::from_utf8(bytes[payload..end].to_vec()).ok()?,
+        ))
+    };
+    session.write(command.into())?;
+    output
+        .wait_for(&session, |bytes| contains(bytes, "_COMMAND_BOUNDARY"))
+        .await?;
+    session.write("\r".into())?;
+    let (finished, after_end, receipt) = output
+        .wait_for(&session, |bytes| locate(bytes, &end))
+        .await?;
+    let finish_row: usize = receipt
+        .strip_suffix(&expected)
+        .context("history must contain the exact executed command and column")?
+        .parse()?;
+    let (_, after_start, position) =
+        locate(&output.bytes, &start).context("PSReadLine did not report the accepted command")?;
+    let start_row: usize = position
+        .strip_suffix(";0")
+        .context("accepted command should start on a separate row")?
+        .parse()?;
+    assert!(finish_row > start_row);
+    assert!(after_start < finished);
+    assert!(
+        contains(
+            &output.bytes[after_start..finished],
+            "OMNI_COMMAND_BOUNDARY"
+        )
+        .is_some()
+    );
+
+    // PSReadLine can reset its editor without calling prompt after Ctrl+C. A
+    // subsequent accepted line proves the canceled input never got a receipt.
+    let prompt = format!("]633;P;OmniAgentCwd={};", info.terminal_id);
+    output
+        .wait_for(&session, |bytes| contains(&bytes[after_end..], &prompt))
+        .await?;
+    let before_cancel = output.bytes.len();
+    session.write("$omniDrop = 'UNEXECUTED'".into())?;
+    output
+        .wait_for(&session, |bytes| {
+            contains(&bytes[before_cancel..], "$omniDrop")
+        })
+        .await?;
+    session.write("\u{3}".into())?;
+    let following_command = "Write-Output 'after cancel'";
+    let following_end = format!("]633;P;OmniAgentCommandEnd={};2;", info.terminal_id);
+    session.write(following_command.into())?;
+    output
+        .wait_for(&session, |bytes| {
+            contains(&bytes[before_cancel..], "Write-Output")
+        })
+        .await?;
+    session.write("\r".into())?;
+    let (_, _, following_receipt) = output
+        .wait_for(&session, |bytes| locate(bytes, &following_end))
+        .await?;
+    assert!(following_receipt.ends_with(&format!(
+        ";0;succeeded;{}",
+        STANDARD.encode(following_command)
+    )));
+
+    for (index, (command, status)) in [
+        ("& ([IO.Path]::Combine([Environment]::SystemDirectory, 'cmd.exe')) /d /c 'exit 23'", "failed"),
+        ("if ($LASTEXITCODE -ne 23) { throw 'native status changed' }; Write-Output 'error: success fixture'", "succeeded"),
+        ("Write-Error 'PowerShell error fixture'", "failed"),
+        ("throw 'PowerShell terminating error fixture'", "failed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sequence = index + 3;
+        let prefix = format!("]633;P;OmniAgentCommandEnd={};{sequence};", info.terminal_id);
+        session.write(format!("{command}\r"))?;
+        let (_, _, receipt) = output.wait_for(&session, |bytes| locate(bytes, &prefix)).await?;
+        let expected = format!(";{status};{}", STANDARD.encode(command));
+        assert!(receipt.ends_with(&expected), "{command}: {receipt}");
+    }
+    session.write("exit 0\r".into())?;
+    assert_eq!(output.exited().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_and_exit()
 -> Result<()> {
     let fixture = tempfile::tempdir()?;

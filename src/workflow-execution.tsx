@@ -263,7 +263,9 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
           {active.pending && <WorkflowStageDecisionForm key={active.pending.requestId}
             projectId={run.projectId} runId={run.id} pending={active.pending}
             evidence={Object.keys(active.pending.inputs).length > 0 && <RecordedInputs inputs={active.pending.inputs}
-              snapshot={snapshot} scope={{ projectId: run.projectId, runId: run.id }} navigation={navigation} />} />}
+              snapshot={snapshot} scope={{ projectId: run.projectId, runId: run.id }} navigation={navigation}
+              consumer={{ nodeInstanceId: active.pending.nodeId, nodeRevision: active.pending.nodeRevision,
+                unitId: active.pending.unitId, planRevision: active.pending.planRevision, decisionRequestId: active.pending.requestId }} />} />}
           {active.comparison && <WorkflowExecutionComparison projectId={run.projectId}
             stage={active.comparison.stage} recorded={active.comparison.recorded}
             openActivity={navigation.openActivity} openQueueJob={navigation.openQueueJob} />}

@@ -7,9 +7,11 @@ import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, with
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
-import type { FileFormat } from "@/source-file-format";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
+import type { EditorLocation } from "@/ide-code-editor";
+import type { FileFormat } from "@/source-file-format";
+import { readNoteSearchTarget } from "@/ide-file-search";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 
@@ -17,28 +19,35 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   Channel: class { onmessage = () => {}; },
 }));
+const editorOpenLocation = vi.hoisted(() => vi.fn<(path: string, open?: (path: string, location?: EditorLocation) => Promise<boolean>) => void>());
 vi.mock("@/ide-code-editor", () => ({
-  CodeEditor: ({ path, content, update, onExcerpt }: { path: string; content: string; update: (path: string, text: string) => void;
-    onExcerpt?: (excerpt: EditorExcerpt, instruction: string) => void }) =>
-    <><textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)} />
+  CodeEditor: ({ path, content, update, onExcerpt, onOpenLocation, jump }: { path: string; content: string; update: (path: string, text: string) => void;
+    onExcerpt?: (excerpt: EditorExcerpt, instruction: string) => void; onOpenLocation?: (path: string, location?: EditorLocation) => Promise<boolean>;
+    jump?: EditorLocation }) => {
+    editorOpenLocation(path, onOpenLocation);
+    return <><textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)}
+      data-line={jump?.line} data-column={jump?.column} />
       {onExcerpt && <button type="button" onClick={() => onExcerpt({ path, text: content, startLine: 2, endLine: 3, language: "rust" }, "Explain this code.")}>
         Explain selection…
       </button>}
-    </>,
+    </>;
+  },
 }));
 vi.mock("@/git-diff-view", () => ({
-  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
-    <div aria-label="Compared local versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
+  MonacoComparison: ({ file }: { file: { path: string; originalPath?: string; original: string; modified: string } }) =>
+    <div aria-label="Compared local versions" data-path={file.path} data-original-path={file.originalPath}><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
 }));
 const terminalProps = vi.hoisted(() => vi.fn());
+const terminalReveal = vi.hoisted(() => vi.fn<(reveal: (path: string) => void) => void>());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
   ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, onFocus: _onFocus,
-    sessionActions: _sessionActions, visible: _visible, ...props }: {
+    onRevealFolder, sessionActions: _sessionActions, visible: _visible, ...props }: {
     checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown; onOpenFile?: unknown;
-    onFocus?: unknown; sessionActions?: unknown; visible?: boolean;
+    onFocus?: unknown; onRevealFolder: (path: string) => void; sessionActions?: unknown; visible?: boolean;
   }) => {
     terminalProps(props);
+    terminalReveal(onRevealFolder);
     return null;
   },
 }));
@@ -169,6 +178,38 @@ function fixture(extraSources: Record<string, string> = {}) {
   };
 }
 
+it("reviews and restores the protected draft from the file status only at the reviewed revision", async () => {
+  const { disk, drafts } = fixture();
+  const base = disk.get(main)!.document.revision;
+  drafts.set(main, { base, revision: "draft-before", markdown: "fn old_draft() {}" });
+  const user = userEvent.setup();
+  render(<IdeWorkspace {...propsFor(main)} target={file} />);
+  const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
+  expect(editor.value).toBe("fn old_draft() {}");
+
+  const openDraft = async () => {
+    fireEvent.contextMenu(await screen.findByText("Unsaved changes", { exact: true }));
+    await user.click(await screen.findByRole("menuitem", { name: "Review protected draft…" }));
+    return within(await screen.findByRole("dialog", { name: "Review protected draft" }));
+  };
+  drafts.set(main, { base, revision: "draft-reviewed", markdown: "fn reviewed_draft() {}" });
+  let dialog = await openDraft();
+  await dialog.findByText("fn reviewed_draft() {}", { exact: true });
+  drafts.set(main, { base, revision: "draft-after", markdown: "fn changed_draft() {}" });
+  await user.click(dialog.getByRole("button", { name: "Restore draft to editor" }));
+  expect((await dialog.findByRole("alert")).textContent).toContain("The protected draft changed");
+  expect(editor.value).toBe("fn old_draft() {}");
+  await user.click(dialog.getByRole("button", { name: "Close" }));
+
+  dialog = await openDraft();
+  await dialog.findByText("fn changed_draft() {}", { exact: true });
+  await user.click(dialog.getByRole("button", { name: "Restore draft to editor" }));
+  await waitFor(() => expect(editor.value).toBe("fn changed_draft() {}"));
+  expect(drafts.get(main)?.revision).toBe("draft-after");
+  expect(disk.get(main)?.document.markdown).toBe("fn original() {}");
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+});
+
 it("previews an exact checkout file format and saves only after confirming the reviewed bytes", async () => {
   const { disk } = fixture();
   const source = "fn original() {}\n";
@@ -210,53 +251,42 @@ it("previews an exact checkout file format and saves only after confirming the r
   expect((screen.getByRole("textbox", { name: editorLabel }) as HTMLTextAreaElement).value).toBe(source);
 });
 
-const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
-const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
-
-function render(element: ReactElement) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
-}
-
-it("previews an exact checkout file format and saves only after confirming the reviewed bytes", async () => {
-  const { disk } = fixture();
-  const source = "fn original() {}\n";
-  disk.set(alternate, documentAt(alternate, "a1", source, file, { utf8Bom: false, encoding: "utf8", lineEndings: "lf" }));
+it("opens a worker destination at its exact verified source path and position within the checkout", async () => {
+  const destination = "src/ação %2F #1.ts";
+  const missing = "src/missing.ts";
+  const redirected = "src/redirected.ts";
+  fixture({ [destination]: "const target = 'fixture';" });
   const native = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation((command, args) => {
-    if (command === "preview_repository_source_format") return Promise.resolve({
-      originalEncoding: "utf8", originalLineEndings: "lf", encoding: "utf16_le", lineEndings: "lf",
-      originalBytes: 17, convertedBytes: 36, originalPrefix: "66 6E 20", convertedPrefix: "FF FE 66 00 6E 00 20 00", sha256: "reviewed",
-    });
-    if (command === "save_repository_source_format") {
-      const converted = documentAt(alternate, "a2", source, file, { utf8Bom: false, encoding: "utf16_le", lineEndings: "lf" });
-      disk.set(alternate, converted);
-      return Promise.resolve({ ...converted, status: "saved" });
+    if (command === "open_repository_source_file") {
+      const { checkoutId, path } = args as { checkoutId: string; path: string };
+      if (path === missing) return Promise.resolve({ status: "missing", relativePath: missing });
+      if (path === redirected) return Promise.resolve(documentAt(checkoutId, "canonical-elsewhere", "Different file", "src/other.ts"));
     }
     return native(command, args);
   });
   render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
-  await screen.findByRole("textbox", { name: editorLabel });
-  const review = async () => {
-    fireEvent.contextMenu(await screen.findByLabelText("Saved file format UTF-8, LF"));
-    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Change encoding" }), { key: "ArrowRight" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "UTF-16 LE with BOM" }));
-    const dialog = await screen.findByRole("dialog", { name: "Review file format conversion" });
-    await within(dialog).findByText("UTF-16 LE with BOM · LF · 36 bytes");
-    expect(within(dialog).getByLabelText("Converted initial bytes").textContent).toBe("FF FE 66 00 6E 00 20 00");
-    return dialog;
-  };
-  const args = { checkoutId: alternate, path: file, expectedRevision: "a1", change: { encoding: "utf16_le" } };
-  const first = await review();
-  expect(invoke).toHaveBeenCalledWith("preview_repository_source_format", args);
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_repository_source_format")).toHaveLength(0);
-  fireEvent.click(within(first).getByRole("button", { name: "Cancel" }));
-  const second = await review();
-  fireEvent.click(within(second).getByRole("button", { name: "Convert and save" }));
-  await screen.findByLabelText("Saved file format UTF-16 LE with BOM, LF");
-  expect(invoke).toHaveBeenCalledWith("save_repository_source_format", { ...args, previewSha256: "reviewed" });
-  expect(disk.get(main)?.document.revision.id).toBe("m1");
-  expect((screen.getByRole("textbox", { name: editorLabel }) as HTMLTextAreaElement).value).toBe(source);
+  const origin = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(origin, { target: { value: "fn unsaved_origin() {}" } });
+  const open = editorOpenLocation.mock.calls.findLast(([path]) => path === file)![1]!;
+  await act(async () => {
+    expect(await open(missing, { line: 2, column: 3 })).toBe(false);
+    expect(await open(redirected, { line: 2, column: 3 })).toBe(false);
+  });
+  expect(screen.getByRole("textbox", { name: editorLabel })).toBe(origin);
+  expect(screen.queryByRole("button", { name: "Close other.ts" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close missing.ts" })).toBeNull();
+
+  await act(async () => { expect(await open(destination, { line: 8, column: 5 })).toBe(true); });
+  const opened = await screen.findByRole("textbox", { name: `Source editor for ${destination}` });
+  expect(opened.getAttribute("data-line")).toBe("8");
+  expect(opened.getAttribute("data-column")).toBe("5");
+  expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId: alternate, path: destination });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_source_file", { checkoutId: main, path: destination });
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+  const sourceTab = screen.getByRole("button", { name: "Close review.rs" }).closest<HTMLElement>(".file-tab-label")!;
+  await userEvent.setup().click(within(sourceTab).getByText("review.rs"));
+  expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel })).value).toBe("fn unsaved_origin() {}");
 });
 
 it("uses the clicked row for the Explorer, even with another source file active", async () => {
@@ -390,7 +420,7 @@ it("closes tabs to the right of an inactive tab, prompts on drafts and preserves
   expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Source editor for src/recent.rs" })).value).toBe("fn recent() {}");
 });
 
-it("moves the clicked tab to a new group and merges groups without changing the draft or pin", async () => {
+it("moves tabs and groups in the editor grid without changing the draft or pin", async () => {
   const service = fixture({ "src/other.rs": "fn other() {}" });
   render(<IdeWorkspace {...propsFor(main)} />);
   fireEvent.click(await screen.findByRole("button", { name: "src" }));
@@ -415,10 +445,69 @@ it("moves the clicked tab to a new group and merges groups without changing the 
   expect(screen.queryByRole("dialog", { name: "Save changes?" })).toBeNull();
 
   fireEvent.contextMenu(within(movedGroup as HTMLElement).getByRole("button", { name: "Actions for Editor group" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move group in grid" }), { key: "ArrowRight" });
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: /Group \d+ · other\.rs/ }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Left" }));
+  const otherGroup = screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview")!;
+  const reorderedGroup = selected().closest(".dv-groupview")!;
+  const groups = [...document.querySelectorAll(".dv-groupview")];
+  expect(groups.indexOf(reorderedGroup)).toBeLessThan(groups.indexOf(otherGroup));
+  expect(within(reorderedGroup as HTMLElement).getByLabelText("Pinned")).toBeTruthy();
+  expect(views()[0]?.value).toBe("fn draft_before_move() {}");
+
+  fireEvent.contextMenu(within(reorderedGroup as HTMLElement).getByRole("button", { name: "Actions for Editor group" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Merge all groups here" }));
   expect(selected().closest(".dv-groupview")).toBe(screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview"));
   expect(await screen.findByLabelText("Pinned")).toBeTruthy();
   expect(service.drafts.get(main)?.markdown).toBe("fn draft_before_move() {}");
+});
+
+it("opens a closed source in the chosen existing group and routes Markdown to a Knowledge split", async () => {
+  fixture({ "src/other.rs": "fn other() {}", "src/closed.rs": "fn closed() {}" });
+  const props = propsFor(alternate);
+  render(<IdeWorkspace {...props} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "review.rs" }));
+  await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.click(screen.getByRole("button", { name: "other.rs" }));
+  await screen.findByRole("textbox", { name: "Source editor for src/other.rs" });
+  const groupOf = (name: string) => screen.getByRole("button", { name: `Close ${name}` }).closest(".dv-groupview");
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Close other.rs" }).closest(".file-tab-label")!);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move tab" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New group to the right" }));
+  expect(groupOf("review.rs")).not.toBe(groupOf("other.rs"));
+  expect(groupOf("other.rs")?.classList.contains("dv-active-group")).toBe(true);
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "closed.rs" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Open in editor group" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: /Group \d+ · review\.rs/ }));
+  await screen.findByRole("textbox", { name: "Source editor for src/closed.rs" });
+  expect(groupOf("closed.rs")).toBe(groupOf("review.rs"));
+  expect(groupOf("closed.rs")).not.toBe(groupOf("other.rs"));
+
+  fireEvent.click(screen.getByRole("button", { name: "docs" }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Guide.md" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Open to the side" }));
+  const target = vi.mocked(props.openWorkspace).mock.lastCall?.[1];
+  expect(props.openWorkspace).toHaveBeenLastCalledWith("knowledge", expect.any(String));
+  expect(readNoteSearchTarget(target!)).toEqual({ path: "docs/Guide.md", line: 1, side: true });
+});
+
+it("launches the configured external editor for the clicked unopened file in its checkout", async () => {
+  const selected = "src/A & (draft) %review%.rs";
+  fixture({ [selected]: "fn draft() {}" });
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => command === "open_checkout_file_in_external_editor"
+    ? Promise.resolve(undefined) : native(command, args));
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "A & (draft) %review%.rs" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Open in external editor" }));
+  await screen.findByText("Started external editor for A & (draft) %review%.rs");
+  expect(invoke).toHaveBeenCalledWith("open_checkout_file_in_external_editor", {
+    checkoutId: alternate, relativePath: selected,
+  });
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "open_repository_source_file")).toBe(false);
 });
 
 it("reveals the breadcrumb folder and reopens the last tab from the empty group", async () => {
@@ -495,6 +584,34 @@ it("opens a folder terminal from the keyboard menu and keeps the root session mo
   }));
   expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: false, clearRevision: 0 });
   expect((screen.getByRole("combobox", { name: "Terminal session" }) as HTMLSelectElement).value).toBe("src");
+});
+
+it("reveals and expands the exact terminal folder while keeping unrelated ignored paths hidden", async () => {
+  fixture();
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command !== "list_checkout_ignored_items") return native(command, args);
+    switch ((args as { folder: string | null }).folder) {
+      case "cache": return Promise.resolve({ folders: ["cache/logs", "cache/another"], files: [] });
+      case "cache/logs": return Promise.resolve({ folders: [], files: ["cache/logs/run.log"] });
+      default: return Promise.resolve({ folders: ["cache", "ignored elsewhere"], files: [] });
+    }
+  });
+  const { container } = render(<IdeWorkspace {...propsFor(alternate)} />);
+  await waitFor(() => expect(terminalReveal).toHaveBeenCalled());
+  fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+  act(() => terminalReveal.mock.lastCall?.[0]("cache/logs"));
+  const folder = await screen.findByRole("button", { name: "logs" });
+  await waitFor(() => expect(document.activeElement).toBe(folder));
+  expect(folder.getAttribute("aria-expanded")).toBe("true");
+  expect(await screen.findByRole("button", { name: "run.log" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "another" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "ignored elsewhere" })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("list_checkout_ignored_items", { checkoutId: alternate, folder: "cache/logs" });
+
+  act(() => terminalReveal.mock.lastCall?.[0](""));
+  await waitFor(() => expect(document.activeElement).toBe(container.querySelector(".file-tree-root > button")));
+  expect(screen.queryByRole("button", { name: "logs" })).toBeNull();
 });
 
 it("creates an empty folder under the clicked parent and refreshes the tree", async () => {
@@ -638,6 +755,99 @@ it("copies the exact clicked file from a live buffer or a read-only capture in t
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_repository_source_file")).toBe(false);
 });
 
+
+it("compares the clicked draft and its disk file separately with exact branch tips and historical paths", async () => {
+  fixture();
+  const selectedRef = { name: "feature", reference: "refs/heads/feature", sha: "c".repeat(40) };
+  const oldPath = "src/former.rs";
+  const old = { sha: "b".repeat(40), parent: null, author: "Fixture", committedAt: "2026-11-17T11:25:00Z",
+    subject: "Historical version", path: oldPath, previousPath: null, status: "M" };
+  const newest = { ...old, sha: "a".repeat(40), subject: "Latest version", path: file, previousPath: oldPath, status: "R" };
+  let diskText = "fn saved_disk() {}";
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "git_checkout_review") return Promise.resolve({ checkoutId: alternate, root: "C:/checkout",
+      revision: { branch: "refs/heads/main", head: newest.sha, index: "index" }, managed: false, changes: [], branches: [selectedRef], worktrees: [] });
+    if (command === "git_checkout_file_history") {
+      const feature = (args as { branch: string | null }).branch === selectedRef.reference;
+      return Promise.resolve({ head: feature ? selectedRef.sha : newest.sha, entries: feature ? [newest, old] : [newest], hasMore: false });
+    }
+    if (command === "git_compare_file_versions") {
+      const { base, revised } = args as { base: { path: string } | null; revised: { kind: string; path: string } };
+      if (revised.kind === "worktree") return Promise.resolve({
+        original: { status: "text", content: base?.path === oldPath ? "fn historical() {}" : "fn branch_tip() {}" },
+        modified: { status: "text", content: diskText },
+      });
+      return Promise.resolve({ original: { status: "missing" }, modified: { status: "text", content: revised.path === oldPath ? "fn historical() {}" : "fn latest() {}" } });
+    }
+    return native(command, args);
+  });
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  const user = userEvent.setup();
+  fireEvent.change(await screen.findByRole("textbox", { name: editorLabel }), { target: { value: "fn unsaved_draft() {}" } });
+  const tab = await screen.findByText("review.rs", { selector: ".file-tab-label span" });
+  fireEvent.contextMenu(tab);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare editor with branch or commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare editor with Git revision" }));
+  await user.selectOptions(await dialog.findByLabelText("History branch"), selectedRef.reference);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: null, revised: { kind: "commit", sha: selectedRef.sha, path: file },
+  }));
+  await user.click(await dialog.findByRole("button", { name: /^Historical version/ }));
+  expect(await dialog.findByText("fn historical() {}")).toBeTruthy();
+  expect(dialog.getByText("fn unsaved_draft() {}")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: null, revised: { kind: "commit", sha: old.sha, path: oldPath },
+  });
+
+  await user.click(dialog.getByRole("button", { name: "Close dialog" }));
+  fireEvent.contextMenu(tab);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare file on disk with branch or commit…" }));
+  const saved = within(await screen.findByRole("dialog", { name: "Compare file on disk with Git revision" }));
+  await user.selectOptions(await saved.findByLabelText("History branch"), selectedRef.reference);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: { kind: "commit", sha: selectedRef.sha, path: file }, revised: { kind: "worktree" },
+  }));
+  await user.click(await saved.findByRole("button", { name: /^Historical version/ }));
+  expect(await saved.findByText("fn historical() {}")).toBeTruthy();
+  expect(saved.getByText(diskText)).toBeTruthy();
+  expect(saved.queryByText("fn unsaved_draft() {}")).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: { kind: "commit", sha: old.sha, path: oldPath }, revised: { kind: "worktree" },
+  });
+  const diff = saved.getByLabelText("Compared local versions");
+  expect(diff.getAttribute("data-original-path")).toBe(oldPath);
+  expect(diff.getAttribute("data-path")).toBe(file);
+  diskText = "fn updated_on_disk() {}";
+  await user.click(saved.getByRole("button", { name: "Refresh disk version" }));
+  expect(await saved.findByText(diskText)).toBeTruthy();
+  await user.click(saved.getByRole("button", { name: "Close dialog" }));
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: editorLabel }).value).toBe("fn unsaved_draft() {}");
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+});
+
+it("saves a named copy of a closed file by copying its disk bytes", async () => {
+  const path = "docs/Closed.bin";
+  fixture({ [path]: "binary fixture" });
+  const user = userEvent.setup();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  await user.click(await screen.findByRole("button", { name: "docs" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "Closed.bin" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Save a copy…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Save a copy" }));
+  expect(dialog.getByText("Copy docs/Closed.bin as stored on disk")).toBeTruthy();
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Destination folder" }), "");
+  fireEvent.change(dialog.getByRole("textbox", { name: "Name" }), { target: { value: "Archive.bin" } });
+  await user.click(dialog.getByRole("button", { name: "Save copy" }));
+  expect(await screen.findByText("Copied Archive.bin")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("mutate_checkout_items", {
+    checkoutId: alternate, operation: "copy", edits: [{ source: path, destination: "Archive.bin", directory: false }],
+  });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_source_file", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("create_checkout_item", expect.anything());
+});
 
 it("saves the open editor buffer as a new file without saving the original", async () => {
   const service = fixture();
@@ -859,3 +1069,10 @@ it("reuses the canonical tab in each checkout and discards the last dirty view w
   }
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_repository_source_file")).toBe(false);
 });
+
+function render(element: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
+const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
+const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });

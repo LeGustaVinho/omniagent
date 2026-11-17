@@ -15,9 +15,15 @@ type FixtureTerminal = {
   focus: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   clear: ReturnType<typeof vi.fn>;
+  paste: ReturnType<typeof vi.fn>;
   linkProvider?: ILinkProvider;
   selected: string;
+  selectionRow?: number;
   onOsc?: (data: string) => boolean;
+  onScreenClear?: () => boolean;
+  onTerminalResize?: () => void;
+  onTerminalLineFeed?: () => void;
+  onTerminalSelection?: () => void;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -28,6 +34,7 @@ const fixture = vi.hoisted(() => ({
   findNext: vi.fn<(text: string) => boolean>(),
   lines: [] as { text: string; isWrapped: boolean }[],
   cursorRow: 0,
+  cursorColumn: 0,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -43,8 +50,10 @@ vi.mock("@xterm/xterm", () => ({
     focus = vi.fn();
     dispose = vi.fn();
     clear = vi.fn();
+    paste = vi.fn();
     element?: HTMLElement;
     selected = "";
+    selectionRow?: number;
     linkProvider?: ILinkProvider;
     open(element: HTMLElement) {
       this.element = element;
@@ -57,25 +66,53 @@ vi.mock("@xterm/xterm", () => ({
       return { dispose: () => { this.linkProvider = undefined; } };
     }
     getSelection() { return this.selected; }
-    getSelectionPosition() { return undefined; }
-    onOsc?: (data: string) => boolean;
+    hasSelection() { return Boolean(this.selected); }
+    getSelectionPosition() {
+      if (this.selectionRow === undefined) return;
+      return { start: { x: 0, y: this.selectionRow } };
+    }
+    private readonly oscHandlers: ((data: string) => boolean)[] = [];
+    onOsc = (data: string) => this.oscHandlers.findLast((callback) => callback(data)) !== undefined;
+    onScreenClear?: () => boolean;
+    onTerminalResize?: () => void;
+    onTerminalLineFeed?: () => void;
+    onTerminalSelection?: () => void;
     parser = { registerOscHandler: (_id: number, handler: (data: string) => boolean) => {
-      this.onOsc = handler;
-      return { dispose: () => { this.onOsc = undefined; } };
+      this.oscHandlers.push(handler);
+      return { dispose: () => { this.oscHandlers.splice(this.oscHandlers.indexOf(handler), 1); } };
+    }, registerCsiHandler: (id: { final: string }, handler: () => boolean) => {
+      if (id.final === "J") this.onScreenClear = handler;
+      return { dispose: () => { if (id.final === "J") this.onScreenClear = undefined; } };
     } };
     registerMarker() {
       let onDispose: (() => void) | undefined;
       return { line: fixture.cursorRow, onDispose: (listener: () => void) => { onDispose = listener; }, dispose: () => onDispose?.() };
     }
     attachCustomKeyEventHandler = vi.fn();
-    onSelectionChange = () => ({ dispose: vi.fn() });
+    onSelectionChange = (handler: () => void) => {
+      this.onTerminalSelection = handler;
+      return { dispose: () => { this.onTerminalSelection = undefined; } };
+    };
+    onResize = (handler: () => void) => {
+      this.onTerminalResize = handler;
+      return { dispose: () => { this.onTerminalResize = undefined; } };
+    };
+    onLineFeed = (handler: () => void) => {
+      this.onTerminalLineFeed = handler;
+      return { dispose: () => { this.onTerminalLineFeed = undefined; } };
+    };
     get buffer() {
-      return { active: { type: "normal", length: fixture.lines.length, viewportY: 0, baseY: 0, cursorY: fixture.cursorRow, getLine: (index: number) => {
+      return { onBufferChange: () => ({ dispose: vi.fn() }),
+        active: { type: "normal", length: fixture.lines.length, viewportY: 0, baseY: 0, cursorY: fixture.cursorRow, cursorX: fixture.cursorColumn,
+        getLine: (index: number) => {
         const line = fixture.lines[index];
         if (!line) return;
         const cells = Array.from(line.text).flatMap((character) => character === "界" ? [{ string: character, width: 2 }, { string: "", width: 0 }] : [{ string: character, width: 1 }]);
         return { length: cells.length, isWrapped: line.isWrapped,
-          translateToString: (trim: boolean) => trim ? line.text.trimEnd() : line.text,
+          translateToString: (trim: boolean, start?: number, end?: number) => {
+            const slice = line.text.slice(start, end);
+            return trim ? slice.trimEnd() : slice;
+          },
           getCell: (x: number) => cells[x] && { getChars: () => cells[x]!.string, getWidth: () => cells[x]!.width },
         };
       } } };
@@ -107,6 +144,7 @@ beforeEach(() => {
   fixture.onResize.length = 0;
   fixture.lines = [];
   fixture.cursorRow = 0;
+  fixture.cursorColumn = 0;
   fixture.dimensions = { cols: 96, rows: 25 };
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(768);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(420);
@@ -131,6 +169,136 @@ it("opens reviewed input without a PTY and starts only after an explicit run wit
     checkoutId: session.checkoutId, reviewedScript: reviewedInput,
   }));
   expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
+});
+
+it("copies and attaches only the last authenticated command and its bounded rendered output", async () => {
+  const session = { checkoutId: "checkout", terminalId: "session-token" };
+  vi.mocked(invoke).mockResolvedValue(session);
+  const add = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId={session.checkoutId} active autoStart onContextText={add} onOpenFile={vi.fn()} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  const openMenu = () => fireEvent.contextMenu(screen.getByLabelText("Manual PowerShell terminal"));
+  const start = (id: string, sequence: number, row = fixture.cursorRow, column = fixture.cursorColumn) => terminal.onOsc?.(
+    `P;OmniAgentCommandStart=${id};${sequence};${row};${column}`);
+  const end = (id: string, sequence: number, command: string, row = fixture.cursorRow, column = fixture.cursorColumn,
+    status = "succeeded") => {
+    const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(command)));
+    return terminal.onOsc?.(`P;OmniAgentCommandEnd=${id};${sequence};${row};${column};${status};${encoded}`);
+  };
+  fixture.lines = [
+    { text: "PS> previously printed input", isWrapped: false },
+    { text: "old> wrapping", isWrapped: false },
+    { text: " text", isWrapped: true },
+    { text: "okPS> new unexecuted input", isWrapped: false },
+  ];
+  act(() => {
+    start("other-terminal", 1);
+    end("other-terminal", 1, "untrusted command", fixture.cursorRow, fixture.cursorColumn, "failed");
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last PowerShell command" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  fixture.cursorRow = 1;
+  fixture.cursorColumn = 5;
+  act(() => { start(session.terminalId, 1); });
+  const command = "Write-Host 'é'";
+  fixture.cursorRow = 3;
+  fixture.cursorColumn = 2;
+  act(() => { end(session.terminalId, 1, command); });
+  // Later screen content cannot become part of the completed output.
+  fixture.lines[3]!.text = "changed after command completion";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe(command);
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
+  expect(await navigator.clipboard.readText()).toBe("wrapping text\nok");
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command output to conversation…" }));
+  expect(add).toHaveBeenCalledExactlyOnceWith("wrapping text\nok");
+
+  act(() => {
+    start(session.terminalId, 2);
+    terminal.onScreenClear?.();
+    end(session.terminalId, 2, "Clear-Host");
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Add last command output to conversation…" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe("Clear-Host");
+
+  act(() => {
+    start(session.terminalId, 3);
+    end(session.terminalId, 3, "Get-Date", fixture.cursorRow + 1);
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe("Get-Date");
+
+  // ConPTY may send either receipt before it paints the corresponding row.
+  fixture.lines[3]!.text = "fast output";
+  fixture.lines.push({ text: "", isWrapped: false });
+  fixture.cursorRow = 2;
+  fixture.cursorColumn = 5;
+  act(() => {
+    start(session.terminalId, 4, 3, 0);
+    end(session.terminalId, 4, "Write-Output 'fast output'", 4, 0);
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  await user.keyboard("{Escape}");
+  fixture.cursorRow = 3;
+  fixture.cursorColumn = 0;
+  act(() => terminal.onTerminalLineFeed?.());
+  fixture.cursorRow = 4;
+  act(() => terminal.onTerminalLineFeed?.());
+  fixture.lines[4]!.text = "PS> next command";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
+  expect(await navigator.clipboard.readText()).toBe("fast output\n");
+
+  // Only receipts paired with an accepted line identify a command failure.
+  act(() => end(session.terminalId, 0, "unmatched", fixture.cursorRow, fixture.cursorColumn, "failed"));
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  const failed = "cmd.exe /d /c 'echo mixed output & exit 23'";
+  fixture.lines = [{ text: "mixed output", isWrapped: false }, { text: "", isWrapped: false }];
+  fixture.cursorRow = 0;
+  act(() => { start(session.terminalId, 5); });
+  fixture.cursorRow = 1;
+  act(() => { end(session.terminalId, 5, failed, 1, 0, "failed"); });
+  fixture.lines[1]!.text = "unrelated prompt";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" }));
+  expect(add.mock.lastCall).toEqual([`PowerShell reported failure.\n\nCommand\n${failed}\n\nCaptured terminal output\nmixed output\n`]);
+  terminal.selected = ".\\reported.ts:7";
+  fireEvent.keyDown(screen.getByLabelText("Manual PowerShell terminal"), { key: "F10", shiftKey: true });
+  expect(await screen.findByRole("menuitem", { name: "Open file at location" })).toBeTruthy();
+  expect(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+
+  const silent = "cmd.exe /d /c 'exit 23'";
+  act(() => {
+    start(session.terminalId, 6);
+    terminal.onScreenClear?.();
+    end(session.terminalId, 6, silent, 1, 0, "failed");
+  });
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command failure to conversation…" }));
+  expect(add.mock.lastCall).toEqual([`PowerShell reported failure.\n\nCommand\n${silent}`]);
+
+  act(() => { start(session.terminalId, 7); });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Add last command failure to conversation…" })).toBeNull();
 });
 
 it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {
@@ -248,10 +416,13 @@ it("opens wrapped local file references with their location and offers a menu on
     { text: "https://example.com/a.ts", isWrapped: false },
     { text: "C:\\check out\\a.ts:14:2", isWrapped: false },
   ];
-  vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : "docs/revisão #1.ts");
+  vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : { path: "docs/revisão #1.ts", kind: "file" });
   const onOpenFile = vi.fn();
+  const onContextText = vi.fn();
+  const split = vi.fn();
   const user = userEvent.setup();
-  const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile} />);
+  const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile}
+    onContextText={onContextText} sessionActions={[[{ label: "Split terminal", run: split }]]} />);
   await screen.findByRole("button", { name: "Close PowerShell" });
   const terminal = fixture.terminals[0]!;
   let links: ILink[] | undefined;
@@ -261,7 +432,7 @@ it("opens wrapped local file references with their location and offers a menu on
   links![0]!.activate(new MouseEvent("mouseup"), original);
   expect(onOpenFile).not.toHaveBeenCalled();
   await act(async () => { links![0]!.activate(new MouseEvent("mouseup", { ctrlKey: true }), original); });
-  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_file", { checkoutId: "linked", relativeDirectory: "docs", path: ".\\revisão #1.ts" });
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", { checkoutId: "linked", relativeDirectory: "docs", path: ".\\revisão #1.ts", expectedKind: "file" });
   expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("docs/revisão #1.ts", 12, 5);
   terminal.linkProvider?.provideLinks(3, (provided) => { links = provided; });
   expect(links).toBeUndefined();
@@ -270,9 +441,31 @@ it("opens wrapped local file references with their location and offers a menu on
 
   const grid = container.querySelector(".xterm-screen")!;
   vi.spyOn(grid, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 260, 100));
-  fireEvent.contextMenu(grid, { clientX: 30, clientY: 11 });
+  const openPathMenu = () => fireEvent.contextMenu(grid, { clientX: 30, clientY: 11 });
+  openPathMenu();
   await user.click(await screen.findByRole("menuitem", { name: "Copy printed file reference" }));
   expect(await navigator.clipboard.readText()).toBe(original);
+
+  terminal.selected = `Selected diagnostic at ${original}`;
+  act(() => terminal.onTerminalSelection?.());
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy selection" }));
+  expect(await navigator.clipboard.readText()).toBe(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Paste" }));
+  expect(terminal.paste).toHaveBeenCalledExactlyOnceWith(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add selection to conversation…" }));
+  expect(onContextText).toHaveBeenCalledExactlyOnceWith(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Find in terminal" }));
+  const find = await screen.findByRole("searchbox", { name: "Find in terminal" });
+  await waitFor(() => expect(document.activeElement).toBe(find));
+  await user.click(screen.getByRole("button", { name: "Close find" }));
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Split terminal" }));
+  expect(split).toHaveBeenCalledTimes(1);
+
   terminal.selected = "../notes.md:8";
   fireEvent.keyDown(grid, { key: "F10", shiftKey: true });
   await user.click(await screen.findByRole("menuitem", { name: "Copy printed path" }));
@@ -280,11 +473,11 @@ it("opens wrapped local file references with their location and offers a menu on
 });
 
 it("keeps an unverified reference and a late resolution from navigating", async () => {
-  const pending = deferred<string>();
+  const pending = deferred<{ path: string; kind: "file" }>();
   fixture.lines = [{ text: "src/file.ts:1", isWrapped: false }];
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "terminal" };
-    if (command === "resolve_manual_terminal_file") throw new Error("No file in this checkout.");
+    if (command === "resolve_manual_terminal_path") throw new Error("No file in this checkout.");
     return undefined;
   });
   const onOpenFile = vi.fn();
@@ -301,15 +494,53 @@ it("keeps an unverified reference and a late resolution from navigating", async 
   act(activate);
   rerender(view(false));
   rerender(view(true));
-  await act(async () => { pending.resolve("src/file.ts"); });
+  await act(async () => { pending.resolve({ path: "src/file.ts", kind: "file" }); });
   expect(onOpenFile).not.toHaveBeenCalled();
+});
+
+it("reveals checked folders from printed terminal paths and uses the directory at the clicked row", async () => {
+  const child = ".\\logs\\";
+  const absolute = String.raw`C:\check out\logs folder`;
+  fixture.lines = [
+    { text: child, isWrapped: false },
+    { text: absolute, isWrapped: false },
+    { text: "Error: 'not a path'", isWrapped: false },
+  ];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "start_manual_terminal") return { checkoutId: "linked", terminalId: "terminal-token" };
+    if (command === "resolve_manual_terminal_path") return { path: (args as { path: string }).path === child ? "old/logs" : "logs folder", kind: "folder" };
+  });
+  const onOpenFile = vi.fn();
+  const onRevealFolder = vi.fn();
+  const user = userEvent.setup();
+  const { container } = render(<ManualTerminal checkoutId="linked" active autoStart onOpenFile={onOpenFile} onRevealFolder={onRevealFolder} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(String.raw`C:\check out\old`)}`);
+  fixture.cursorRow = 1;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(String.raw`C:\check out\new`)}`);
+
+  const grid = container.querySelector(".xterm-screen")!;
+  vi.spyOn(grid, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 960, 250));
+  fireEvent.contextMenu(grid, { clientX: 12, clientY: 5 });
+  await user.click(await screen.findByRole("menuitem", { name: "Reveal folder in Explorer tree" }));
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", path: child, expectedKind: "folder", observedDirectory: String.raw`C:\check out\old`,
+  });
+  expect(onRevealFolder).toHaveBeenCalledExactlyOnceWith("old/logs");
+
+  terminal.linkProvider?.provideLinks(2, (links) => expect(links?.map(({ text }) => text)).toEqual([absolute]));
+  await act(async () => terminal.linkProvider?.provideLinks(2, (links) => links?.[0]?.activate(new MouseEvent("mouseup", { ctrlKey: true }), absolute)));
+  expect(onRevealFolder).toHaveBeenNthCalledWith(2, "logs folder");
+  expect(onOpenFile).not.toHaveBeenCalled();
+  terminal.linkProvider?.provideLinks(3, (links) => expect(links).toBeUndefined());
 });
 
 it("keeps each relative file reference bound to its authenticated PowerShell prompt directory", async () => {
   fixture.lines = [{ text: "src/main.ts:1", isWrapped: false }, { text: "src/main.ts:2", isWrapped: false }];
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "session-token" };
-    if (command === "resolve_manual_terminal_file") return (args as { observedDirectory: string }).observedDirectory + "/src/main.ts";
+    if (command === "resolve_manual_terminal_path") return { path: (args as { observedDirectory: string }).observedDirectory + "/src/main.ts", kind: "file" };
     return undefined;
   });
   const onOpenFile = vi.fn();
@@ -326,4 +557,74 @@ it("keeps each relative file reference bound to its authenticated PowerShell pro
   }));
   expect(onOpenFile).toHaveBeenNthCalledWith(1, String.raw`C:\checkout/src/main.ts`, 1, undefined);
   expect(onOpenFile).toHaveBeenNthCalledWith(2, String.raw`C:\checkout\subdirectory/src/main.ts`, 2, undefined);
+});
+
+it("opens explicitly selected path names using the selected output's directory without adding automatic links", async () => {
+  fixture.lines = [{ text: "src", isWrapped: false }, { text: "README", isWrapped: false }, { text: "finished", isWrapped: false }];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "start_manual_terminal") return { checkoutId: "linked", terminalId: "terminal-token" };
+    if (command === "resolve_manual_terminal_path") {
+      const { path } = args as { path: string };
+      if (path === "src") return { kind: "folder", path: "earlier/src" };
+      if (path === "README") return { kind: "file", path: "later/README" };
+      throw new Error("This terminal reference does not resolve to a matching path in the current checkout.");
+    }
+  });
+  const onOpenFile = vi.fn();
+  const onRevealFolder = vi.fn();
+  const onContextText = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId="linked" relativeDirectory="initial" active autoStart
+    onOpenFile={onOpenFile} onRevealFolder={onRevealFolder} onContextText={onContextText} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const surface = screen.getByLabelText("Manual PowerShell terminal");
+  const terminal = fixture.terminals[0]!;
+  const earlier = String.raw`C:\linked\earlier`;
+  const later = String.raw`C:\linked\later`;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(earlier)}`);
+  fixture.cursorRow = 1;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(later)}`);
+  for (const row of [1, 3]) terminal.linkProvider?.provideLinks(row, (links) => expect(links).toBeUndefined());
+
+  const select = (text: string, row: number) => act(() => {
+    terminal.selected = text;
+    terminal.selectionRow = row;
+    terminal.onTerminalSelection?.();
+  });
+  const action = () => screen.findByRole("menuitem", { name: "Open selected checkout path" });
+  fireEvent.contextMenu(surface);
+  expect((await action()).getAttribute("aria-disabled")).toBe("true");
+  await user.keyboard("{Escape}");
+  select("src", 0);
+  fireEvent.keyDown(surface, { key: "F10", shiftKey: true });
+  await user.click(await action());
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", relativeDirectory: "initial", observedDirectory: earlier, path: "src", expectedKind: undefined,
+  });
+  expect(onRevealFolder).toHaveBeenCalledExactlyOnceWith("earlier/src");
+
+  select("README", 1);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", relativeDirectory: "initial", observedDirectory: later, path: "README", expectedKind: undefined,
+  });
+  expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("later/README", undefined, undefined);
+
+  select("finished", 2);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect((await screen.findByRole("alert")).textContent).toContain("matching path in the current checkout");
+  expect(onOpenFile).toHaveBeenCalledTimes(1);
+  expect(onRevealFolder).toHaveBeenCalledTimes(1);
+  fireEvent.contextMenu(surface);
+  await user.click(await screen.findByRole("menuitem", { name: "Add selection to conversation…" }));
+  expect(onContextText).toHaveBeenCalledExactlyOnceWith("finished");
+
+  const pathCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "resolve_manual_terminal_path").length;
+  select("src\nREADME", 0);
+  fireEvent.contextMenu(surface);
+  await user.click(await action());
+  expect((await screen.findByRole("alert")).textContent).toBe("Select a single checkout path.");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "resolve_manual_terminal_path")).toHaveLength(pathCalls);
 });

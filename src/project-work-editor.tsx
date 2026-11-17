@@ -21,7 +21,9 @@ type Settings = {
 };
 type Draft = { description: string; settings: Settings | null; state: WorkflowStatus | null };
 type Editor = { title: string; placement: Placement; draft: Draft; branchLocked: boolean; version: string };
-export type ProjectEditorSelection = { kind: WorkKind; work?: AgileRow; parentId?: string; state?: WorkflowStatus; copyOf?: AgileRow };
+export type ProjectEditorSelection = {
+  kind: WorkKind; work?: AgileRow; parentId?: string; state?: WorkflowStatus; copyOf?: AgileRow; focusField?: "priority" | "dependencies";
+};
 export type WorkspaceWorkInput = { title: string; placement: Placement; draft?: Draft } & ({ workId: string; expected: string; draft: Draft } | { workId?: undefined });
 
 function placementFor(kind: WorkKind, parentId: string): Placement {
@@ -142,5 +144,5 @@ function ProjectWorkForm({ checkout, selection, rows, current, busy, error, clos
         : <p role="alert">{note.error ? String(note.error) : "This note is unavailable in the checkout."}</p>}
     </AgileNotePreview>} busy={busy} error={error ? String(error) : linkError} notices={error && workId &&
       <Button type="button" variant="outline" className="justify-self-start" onClick={reload}>Reload saved work</Button>}
-    saveLabel={workId ? "Save work" : "Create work"} cancel={close} save={submit} />;
+    saveLabel={workId ? "Save work" : "Create work"} cancel={close} save={submit} focusField={selection.focusField} />;
 }

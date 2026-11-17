@@ -21,6 +21,7 @@ export interface QueueJobRow {
   attempt: string | number;
   reason: string;
   menu?: MenuGroups;
+  reasonMenu?: MenuGroups;
 }
 
 interface QueueSelection {
@@ -217,7 +218,11 @@ export function QueueLayout({
               <td role="cell" className="queue-job-status"><DeliveryStatus>{job.status}</DeliveryStatus></td>
               <td role="cell" className="queue-job-priority"><span className="queue-compact-label" aria-hidden="true">Priority</span>{job.priority}</td>
               <td role="cell" className="queue-job-attempt"><span className="queue-compact-label" aria-hidden="true">Attempt</span>{job.attempt}</td>
-              <td role="cell" className="queue-job-reason"><span className="queue-compact-label" aria-hidden="true">Wait reason</span>{job.reason}</td>
+              <td role="cell" className="queue-job-reason"><span className="queue-compact-label" aria-hidden="true">Wait reason</span>
+                {job.reasonMenu ? <ContextActions label={`Wait reason for ${job.id}`} groups={job.reasonMenu}>
+                  <span>{job.reason}</span>
+                </ContextActions> : job.reason}
+              </td>
             </tr>)}</tbody>
           </table>}
         </div>

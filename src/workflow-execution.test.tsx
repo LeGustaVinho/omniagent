@@ -146,12 +146,14 @@ it("navigates from the context of the clicked saved run", async () => {
   expect(openWorkspace).toHaveBeenCalledExactlyOnceWith("pipelines", "run:older-execution");
 });
 
-it("hands selected saved responses to the exact plan review and queues only after user confirmation", async () => {
+it.each(["checkbox", "context menu"])("hands saved responses from the %s to the exact plan review before queueing", async (entry) => {
   const plan = node("planner", "Plan", [], [port("plan", "plan")]);
   const review = node("review_plan", "Plan review", [port("plan", "plan")], [port("review", "review")]);
   const planRevision = "saved-plan";
   const origin = "plan-attempt";
+  const sourceCheckoutId = "original-comparison-checkout";
   const reviewer = { provider: "codex", profileId: "reviewer-profile", modelId: "reviewer-model" } as const;
+  const planJob = job(plan.instance.id, [{ runId: origin, previousRunId: null, conversationId: null, status: "succeeded", ordinal: 1 }]);
   const snapshot: WorkflowExecutionSnapshot = {
     run: { id: runId, version, projectId, planRevision },
     definition: { version, name: "Authored workflow", nodes: [plan, review], wires: [
@@ -159,7 +161,7 @@ it("hands selected saved responses to the exact plan review and queues only afte
     ] },
     outputs: [output(plan.instance.id, planRevision, "plan", "plan", { run_id: origin, event_sequence: 2 })],
     unitNodeIds: [], units: [], control: [],
-    jobs: [job(plan.instance.id, [{ runId: origin, previousRunId: null, conversationId: null, status: "succeeded", ordinal: 1 }])],
+    jobs: [{ ...planJob, job: { ...planJob.job, checkoutId: sourceCheckoutId } }],
     rolePins: [{
       nodeId: review.instance.id, nodeRevision: review.revision, requirementsOnly: false,
       version: { destination: "project", kind: "role", id: "reviewer", revision: "reviewer-r1" },
@@ -167,13 +169,17 @@ it("hands selected saved responses to the exact plan review and queues only afte
     }],
   };
   const wrongCheckout = { ...snapshot, run: { ...snapshot.run, id: "foreign-checkout-run" },
-    jobs: snapshot.jobs.map((row) => ({ ...row, job: { ...row.job, checkoutId: "wrong-checkout" } })) };
+    jobs: snapshot.jobs.map((row) => ({ ...row, job: { ...row.job, checkoutId: exampleCheckout.checkoutId } })) };
   const commit = "a".repeat(40);
   const group = {
-    id: "review-comparison", sourceCheckoutId: exampleCheckout.checkoutId, commit, tree: "worktree",
+    id: "review-comparison", sourceCheckoutId, commit, tree: "worktree",
     prompt: "Review the exact document", candidates: [
-      { selection: reviewer, jobId: "source-job", runId: "source-result", dispatchId: "source-dispatch", state: "succeeded" },
-      { selection: reviewer, jobId: "failed-job", runId: "failed-run", dispatchId: null, state: "failed" },
+      { selection: reviewer, modelReference: { name: "Source candidate", rating: null },
+        jobId: "source-job", runId: "source-result", dispatchId: "source-dispatch", state: "succeeded" },
+      { selection: reviewer, modelReference: { name: "Other candidate", rating: null },
+        jobId: "other-job", runId: "other-result", dispatchId: "other-dispatch", state: "succeeded" },
+      { selection: reviewer, modelReference: { name: "Failed candidate", rating: null },
+        jobId: "failed-job", runId: "failed-run", dispatchId: null, state: "failed" },
     ],
   };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
@@ -182,10 +188,10 @@ it("hands selected saved responses to the exact plan review and queues only afte
         ? [{ option: { selection: reviewer, name: "Reviewer model", selectable: true, rating: null } }] : [];
       case "comparison_source_commit": return commit;
       case "model_comparisons": return [group];
-      case "model_comparison_outcomes": return [{
-        jobId: "source-job", runId: "source-result", response: "Saved comparison response", reasoning: [], failure: null,
+      case "model_comparison_outcomes": return ["source", "other"].map((id) => ({
+        jobId: `${id}-job`, runId: `${id}-result`, response: `Saved ${id} response`, reasoning: [], failure: null,
         reportedModel: null, durationSeconds: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null,
-      }];
+      }));
       case "model_comparison_environments": return [];
       case "list_repository_deliveries": return [wrongCheckout.run, snapshot.run];
       case "inspect_workflow_execution": return (input as { runId: string }).runId === runId ? snapshot : wrongCheckout;
@@ -202,8 +208,21 @@ it("hands selected saved responses to the exact plan review and queues only afte
     <Harness />
   </QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("checkbox", { name: "Use this result" }));
-  await user.click(screen.getByRole("button", { name: "Use in pipeline" }));
+  const results = within(await screen.findByRole("list", { name: "Comparison results" }));
+  const [sourceChoice, otherChoice] = await results.findAllByRole<HTMLInputElement>("checkbox", { name: "Use this result" });
+  if (entry === "context menu") {
+    await user.click(otherChoice!);
+    fireEvent.contextMenu(results.getByRole("heading", { name: "Failed candidate" }));
+    expect(screen.queryByRole("menuitem", { name: "Use this result in pipeline…" })).toBeNull();
+    await user.keyboard("{Escape}");
+    fireEvent.contextMenu(results.getByRole("heading", { name: "Source candidate" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Use this result in pipeline…" }));
+    expect(otherChoice!.checked).toBe(true);
+    expect(sourceChoice!.checked).toBe(false);
+  } else {
+    await user.click(sourceChoice!);
+    await user.click(screen.getByRole("button", { name: "Use in pipeline" }));
+  }
   const destination = within(screen.getByRole("region", { name: "Comparison destination" }));
   const runs = await destination.findByRole("combobox", { name: "Workflow run" });
   await user.selectOptions(runs, wrongCheckout.run.id);
@@ -214,6 +233,7 @@ it("hands selected saved responses to the exact plan review and queues only afte
   await user.click(destination.getByRole("button", { name: "Open plan review" }));
   const inspector = within(await screen.findByRole("complementary", { name: "Execution node evidence" }));
   expect((await inspector.findByRole<HTMLInputElement>("checkbox", { name: /source-result/ })).checked).toBe(true);
+  expect(inspector.getByRole<HTMLInputElement>("checkbox", { name: /other-result/ }).checked).toBe(false);
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "submit_repository_delivery_agent")).toBe(false);
   const queue = inspector.getByRole<HTMLButtonElement>("button", { name: "Queue plan review" });
   await waitFor(() => expect(queue.disabled).toBe(false));

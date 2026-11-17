@@ -11,6 +11,7 @@ import { DeliveryGitSettings, SimulatedDeliveryGitSettings, deliveryMilestoneSet
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
+import { openWorkspaceFile } from "@/file-context-actions";
 import { ProjectModelSettings, projectModelSettings } from "@/model-default-settings";
 import { ProjectWorkModeControls } from "@/project-agile-settings";
 import { ResizablePanel } from "@/panel-resize";
@@ -62,6 +63,7 @@ const pages: readonly Page[] = [
   { id: "system", scope: "device", title: "System", icon: HardDrive, entries: [
     { id: "environment", label: "Current installation", description: "Build, local data directory, runtime" },
     { id: "qualification", label: "Prerequisites and qualification", description: "Windows, WebView2, Git for Windows, ripgrep, CLI, model, runner" },
+    { id: "external-editor", label: "External editor", description: "Choose or clear the local executable for opening checkout files." },
     { id: "backup", label: "Backup and restore", description: "SQLite, protected history, manifest, drafts, snapshot and recovery" },
     { id: "updates", label: "Updates and recovery", description: "Signed package, installer, update, restart and rollback" },
   ] },
@@ -172,6 +174,7 @@ function SettingsSession({
   open,
   onOpenChange,
   openActivity,
+  openWorkspace,
   initialPage,
   simulation,
   startSimulation,
@@ -275,7 +278,10 @@ function SettingsSession({
       case "customizations":
         return simulation
           ? <CustomizationExample approved={approvedExample} approve={() => setApprovedExample(true)} />
-          : <CustomizationsSettings key={checkout?.checkoutId} checkoutId={checkout?.checkoutId} embedded />;
+          : <CustomizationsSettings key={checkout?.checkoutId} checkout={checkout} embedded onOpenSource={(path) => {
+            onOpenChange(false);
+            openWorkspaceFile(openWorkspace, path, undefined, { repeat: true });
+          }} />;
       case "system":
         return <>
           <SystemSettings simulated={simulation ? maintenance : undefined} startSimulation={simulate} />

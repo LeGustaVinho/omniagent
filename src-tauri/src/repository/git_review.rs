@@ -4,7 +4,7 @@ use std::{
     io,
     os::windows::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -24,8 +24,11 @@ use super::{
 };
 
 mod blame;
+mod branch;
 mod comments;
 mod commit;
+mod commit_checkout;
+mod commit_history;
 mod comparison;
 mod conflicts;
 mod content;
@@ -33,10 +36,18 @@ mod discard;
 mod history;
 mod hunk_review;
 mod hunks;
+mod patch;
 mod permalink;
 mod reviewed_files;
 mod saved_patch;
 pub use blame::GitLineBlame;
+pub use commit_checkout::{
+    GitCommitCheckoutComparison, GitCommitCheckoutFileRequest, GitCommitCheckoutRequest,
+};
+pub use commit_history::{
+    GitCommitRange, GitHistoryCommitDetails, GitHistoryCommitDiff, GitHistoryCommitFile,
+    GitHistoryCommitRequest,
+};
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::{GitConflictProposal, GitConflictReview};
@@ -263,7 +274,20 @@ impl Store {
                 .into_iter()
                 .find(|entry| entry.path == path && source.contains(entry))
                 .context("the selected path is no longer in this comparison")?;
+            // Keep the working file stable while its text, hunks and Git patch are read.
+            let working_file = if source == GitDiffSource::Working && !entry.unmerged() {
+                content::lock_staging_file(&review.root, &path)
+            } else {
+                Ok(None)
+            };
             let mut diff = content::read_diff(&review, &entry, source)?;
+            diff.patch = Some(patch::GitReviewPatch::result(working_file.and_then(|locked| {
+                ensure!(
+                    source == GitDiffSource::Staged || locked.is_some() || diff.modified == GitFileSide::Missing,
+                    "The working file changed during review. Refresh the comparison and try again."
+                );
+                patch::live(&review, &entry, source, &diff.modified)
+            })));
             review.verify()?;
             diff.comment_scope = comments::GitReviewCommentScope::from_comparison(
                 &scope.id,
@@ -341,7 +365,11 @@ impl Store {
         }
     }
 
-    pub async fn git_saved_attempts(&self, project: String) -> Result<Vec<SavedGitAttempt>> {
+    pub async fn git_saved_attempts(
+        &self,
+        project: String,
+        checkout: Option<String>,
+    ) -> Result<Vec<SavedGitAttempt>> {
         self.execute(move |db| {
             let mut query = db.prepare(
                 "SELECT r.id, r.checkout_id, coalesce(t.title, 'Repository attempt'), agent.conversation_id,
@@ -351,9 +379,10 @@ impl Store {
                  JOIN agent_attempts agent ON agent.run_id = r.id
                  JOIN jobs j ON j.id = a.job_id LEFT JOIN project_tasks t ON t.project_id = j.project_id AND t.id = j.task_id
                  WHERE j.project_id = ?1 AND candidate.capture_confirmed = 1
+                   AND (?2 IS NULL OR r.checkout_id = ?2)
                  ORDER BY r.created_at DESC, r.id LIMIT 100",
             )?;
-            Ok(query.query_map(params![project], |row| Ok(SavedGitAttempt {
+            Ok(query.query_map(params![project, checkout], |row| Ok(SavedGitAttempt {
                 run_id: row.get(0)?, checkout_id: row.get(1)?, label: row.get(2)?,
                 conversation_id: row.get(3)?, history_deleted: row.get(4)?,
             }))?
@@ -602,15 +631,18 @@ fn passive_command(root: &Path) -> Result<Command> {
 }
 
 fn passive(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    check(passive_output(root, args)?, args[0])
+}
+
+fn passive_output(root: &Path, args: &[&str]) -> Result<Output> {
     // The caller verifies the checkout using Git's normal trust settings.
     // Carry that decision into the isolated command for this checkout only.
     let directory = root.to_string_lossy().replace('\\', "/");
-    let output = passive_command(root)?
+    Ok(passive_command(root)?
         .arg("-c")
         .arg(format!("safe.directory={directory}"))
         .args(args)
-        .output()?;
-    check(output, args[0])
+        .output()?)
 }
 
 fn branches(root: &Path) -> Result<Vec<GitReviewBranch>> {

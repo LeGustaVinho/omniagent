@@ -6,13 +6,15 @@ const indentationSizes = [2, 4, 8];
 const encodings = Object.keys(sourceEncodingLabels) as SourceEncoding[];
 const selectableLineEndings = ["lf", "crlf", "cr"] as const;
 
-export function EditorStatus({ path, saved, settings, format, copy, onChangeFormat, canConvert = saved }: {
+export function EditorStatus({ path, saved, settings, format, copy, onChangeFormat, onReviewExternal, onReviewDraft, canConvert = saved }: {
   path: string;
   saved: boolean;
   settings?: EditorSettings;
   format?: FileFormat;
   copy: (text: string, status: string) => void;
   onChangeFormat?: (change: SourceFormatChange) => void;
+  onReviewExternal?: () => void;
+  onReviewDraft?: () => void;
   canConvert?: boolean;
 }) {
   const encodingId = savedEncoding(format);
@@ -20,7 +22,13 @@ export function EditorStatus({ path, saved, settings, format, copy, onChangeForm
   const lineEndings = format && lineEndingLabels[format.lineEndings];
   const language = settings?.languages.find(({ id }) => settings.language === id)?.label ?? settings?.language;
   return <div className="ide-status-details">
-    <span>{saved ? "Saved" : "Unsaved changes"}</span>
+    <ContextActions label="file save state" groups={[[
+      ...(onReviewExternal ? [{ label: "Review external change", run: onReviewExternal }] : []),
+      ...(onReviewDraft ? [{ label: "Review protected draft…", run: onReviewDraft }] : []),
+    ]]}>
+      <span className={onReviewExternal || onReviewDraft ? "ide-status-setting" : undefined}
+        tabIndex={onReviewExternal || onReviewDraft ? 0 : undefined}>{saved ? "Saved" : "Unsaved changes"}</span>
+    </ContextActions>
     {settings && <>
       <ContextActions label="editor language" groups={[[
         { label: "Detect from filename", disabled: settings.language === settings.autoLanguage, run: () => settings.setLanguage(settings.autoLanguage) },

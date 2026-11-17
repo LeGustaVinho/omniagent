@@ -17,6 +17,7 @@ pub(super) fn apply(db: &Connection, plan: &DeletionPlan) -> Result<()> {
     for dispatch in &plan.dispatches {
         redact_dispatch(db, plan, dispatch)?;
     }
+    crate::dispatch::attachment_retention::apply_attachments(db, &plan.attachment_copies)?;
     let removed = serde_json::to_string(&plan.revisions)?;
     let empty_text = protection::protect(b"")?;
     db.execute(

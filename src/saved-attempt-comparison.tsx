@@ -4,8 +4,7 @@ import type { editor } from "monaco-editor";
 import { lazy, Suspense, useState } from "react";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { RunStatus } from "@/bindings/RunStatus";
-import type { ChildLocation } from "@/conversation-children";
-import { newTurnResponseEvidence, recordResponseEvidence, type ResponseObservation } from "@/conversation-response-evidence";
+import { readRecordedResponseEvidence } from "@/conversation-response-evidence";
 import { FileDialog } from "@/ide-file-workspace";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -93,21 +92,8 @@ export function SavedAttemptComparison({ title, description, scope, choices, sou
 }
 
 type RelatedAttempt = { runId: string; checkoutId: string; status: RunStatus; ordinal: number; createdAt: number };
-type ResponsePage = { cursor: string; more: boolean; events: { data: ResponseObservation; location: ChildLocation }[] };
-
 async function conversationOutput(conversationId: string, runId: string, signal: AbortSignal): Promise<AttemptText | undefined> {
-  const responses = newTurnResponseEvidence();
-  let cursor = "0";
-  for (;;) {
-    signal.throwIfAborted();
-    const page = await invoke<ResponsePage>("conversation_events", { conversationId, runId, after: cursor });
-    if (page.more && page.cursor === cursor) throw new Error("The saved output cursor did not advance.");
-    for (const event of page.events) if (["assistant_delta", "assistant_message", "assistant_final"].includes(event.data.type)) {
-      recordResponseEvidence(responses, event.data, event.location);
-    }
-    cursor = page.cursor;
-    if (!page.more) break;
-  }
+  const { responses, cursor } = await readRecordedResponseEvidence(conversationId, runId, signal);
   const status = responses.items.some((item) => item.status === "final") ? "final"
     : responses.items.some((item) => item.status === "completed") ? "completed" : "streamed";
   const items = responses.items.filter((item) => item.status === status);

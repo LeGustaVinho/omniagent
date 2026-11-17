@@ -4,6 +4,7 @@ import { useState } from "react";
 import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import type { MenuGroups } from "@/components/ui/context-actions";
 import { ignoredTreeKey, windowsHiddenTreeKey } from "@/checkout-file-tree";
+import type { ItemResult } from "@/checkout-item-operations";
 import { containingFolder } from "@/file-context-actions";
 import { fileName } from "@/ide-knowledge-data";
 
@@ -19,7 +20,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   simulated: boolean;
   knowledge?: boolean;
   refresh: () => Promise<unknown>;
-  onCreated: (path: string, kind: Kind) => void;
+  onCreated: (path: string, kind: Kind, copiedFromDisk: boolean) => void;
   report: (message: string) => void;
 }) {
   const client = useQueryClient();
@@ -29,7 +30,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
     enabled: !simulated,
     retry: false,
   });
-  const [request, setRequest] = useState<{ path: string; kind: Kind; contents?: string; copy?: boolean }>();
+  const [request, setRequest] = useState<{ path: string; kind: Kind; contents?: string; copy?: boolean; source?: string }>();
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -42,13 +43,13 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
     setRequest(next);
   }
 
-  function saveCopy(path: string, contents: string) {
+  function saveCopy(path: string, contents?: string) {
     if (simulated) return;
     const original = fileName(path);
     const extension = original.lastIndexOf(".");
     const suggested = extension > 0 ? `${original.slice(0, extension)} copy${original.slice(extension)}` : `${original} copy`;
     const kind = /\.(?:md|markdown)$/i.test(path) ? "note" : "file";
-    start({ path: containingFolder(path), kind, contents, copy: true }, suggested);
+    start({ path: containingFolder(path), kind, contents, copy: true, source: contents === undefined ? path : undefined }, suggested);
   }
 
   function actions(item: FileTreeTarget): MenuGroups {
@@ -65,17 +66,31 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
 
   async function create() {
     if (!request || busy || !name.trim()) return;
-    const { kind, path, contents } = request;
+    const { kind, path, contents, source } = request;
     const filename = kind === "note" && !/\.(?:md|markdown)$/i.test(name) ? `${name}.md` : name;
     setBusy(true);
     setError("");
     try {
-      const created = await invoke<string>("create_checkout_item", {
-        checkoutId, relativeDirectory: path, name: filename, directory: kind === "folder", ...(contents === undefined ? {} : { contents }),
-      });
+      let created: string;
+      if (source !== undefined) {
+        if (filename.includes("/") || filename.includes("\\")) throw new Error("Enter a file name in the chosen folder.");
+        const destination = path ? `${path}/${filename}` : filename;
+        const result = await invoke<ItemResult>("mutate_checkout_items", {
+          checkoutId, operation: "copy", edits: [{ source, destination, directory: false }],
+        });
+        if (!result.completed.some((item) => item.source === source && item.destination === destination)) {
+          throw new Error(result.error ?? "The file copy did not finish.");
+        }
+        if (result.error) report(result.error);
+        created = destination;
+      } else {
+        created = await invoke<string>("create_checkout_item", {
+          checkoutId, relativeDirectory: path, name: filename, directory: kind === "folder", ...(contents === undefined ? {} : { contents }),
+        });
+      }
       setRequest(undefined);
       await refreshTree().catch((failure: unknown) => report(String(failure)));
-      onCreated(created, kind);
+      onCreated(created, kind, source !== undefined);
     } catch (failure) {
       setError(String(failure));
     } finally {
@@ -83,7 +98,8 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
     }
   }
 
-  const dialog = request && <FileDialog title={request.copy ? "Save a copy" : labels[request.kind]} description={request.path || "Checkout root"}
+  const dialog = request && <FileDialog title={request.copy ? "Save a copy" : labels[request.kind]}
+    description={request.source ? `Copy ${request.source} as stored on disk` : request.copy ? "Copy the editor text" : request.path || "Checkout root"}
     onClose={() => { if (!busy) setRequest(undefined); }}>
     <form onSubmit={(event) => { event.preventDefault(); void create(); }}>
       {request.copy && <label className="grid gap-1 py-2 text-xs">Destination folder<select className="delivery-filter" disabled={busy}

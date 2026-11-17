@@ -100,6 +100,7 @@ fn save_attachments(
             "INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)",
             params![revision, files.payload],
         )?;
+        crate::dispatch::record_saved_attachment_reuses(db, revision, &files.reuses)?;
     }
     Ok(())
 }
@@ -107,6 +108,11 @@ fn save_attachments(
 pub(crate) struct FrozenAttachments {
     payload: Vec<u8>,
     labels: Vec<u8>,
+    reuses: Vec<(
+        usize,
+        attachments::AttachmentMetadata,
+        attachments::AttachmentDelivery,
+    )>,
 }
 
 pub(crate) async fn freeze_attachments(
@@ -126,9 +132,21 @@ pub(crate) async fn freeze_attachments(
             .iter()
             .map(|file| file.metadata.source.file_name().unwrap_or("Attachment"))
             .collect::<Vec<_>>();
+        let reuses = captured
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, attachment)| {
+                matches!(
+                    attachment.metadata.source,
+                    attachments::AttachmentSource::SavedNative { .. }
+                )
+                .then(|| (ordinal, attachment.metadata.clone(), attachment.delivery()))
+            })
+            .collect();
         Ok(Some(FrozenAttachments {
             payload: protection::protect(&serde_json::to_vec(&captured)?)?,
             labels: protection::protect(&serde_json::to_vec(&names)?)?,
+            reuses,
         }))
     })
     .await?
@@ -217,6 +235,11 @@ pub(super) fn attachment_blocker(
     job: &Job,
     revision: &QueuedRevision,
 ) -> Result<Option<&'static str>> {
+    if crate::dispatch::has_retired_saved_native_attachment(db, &revision.revision_id)? {
+        return Ok(Some(
+            "A saved attachment was removed. Review the queued instruction before delivery.",
+        ));
+    }
     let files = attachments::captured_for_revision(db, &revision.revision_id)?;
     if files.is_empty() {
         return Ok(None);

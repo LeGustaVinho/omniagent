@@ -8,13 +8,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     attachments::{
         AttachmentDelivery, AttachmentDispatch, AttachmentInput, AttachmentMetadata,
-        captured_for_revision,
+        AttachmentSource, captured_for_revision,
     },
     protection,
     store::Store,
 };
 
-use super::ContextSnapshot;
+use super::{ContextSnapshot, attachment_evidence::require_archived_native};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,11 +67,29 @@ impl AttachmentIdentity {
 struct RemovalPlan {
     target: AttachmentHistoryTarget,
     removal: AttachmentHistoryRemoval,
-    identity: AttachmentIdentity,
-    saved: BTreeMap<String, Vec<usize>>,
+    impact: AttachmentRemovalImpact,
+}
+
+type AttachmentsByRevision = BTreeMap<String, BTreeMap<usize, AttachmentIdentity>>;
+type AttachmentCopy = (String, usize, AttachmentIdentity);
+
+#[derive(Default, Serialize)]
+pub(super) struct AttachmentRemovalImpact {
+    saved: AttachmentsByRevision,
     dispatches: BTreeMap<String, Vec<DispatchAttachment>>,
-    sessions: BTreeSet<String>,
-    unsettled: BTreeSet<String>,
+    pub(super) sessions: BTreeSet<String>,
+    pub(super) unsettled: BTreeSet<String>,
+    pub(super) runs: BTreeSet<String>,
+}
+
+impl AttachmentRemovalImpact {
+    pub(super) fn saved_revision_count(&self) -> usize {
+        self.saved.len()
+    }
+
+    pub(super) fn dispatch_ids(&self) -> impl Iterator<Item = &String> {
+        self.dispatches.keys()
+    }
 }
 
 #[derive(Serialize)]
@@ -84,10 +102,10 @@ impl RemovalPlan {
     fn preview(&self) -> Result<AttachmentRemovalPreview> {
         Ok(AttachmentRemovalPreview {
             revision: format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)),
-            saved_revisions: self.saved.len(),
-            dispatches: self.dispatches.len(),
-            native_sessions: self.sessions.len(),
-            unsettled_attempts: self.unsettled.len(),
+            saved_revisions: self.impact.saved_revision_count(),
+            dispatches: self.impact.dispatches.len(),
+            native_sessions: self.impact.sessions.len(),
+            unsettled_attempts: self.impact.unsettled.len(),
         })
     }
 }
@@ -121,10 +139,10 @@ impl Store {
                     "Attachment deletion impact changed"
                 );
                 ensure!(
-                    plan.unsettled.is_empty(),
+                    plan.impact.unsettled.is_empty(),
                     "Settle affected attempts before deleting attachment history"
                 );
-                apply(&tx, &plan)?;
+                apply(&tx, &plan.impact)?;
                 tx.commit()?;
                 Ok(preview)
             })
@@ -164,24 +182,46 @@ fn removal_plan(
     let identity = saved_identities(db, &target.message_revision_id)?
         .remove(&target.attachment_ordinal)
         .context("Attachment does not exist at the selected revision")?;
-    let revisions = copied_revisions(db, &target.message_revision_id)?;
-    let mut saved = BTreeMap::new();
+    let sources = vec![(
+        target.message_revision_id.clone(),
+        target.attachment_ordinal,
+        identity,
+    )];
+    let cascade = removal == AttachmentHistoryRemoval::WithDerivedCopies;
+    let attachments = expand_attachment_copies(db, sources, cascade)?;
+    let impact = removal_impact(db, attachments, (!cascade).then_some(&target))?;
+    Ok(RemovalPlan {
+        target,
+        removal,
+        impact,
+    })
+}
+
+fn removal_impact(
+    db: &Connection,
+    attachments: AttachmentsByRevision,
+    selected: Option<&AttachmentHistoryTarget>,
+) -> Result<AttachmentRemovalImpact> {
+    if attachments.is_empty() {
+        return Ok(AttachmentRemovalImpact::default());
+    }
+    let revisions: BTreeSet<_> = attachments.keys().collect();
+    let mut saved = AttachmentsByRevision::new();
     let mut live_revisions = BTreeSet::new();
     let mut dispatches = BTreeMap::new();
     let mut sessions = BTreeSet::new();
     let mut unsettled = BTreeSet::new();
-    for revision in &revisions {
+    let mut runs = BTreeSet::new();
+    for (revision, identities) in &attachments {
         let removed = retired_identities(db, revision)?;
-        let mut matches: Vec<_> = saved_identities(db, revision)?
-            .into_iter()
-            .filter_map(|(ordinal, entry)| {
-                (entry == identity && !removed.contains_key(&ordinal)).then_some(ordinal)
-            })
-            .collect();
+        let mut matches = saved_identities(db, revision)?;
+        matches.retain(|ordinal, identity| {
+            !removed.contains_key(ordinal) && identities.get(ordinal) == Some(identity)
+        });
         if !matches.is_empty() {
             live_revisions.insert(revision);
-            if removal == AttachmentHistoryRemoval::Selected {
-                matches.retain(|ordinal| {
+            if let Some(target) = selected {
+                matches.retain(|ordinal, _| {
                     revision == &target.message_revision_id && *ordinal == target.attachment_ordinal
                 });
             }
@@ -208,7 +248,7 @@ fn removal_plan(
     }
 
     let mut dispatch_query = db.prepare(
-        "SELECT d.id, snapshot.payload, a.agent_session_id, s.provider_session_id IS NOT NULL
+        "SELECT d.id, snapshot.payload, a.agent_session_id, s.provider_session_id IS NOT NULL, a.run_id
          FROM dispatches d JOIN context_snapshots snapshot ON snapshot.id = d.snapshot_id
          JOIN agent_attempts a ON a.run_id = snapshot.run_id
          JOIN agent_sessions s ON s.id = a.agent_session_id
@@ -228,19 +268,25 @@ fn removal_plan(
         let matches: Vec<_> = present_ordinals(&ordinals)
             .zip(snapshot.attachments.iter())
             .filter_map(|(ordinal, attachment)| {
-                (revisions.contains(&attachment.message_revision_id)
-                    && identity.matches(attachment))
-                .then(|| DispatchAttachment {
-                    ordinal,
-                    revision_id: attachment.message_revision_id.clone(),
-                })
+                attachments
+                    .get(&attachment.message_revision_id)
+                    .is_some_and(|identities| {
+                        identities
+                            .values()
+                            .any(|identity| identity.matches(attachment))
+                    })
+                    .then(|| DispatchAttachment {
+                        ordinal,
+                        revision_id: attachment.message_revision_id.clone(),
+                    })
             })
             .collect();
         if !matches.is_empty() {
+            runs.insert(row.get::<_, String>(4)?);
             if row.get::<_, bool>(3)? {
                 sessions.insert(row.get::<_, String>(2)?);
             }
-            if removal == AttachmentHistoryRemoval::WithDerivedCopies {
+            if selected.is_none() {
                 dispatches.insert(id, matches);
             }
         }
@@ -260,15 +306,87 @@ fn removal_plan(
     for id in active_query.query_map([sessions_json], |row| row.get::<_, String>(0))? {
         unsettled.insert(id?);
     }
-    Ok(RemovalPlan {
-        target,
-        removal,
-        identity,
+    Ok(AttachmentRemovalImpact {
         saved,
         dispatches,
         sessions,
         unsettled,
+        runs,
     })
+}
+
+pub(super) fn reused_attachments_for_deleted_revisions(
+    db: &Connection,
+    revisions: &BTreeSet<String>,
+) -> Result<AttachmentRemovalImpact> {
+    let mut query = db.prepare(
+        "SELECT copied_revision_id, copied_attachment_ordinal, copied_identity
+         FROM saved_attachment_reuses
+         WHERE source_revision_id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let seeds = read_reuse_edges(&mut query, [serde_json::to_string(revisions)?])?;
+    let mut attachments = expand_attachment_copies(db, seeds, true)?;
+    attachments.retain(|revision, _| !revisions.contains(revision));
+    removal_impact(db, attachments, None)
+}
+
+fn expand_attachment_copies(
+    db: &Connection,
+    mut pending: Vec<AttachmentCopy>,
+    include_reuses: bool,
+) -> Result<AttachmentsByRevision> {
+    let mut copies = AttachmentsByRevision::new();
+    let mut edges = db.prepare(
+        "SELECT copied_revision_id, copied_attachment_ordinal, copied_identity
+         FROM saved_attachment_reuses WHERE source_revision_id = ?1 AND source_attachment_ordinal = ?2",
+    )?;
+    while let Some((revision, ordinal, identity)) = pending.pop() {
+        if copies
+            .get(&revision)
+            .is_some_and(|items| items.contains_key(&ordinal))
+        {
+            continue;
+        }
+        let mut inherited = vec![(revision.clone(), ordinal)];
+        for copy in copied_revisions(db, &revision)? {
+            if copy != revision {
+                inherited.extend(saved_identities(db, &copy)?.into_iter().filter_map(
+                    |(ordinal, other)| (identity == other).then(|| (copy.clone(), ordinal)),
+                ));
+            }
+        }
+        for (revision, ordinal) in inherited {
+            let items = copies.entry(revision.clone()).or_default();
+            let previous = items.insert(ordinal, identity.clone());
+            ensure!(
+                previous.as_ref().is_none_or(|prior| prior == &identity),
+                "The saved attachment copy position is ambiguous."
+            );
+            if previous.is_none() && include_reuses {
+                pending.extend(read_reuse_edges(
+                    &mut edges,
+                    params![revision, u32::try_from(ordinal)?],
+                )?);
+            }
+        }
+    }
+    Ok(copies)
+}
+
+fn read_reuse_edges(
+    statement: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<AttachmentCopy>> {
+    let mut rows = statement.query(params)?;
+    let mut copies = Vec::new();
+    while let Some(row) = rows.next()? {
+        copies.push((
+            row.get(0)?,
+            usize::try_from(row.get::<_, u32>(1)?)?,
+            decode(&row.get::<_, Vec<u8>>(2)?)?,
+        ));
+    }
+    Ok(copies)
 }
 
 fn copied_revisions(db: &Connection, source: &str) -> Result<BTreeSet<String>> {
@@ -302,6 +420,30 @@ fn retired_identities(
     Ok(retired)
 }
 
+pub(super) fn archived_attachment_was_removed(
+    db: &Connection,
+    attachment: &AttachmentDispatch,
+) -> Result<bool> {
+    let deleted = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM history_deleted_revisions WHERE revision_id = ?1)",
+        [&attachment.message_revision_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(deleted
+        || retired_identities(db, &attachment.message_revision_id)?
+            .values()
+            .any(|identity| identity.matches(attachment)))
+}
+
+pub(crate) fn has_retired_saved_native_attachment(db: &Connection, revision: &str) -> Result<bool> {
+    Ok(retired_identities(db, revision)?.values().any(|identity| {
+        matches!(
+            identity.metadata.source,
+            AttachmentSource::SavedNative { .. }
+        )
+    }))
+}
+
 fn saved_identities(
     db: &Connection,
     revision: &str,
@@ -318,6 +460,64 @@ fn saved_identities(
         );
     }
     Ok(identities)
+}
+
+pub(crate) fn record_saved_attachment_reuses(
+    db: &Connection,
+    revision: &str,
+    reuses: &[(usize, AttachmentMetadata, AttachmentDelivery)],
+) -> Result<()> {
+    if reuses.is_empty() {
+        return Ok(());
+    }
+    let project: String = db.query_row(
+        "SELECT c.project_id FROM message_revisions r JOIN messages m ON m.id = r.message_id
+         JOIN conversations t ON t.id = m.conversation_id JOIN checkouts c ON c.id = t.checkout_id
+         WHERE r.id = ?1",
+        [revision],
+        |row| row.get(0),
+    )?;
+    for (slot, metadata, delivery) in reuses {
+        let AttachmentSource::SavedNative {
+            conversation_id,
+            run_id,
+            ordinal,
+            message_revision_id,
+            ..
+        } = &metadata.source
+        else {
+            anyhow::bail!("The saved attachment origin was lost.");
+        };
+        let source = require_archived_native(
+            db,
+            &project,
+            conversation_id,
+            run_id,
+            *ordinal,
+            message_revision_id,
+        )?;
+        let identities = saved_identities(db, message_revision_id)?;
+        let mut matches = identities
+            .iter()
+            .filter_map(|(slot, identity)| identity.matches(&source).then_some(slot));
+        let source_slot = matches
+            .next()
+            .context("The source attachment revision is unavailable.")?;
+        ensure!(
+            matches.next().is_none(),
+            "The source attachment position is ambiguous."
+        );
+        let identity = AttachmentIdentity {
+            metadata: metadata.clone(),
+            delivery: *delivery,
+        };
+        db.execute(
+            "INSERT INTO saved_attachment_reuses (copied_revision_id, copied_attachment_ordinal,
+                    source_revision_id, source_attachment_ordinal, copied_identity) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![revision, u32::try_from(*slot)?, message_revision_id, u32::try_from(*source_slot)?, encode(&identity)?],
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn dispatch_removed_ordinals(
@@ -340,19 +540,20 @@ pub(super) fn present_ordinals(retired: &BTreeSet<usize>) -> impl Iterator<Item 
     (0..).filter(|ordinal| !retired.contains(ordinal))
 }
 
-fn apply(db: &Connection, plan: &RemovalPlan) -> Result<()> {
-    let identity = encode(&plan.identity)?;
+pub(super) fn apply_attachments(db: &Connection, plan: &AttachmentRemovalImpact) -> Result<()> {
     for (revision, slots) in &plan.saved {
         let retired = retired_identities(db, revision)?.into_keys().collect();
         let retained: Vec<_> = present_ordinals(&retired)
             .zip(captured_for_revision(db, revision)?)
-            .filter_map(|(ordinal, attachment)| (!slots.contains(&ordinal)).then_some(attachment))
+            .filter_map(|(ordinal, attachment)| {
+                (!slots.contains_key(&ordinal)).then_some(attachment)
+            })
             .collect();
-        for slot in slots {
+        for (slot, identity) in slots {
             db.execute(
                 "INSERT INTO removed_history_attachments(message_revision_id, attachment_ordinal, identity)
                  VALUES (?1, ?2, ?3)",
-                params![revision, u32::try_from(*slot)?, identity],
+                params![revision, u32::try_from(*slot)?, encode(identity)?],
             )?;
         }
         if retained.is_empty() {
@@ -378,6 +579,9 @@ fn apply(db: &Connection, plan: &RemovalPlan) -> Result<()> {
             .collect::<Vec<_>>();
         db.execute("UPDATE queued_conversation_instructions SET attachment_labels = ?2 WHERE revision_id = ?1",
             params![revision, (!labels.is_empty()).then(|| encode(&labels)).transpose()?])?;
+    }
+    if plan.dispatches.is_empty() {
+        return Ok(());
     }
     let unavailable_frames = encode(&Vec::<Vec<u8>>::new())?;
     for (dispatch, attachments) in &plan.dispatches {
@@ -413,6 +617,11 @@ fn apply(db: &Connection, plan: &RemovalPlan) -> Result<()> {
             params![snapshot_id, unavailable_frames],
         )?;
     }
+    Ok(())
+}
+
+fn apply(db: &Connection, plan: &AttachmentRemovalImpact) -> Result<()> {
+    apply_attachments(db, plan)?;
     for session in &plan.sessions {
         db.execute(
             "INSERT OR IGNORE INTO history_revoked_sessions(session_id) VALUES (?1)",

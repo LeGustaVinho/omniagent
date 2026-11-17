@@ -28,6 +28,7 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
     let db = temp.path().join("historical-delivery.sqlite");
     let store = Store::open(db.clone())?;
     let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let base_checkout = repo.checkout_id.clone();
     let note_path = std::path::Path::new(&repo.checkout_root).join("brief.md");
     let project = repo.project_id.clone();
     let task = store
@@ -163,6 +164,18 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
     else {
         anyhow::bail!("missing confirmed implementation capture");
     };
+    let saved_attempts = store
+        .git_saved_attempts(project.clone(), Some(worktree.checkout_id.clone()))
+        .await?;
+    assert_eq!(saved_attempts.len(), 1);
+    assert_eq!(saved_attempts[0].run_id, writer_id);
+    assert_eq!(saved_attempts[0].checkout_id, worktree.checkout_id);
+    assert!(
+        store
+            .git_saved_attempts(project.clone(), Some(base_checkout))
+            .await?
+            .is_empty()
+    );
     let selected = store
         .select_worktree_candidate(
             CandidateTarget {
