@@ -801,6 +801,131 @@ async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Res
 }
 
 #[tokio::test]
+async fn previews_a_pinned_utf16_commit_and_disk_file_without_changing_git_evidence() -> Result<()>
+{
+    fn utf16_bytes(text: &str, little_endian: bool) -> Vec<u8> {
+        let bom = if little_endian {
+            [0xff, 0xfe]
+        } else {
+            [0xfe, 0xff]
+        };
+        let encode = if little_endian {
+            u16::to_le_bytes
+        } else {
+            u16::to_be_bytes
+        };
+        bom.into_iter()
+            .chain(text.encode_utf16().flat_map(encode))
+            .collect()
+    }
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("encoded comparison");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old_path = "revisão original.rs";
+    let path = "revisão atual.rs";
+    let utf8_path = "ordinary.txt";
+    let historical = "// Commit com Unicode 😀\r\nfn old() {}\n";
+    let saved = "// Disco com Unicode ☃\nfn changed() {}\r\n";
+    fs::write(root.join(old_path), utf16_bytes(historical, true))?;
+    fs::write(root.join(utf8_path), "original UTF-8\n")?;
+    let origin = commit_fixture(&root, "Original files")?;
+    git(&root, &["mv", "--", old_path, path])?;
+    let head = commit_fixture(&root, "Rename source")?;
+    let disk_bytes = utf16_bytes(saved, false);
+    fs::write(root.join(path), &disk_bytes)?;
+    fs::write(root.join(utf8_path), "modified UTF-8\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let before = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert!(matches!(
+        (&before.original, &before.modified),
+        (
+            GitFileSide::Unavailable { .. },
+            GitFileSide::Unavailable { .. }
+        )
+    ));
+    assert!(before.hunks.is_empty());
+    assert!(before.comment_scope.is_none());
+    assert!(
+        matches!(&before.patch, Some(super::patch::GitReviewPatch::Text { content }) if content.contains("GIT binary patch"))
+    );
+
+    let selected = GitFileVersion::Commit {
+        sha: origin,
+        path: old_path.into(),
+    };
+    let preview = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            path.into(),
+            Some(selected.clone()),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert_eq!(
+        preview.original,
+        GitFileSide::Text {
+            content: format!("\u{feff}{historical}")
+        }
+    );
+    assert_eq!(
+        preview.modified,
+        GitFileSide::Text {
+            content: format!("\u{feff}{saved}")
+        }
+    );
+    assert!(preview.comment_scope.is_none());
+
+    let commit_only = store
+        .git_compare_file_versions(checkout.clone(), path.into(), None, selected.clone())
+        .await?;
+    assert!(matches!(
+        commit_only.modified,
+        GitFileSide::Unavailable { .. }
+    ));
+    let ordinary = store
+        .git_compare_file_versions(
+            checkout.clone(),
+            utf8_path.into(),
+            Some(GitFileVersion::Commit {
+                sha: head.clone(),
+                path: utf8_path.into(),
+            }),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert!(ordinary.comment_scope.is_some());
+
+    let after = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?;
+    assert_eq!(serde_json::to_value(after)?, serde_json::to_value(before)?);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join(path))?, disk_bytes);
+
+    fs::write(root.join(path), [0xff, 0xfe, 0x00])?;
+    let invalid = store
+        .git_compare_file_versions(
+            checkout,
+            path.into(),
+            Some(selected),
+            GitFileVersion::Worktree,
+        )
+        .await?;
+    assert!(matches!(invalid.modified, GitFileSide::Unavailable { .. }));
+    assert!(invalid.comment_scope.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("hunks");

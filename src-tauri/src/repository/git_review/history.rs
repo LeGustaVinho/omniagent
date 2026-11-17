@@ -87,31 +87,50 @@ impl Store {
         let scope = self.git_review_scope(checkout).await?;
         tokio::task::spawn_blocking(move || {
             let review = LiveReview::open(&scope)?;
-            let original = match base.as_ref() {
-                Some(version) => read_version(&review, &path, version)?,
-                None => GitFileSide::Missing,
+            let (original, modified, transcoded) = match (&base, &revised) {
+                (
+                    Some(GitFileVersion::Commit {
+                        sha,
+                        path: committed_path,
+                    }),
+                    GitFileVersion::Worktree,
+                ) => {
+                    require_file_revision(&review, sha, committed_path)?;
+                    content::read_commit_and_worktree_preview(&review, sha, committed_path, &path)?
+                }
+                _ => {
+                    let original = match base.as_ref() {
+                        Some(version) => read_version(&review, &path, version)?,
+                        None => GitFileSide::Missing,
+                    };
+                    (original, read_version(&review, &path, &revised)?, false)
+                }
             };
-            let modified = read_version(&review, &path, &revised)?;
             review.verify()?;
-            let uses_live_revision = base
-                .as_ref()
-                .is_some_and(|version| !matches!(version, GitFileVersion::Commit { .. }))
-                || !matches!(revised, GitFileVersion::Commit { .. });
-            let original_path = base
-                .as_ref()
-                .map_or(path.as_str(), |version| version.path(&path));
-            let modified_path = revised.path(&path);
-            let comment_scope = GitReviewCommentScope::from_comparison(
-                &scope.id,
-                &path,
-                GitReviewCommentSource::Versions {
-                    base: base.clone(),
-                    revised: revised.clone(),
-                    revision: uses_live_revision.then(|| review.revision.clone()),
-                },
-                (original_path, &original),
-                (modified_path, &modified),
-            )?;
+            // Review digests attest to the original file bytes. The UTF-16 preview is read-only.
+            let comment_scope = if transcoded {
+                None
+            } else {
+                let uses_live_revision = base
+                    .as_ref()
+                    .is_some_and(|version| !matches!(version, GitFileVersion::Commit { .. }))
+                    || !matches!(revised, GitFileVersion::Commit { .. });
+                let original_path = base
+                    .as_ref()
+                    .map_or(path.as_str(), |version| version.path(&path));
+                let modified_path = revised.path(&path);
+                GitReviewCommentScope::from_comparison(
+                    &scope.id,
+                    &path,
+                    GitReviewCommentSource::Versions {
+                        base: base.clone(),
+                        revised: revised.clone(),
+                        revision: uses_live_revision.then(|| review.revision.clone()),
+                    },
+                    (original_path, &original),
+                    (modified_path, &modified),
+                )?
+            };
             Ok(GitFileVersionComparison {
                 revision: review.revision,
                 original,
@@ -258,12 +277,16 @@ fn read_version(review: &LiveReview, path: &str, version: &GitFileVersion) -> Re
         GitFileVersion::Index => content::read_index(review, path),
         GitFileVersion::Worktree => content::read_worktree(&review.root, path),
         GitFileVersion::Commit { sha, path } => {
-            validate_oid(sha)?;
-            validate_path(path)?;
-            require_commit(&review.view, sha)?;
+            require_file_revision(review, sha, path)?;
             content::read_tree(&review.view, sha, path)
         }
     }
+}
+
+fn require_file_revision(review: &LiveReview, sha: &str, path: &str) -> Result<()> {
+    validate_oid(sha)?;
+    validate_path(path)?;
+    require_commit(&review.view, sha)
 }
 
 pub(super) fn require_commit(view: &IsolatedGit, sha: &str) -> Result<()> {

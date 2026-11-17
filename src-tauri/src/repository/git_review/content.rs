@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::configuration::{open_locked_local_file, plain_metadata};
 
-use super::super::{documents::lock_directories, isolated_git::IsolatedGit};
+use super::super::{
+    documents::{DocumentKind, RawDocument, lock_directories},
+    isolated_git::IsolatedGit,
+};
 use super::{
     GitPathStatus, GitReviewHunk, GitReviewRevision, LiveReview, comments::GitReviewCommentScope,
     hunks, patch::GitReviewPatch, validate_oid,
@@ -133,6 +136,15 @@ pub(super) fn read_head(review: &LiveReview, path: &str) -> Result<GitFileSide> 
 }
 
 pub(super) fn read_tree(view: &IsolatedGit, revision: &str, path: &str) -> Result<GitFileSide> {
+    read_tree_using(view, revision, path, classify)
+}
+
+fn read_tree_using(
+    view: &IsolatedGit,
+    revision: &str,
+    path: &str,
+    decode: impl FnOnce(Vec<u8>) -> GitFileSide,
+) -> Result<GitFileSide> {
     let bytes = view.read(&["--literal-pathspecs", "ls-tree", "-z", revision, "--", path])?;
     let entries = String::from_utf8(bytes)?;
     for row in entries.split_terminator('\0') {
@@ -144,12 +156,21 @@ pub(super) fn read_tree(view: &IsolatedGit, revision: &str, path: &str) -> Resul
         }
         let parts: Vec<_> = metadata.split_ascii_whitespace().collect();
         ensure!(parts.len() == 3, "Git returned invalid tree metadata");
-        return read_blob(view, parts[0], parts[2]);
+        return read_blob_using(view, parts[0], parts[2], decode);
     }
     Ok(GitFileSide::Missing)
 }
 
 pub(super) fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<GitFileSide> {
+    read_blob_using(view, mode, oid, classify)
+}
+
+fn read_blob_using(
+    view: &IsolatedGit,
+    mode: &str,
+    oid: &str,
+    decode: impl FnOnce(Vec<u8>) -> GitFileSide,
+) -> Result<GitFileSide> {
     if !matches!(mode, "100644" | "100755") {
         return Ok(GitFileSide::unavailable(
             "This Git entry is not an ordinary text file.",
@@ -164,10 +185,18 @@ pub(super) fn read_blob(view: &IsolatedGit, mode: &str, oid: &str) -> Result<Git
             "This Git file exceeds the text preview limit.",
         ));
     }
-    Ok(classify(view.read(&["cat-file", "blob", oid])?))
+    Ok(decode(view.read(&["cat-file", "blob", oid])?))
 }
 
 pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
+    read_worktree_using(root, path, classify)
+}
+
+fn read_worktree_using(
+    root: &Path,
+    path: &str,
+    decode: impl FnOnce(Vec<u8>) -> GitFileSide,
+) -> Result<GitFileSide> {
     let path: PathBuf = root.join(path).components().collect();
     let directories = match plain_metadata(&path) {
         Ok(None) => return Ok(GitFileSide::Missing),
@@ -197,7 +226,7 @@ pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
     };
     let file = open_locked_local_file(&path);
     match file {
-        Ok(file) => read_locked_worktree(&file),
+        Ok(file) => read_locked_worktree_using(&file, decode),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(GitFileSide::Missing),
         Err(error) => Ok(GitFileSide::unavailable(format!(
             "The worktree file could not be opened safely: {error}"
@@ -206,9 +235,40 @@ pub(super) fn read_worktree(root: &Path, path: &str) -> Result<GitFileSide> {
 }
 
 pub(super) fn read_locked_worktree(file: &File) -> Result<GitFileSide> {
+    read_locked_worktree_using(file, classify)
+}
+
+fn read_locked_worktree_using(
+    file: &File,
+    decode: impl FnOnce(Vec<u8>) -> GitFileSide,
+) -> Result<GitFileSide> {
     let mut bytes = Vec::new();
     file.take(MAX_DIFF_SIDE_BYTES + 1).read_to_end(&mut bytes)?;
-    Ok(classify(bytes))
+    Ok(decode(bytes))
+}
+
+pub(super) fn read_commit_and_worktree_preview(
+    review: &LiveReview,
+    commit: &str,
+    committed_path: &str,
+    worktree_path: &str,
+) -> Result<(GitFileSide, GitFileSide, bool)> {
+    let mut transcoded = false;
+    let mut decode = |bytes: Vec<u8>| {
+        if bytes.len() as u64 <= MAX_DIFF_SIDE_BYTES
+            && matches!(bytes.as_slice(), [0xff, 0xfe, ..] | [0xfe, 0xff, ..])
+            && let Ok(document) = RawDocument::from_bytes(DocumentKind::Source, &bytes)
+        {
+            transcoded = true;
+            return GitFileSide::Text {
+                content: document.raw_text(),
+            };
+        }
+        classify(bytes)
+    };
+    let original = read_tree_using(&review.view, commit, committed_path, &mut decode)?;
+    let modified = read_worktree_using(&review.root, worktree_path, decode)?;
+    Ok((original, modified, transcoded))
 }
 
 fn classify(bytes: Vec<u8>) -> GitFileSide {
