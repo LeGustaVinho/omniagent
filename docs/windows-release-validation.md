@@ -2,6 +2,10 @@
 
 Evidence reviewed on 2026-11-16. **Verified** covers the specific operation, build, profile and environment recorded. **Pending** means the release run or its receipt is outstanding. **Blocked** identifies a missing host, runner or supported containment path. The Windows release qualification remains open.
 
+## Deterministic regression suite
+
+The Windows Server 2022 CI run at `b858d26` passed the Cargo, frontend and desktop checks. The desktop harness used WebdriverIO in WebDriver Classic mode with `tauri-driver` and the version-matched Edge driver for WebView2 Evergreen. On Windows 10 22H2 x64, the same desktop suite passed all seven cases, and TypeScript and all 293 Vitest and Testing Library cases passed at `1fe3b53`. The test app uses a disposable profile and controlled CLI fixtures. [Windows CI run](https://github.com/LeGustaVinho/omniagent/actions/runs/43999626211) · [Windows workflow](../.github/workflows/windows.yml) · [Desktop fixtures](../tests/desktop/workbench-smoke.mjs)
+
 ## Host and runner matrix
 
 | Environment | Observed build and runner | Installed release | Provider qualification |
