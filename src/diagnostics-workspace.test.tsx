@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { RealDiagnostics } from "@/desktop-dock";
+import { downloadArtifact } from "@/download-artifact";
 import { FixtureRunPanel } from "@/fixture-panels";
 import { SimulationDiagnostics } from "@/inspection-panel";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
@@ -12,11 +13,13 @@ import { useWorkspace } from "@/workspace-state";
 const { getVersion, invoke } = vi.hoisted(() => ({ getVersion: vi.fn(), invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/download-artifact", () => ({ downloadArtifact: vi.fn() }));
 
 afterEach(() => {
   cleanup();
   getVersion.mockReset();
   invoke.mockReset();
+  vi.mocked(downloadArtifact).mockReset();
   useWorkspace.setState({ checkout: null });
 });
 
@@ -115,4 +118,64 @@ it("copies only the selected fixture's events and keeps protected input display 
   expect(await screen.findByText("Output for second-fixture")).toBeTruthy();
   expect(screen.queryByText("Protected input for first-fixture")).toBeNull();
   expect(invoke).not.toHaveBeenCalledWith("fixture_input_evidence", { checkoutId: exampleCheckout.checkoutId, runId: "second-fixture" });
+});
+
+it("filters fixture events by channel and exports the exact visible recorded previews with scope", async () => {
+  useWorkspace.setState({ checkout: exampleCheckout });
+  const { projectId, checkoutId } = exampleCheckout;
+  const run = { id: "recorded-fixture", projectId, checkoutId, turnId: "recorded-turn", status: "failed" };
+  const event = (seq: string, data: unknown, runId = run.id) => ({ seq, runId, turnId: run.turnId, data });
+  const failure = event("9007199254740993192", { type: "output", stream: "stderr", preview: "  diagnostic [redacted]…" });
+  const status = event("9007199254740993193", { type: "status", status: "failed" });
+  const recentEvents = [
+    event("9007199254740993191", { type: "output", stream: "stdout", preview: "Output from selected run" }),
+    failure,
+    status,
+    event("9007199254740993194", { type: "output", stream: "stderr", preview: "Unrelated run text" }, "other"),
+  ];
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "run_snapshot") return { cursor: recentEvents.at(-1)?.seq, runs: [run], recentEvents };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}>
+    <FixtureRunPanel {...({ params: { runId: run.id } } as Parameters<typeof FixtureRunPanel>[0])} />
+  </QueryClientProvider>);
+  const fixture = within(await screen.findByRole("region", { name: "Run recorded" }));
+  const events = within(await fixture.findByRole("list", { name: "Run events" }));
+  const preview = events.getByText("diagnostic [redacted]…");
+  const user = userEvent.setup();
+  fireEvent.contextMenu(preview);
+  await user.click(screen.getByRole("menuitem", { name: "Copy event as JSON" }));
+  expect(JSON.parse(await navigator.clipboard.readText())).toEqual(failure);
+
+  fireEvent.contextMenu(preview);
+  await user.click(screen.getByRole("menuitem", { name: "Show only stderr events" }));
+  expect((fixture.getByRole("combobox", { name: "Fixture event filter" }) as HTMLSelectElement).value).toBe("stderr");
+  expect(events.getAllByRole("listitem")).toHaveLength(1);
+  expect(events.queryByText("Unrelated run text")).toBeNull();
+  expect(fixture.getByText(/Output previews may be redacted or shortened/)).toBeTruthy();
+  fireEvent.contextMenu(fixture.getByRole("heading"));
+  await user.click(screen.getByRole("menuitem", { name: "Copy visible fixture events as JSON" }));
+  const expected = { source: "fixture_recent_events", checkoutId, runId: run.id, filter: "stderr", output: "redacted_preview", events: [failure] };
+  expect(JSON.parse(await navigator.clipboard.readText())).toEqual(expected);
+  fireEvent.contextMenu(fixture.getByRole("heading"));
+  await user.click(screen.getByRole("menuitem", { name: "Download visible fixture events (.json)" }));
+  const [name, download] = vi.mocked(downloadArtifact).mock.calls[0]!;
+  expect(name).toBe("fixture-recorded-fixture-events-stderr.json");
+  expect(download.type).toBe("application/json");
+  const fileText = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsText(download);
+  });
+  expect(JSON.parse(fileText)).toEqual(expected);
+  await user.selectOptions(fixture.getByRole("combobox", { name: "Fixture event filter" }), "status");
+  expect(events.getAllByRole("listitem")).toHaveLength(1);
+  expect(events.getByText("Failed")).toBeTruthy();
+  await user.selectOptions(fixture.getByRole("combobox", { name: "Fixture event filter" }), "stdout");
+  expect(events.getAllByRole("listitem")).toHaveLength(1);
+  expect(events.getByText("Output from selected run")).toBeTruthy();
+  expect(invoke.mock.calls.every(([command]) => command === "run_snapshot")).toBe(true);
 });

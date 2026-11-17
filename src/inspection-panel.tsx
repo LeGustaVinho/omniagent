@@ -9,6 +9,7 @@ import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { DownstreamWait } from "@/bindings/DownstreamWait";
 import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { downloadArtifact } from "@/download-artifact";
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationApprovalEvidence, ObservedConversationResponse } from "@/conversation-response-evidence";
 import {
@@ -107,14 +108,14 @@ function RecordedCommandRun({ run, onClose, navigation }: {
     actions={<Button type="button" variant="ghost" onClick={onClose}>Close</Button>}
     pages={live ? undefined : [
       { id: "overview", name: "Overview", content: overview },
-      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} runId={runId} openActivity={navigation.openActivity} /> },
+      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} checkoutId={run.checkoutId} runId={runId} openActivity={navigation.openActivity} /> },
     ]}>
     {overview}
   </RunInspectionLayout>;
 }
 
-function RecordedCommandOutput({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
-  const { copy, feedback } = useContextActionFeedback();
+function RecordedCommandOutput({ projectId, checkoutId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "checkoutId" | "runId" | "openActivity">) {
+  const { copy, feedback, run: perform } = useContextActionFeedback();
   const [compare, setCompare] = useState(false);
   const outputs = useQuery({
     queryKey: ["command-job-output", projectId, runId],
@@ -124,20 +125,30 @@ function RecordedCommandOutput({ projectId, runId, openActivity }: Pick<Recorded
   if (outputs.isPending) return <p role="status">Loading command output…</p>;
   if (outputs.isError) return <p role="alert">{String(outputs.error)}</p>;
   if (!outputs.data) return <p>Command output is unavailable.</p>;
-  const { process, truncated, stdout, stderr } = outputs.data;
+  const captured = outputs.data;
+  const { process, truncated, stdout, stderr } = captured;
   const streams = [
-    { name: "Standard output", text: stdout },
-    { name: "Standard error", text: stderr },
+    { name: "Standard output", channel: "stdout", text: stdout },
+    { name: "Standard error", channel: "stderr", text: stderr },
   ].filter(({ text }) => text);
   const compareOutput = { label: "Compare saved attempt output…", run: () => setCompare(true) };
+  const suffix = truncated ? "-partial" : "";
+  const downloadRecord = { label: "Download captured output record (.json)", run: () => void perform(async () => {
+    const json = JSON.stringify({ projectId, checkoutId, runId, ...captured }, null, 2);
+    downloadArtifact(`run-${runId}-output${suffix}.json`, new Blob([json], { type: "application/json" }));
+  }) };
   return <>
-    {process && <ContextActions label="Command exit code" groups={[[compareOutput], [{ label: "Copy exit code", run: () => copy(String(process.code)) }]]}>
+    {process && <ContextActions label="Command exit code" groups={[[compareOutput], [
+      { label: "Copy exit code", run: () => copy(String(process.code)) }, downloadRecord,
+    ]]}>
       <p>Exit code {process.code}</p>
     </ContextActions>}
-    {truncated && <ContextActions label="Output capture" groups={process || streams.length ? [] : [[compareOutput]]}>
+    {truncated && <ContextActions label="Output capture" groups={process || streams.length ? [] : [[compareOutput], [downloadRecord]]}>
       <p>Output capture is incomplete.</p>
     </ContextActions>}
-    {streams.map(({ name, text }) => <ContextActions key={name} label={name} groups={[[
+    {(Boolean(process) || truncated || streams.length > 0) &&
+      <p className="text-xs text-muted-foreground">Downloads use the text saved for this attempt. The JSON record includes its project, checkout and run IDs and capture status.</p>}
+    {streams.map(({ name, channel, text }) => <ContextActions key={channel} label={name} groups={[[
       compareOutput,
     ], [
       { label: `Copy ${name.toLowerCase()}`, run: () => copy(text) },
@@ -145,6 +156,11 @@ function RecordedCommandOutput({ projectId, runId, openActivity }: Pick<Recorded
         [process && `Exit code ${process.code}`, truncated && "Output capture is incomplete.",
           ...streams.map(({ name, text }) => `${name}\n${text}`)].filter(Boolean).join("\n\n"),
       ) }] : []),
+    ], [
+      { label: `Download ${name.toLowerCase()} (.log)`, run: () => void perform(async () => {
+        downloadArtifact(`run-${runId}-${channel}${suffix}.log`, new Blob([text], { type: "text/plain;charset=utf-8" }));
+      }) },
+      downloadRecord,
     ]]}>
       <div className="min-w-0 flex-1"><h3>{name}</h3><pre>{text}</pre></div>
     </ContextActions>)}

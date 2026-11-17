@@ -5,13 +5,24 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { RunRecord } from "@/bindings/RunRecord";
+import { downloadArtifact } from "@/download-artifact";
 import { RunInspector } from "@/inspection-panel";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@/download-artifact", () => ({ downloadArtifact: vi.fn(), decodeArtifactBytes: vi.fn() }));
 vi.mock("@/git-diff-view", () => ({ MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
   <div><pre aria-label="Original evidence">{file.original}</pre><pre aria-label="Modified evidence">{file.modified}</pre></div> }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
+
+function readDownload(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsText(blob);
+  });
+}
 
 it("opens recorded run pages through the same Activity tabs as Simulate and loads exact evidence on selection", async () => {
   const conversationId = "recorded-conversation";
@@ -79,7 +90,7 @@ it("copies captured command output and failure evidence for the exact inspected 
   const projectId = exampleCheckout.projectId;
   const run: RunRecord = { id: "command-attempt", projectId, checkoutId: exampleCheckout.checkoutId, turnId: "command-turn", status: "failed" };
   const process = { code: 17, cancelled: false };
-  const stdout = "  First line\nSecond line\n";
+  const stdout = "  First line\r\nSecond line — ç\r\n";
   const stderr = "Checks failed\n";
   const openActivity = vi.fn();
   vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -119,6 +130,25 @@ it("copies captured command output and failure evidence for the exact inspected 
   expect(await navigator.clipboard.readText()).toBe(`Exit code 17\n\nOutput capture is incomplete.\n\nStandard output\n${stdout}\n\nStandard error\n${stderr}`);
   expect(activity.getByText("Output capture is incomplete.")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("command_job_output", { projectId, runId: run.id });
+  expect(activity.getByText(/The JSON record includes its project, checkout and run IDs/)).toBeTruthy();
+  fireEvent.contextMenu(activity.getByRole("heading", { name: "Standard output" }));
+  await user.click(screen.getByRole("menuitem", { name: "Download standard output (.log)" }));
+  const [outputName, outputBlob] = vi.mocked(downloadArtifact).mock.calls[0]!;
+  expect(outputName).toBe("run-command-attempt-stdout-partial.log");
+  expect(outputBlob.type).toBe("text/plain;charset=utf-8");
+  expect(await readDownload(outputBlob)).toBe(stdout);
+  fireEvent.contextMenu(activity.getByRole("heading", { name: "Standard error" }));
+  await user.click(screen.getByRole("menuitem", { name: "Download standard error (.log)" }));
+  const [errorName, errorBlob] = vi.mocked(downloadArtifact).mock.calls[1]!;
+  expect(errorName).toBe("run-command-attempt-stderr-partial.log");
+  expect(await readDownload(errorBlob)).toBe(stderr);
+  fireEvent.contextMenu(activity.getByText("Exit code 17"));
+  await user.click(screen.getByRole("menuitem", { name: "Download captured output record (.json)" }));
+  const [recordName, recordBlob] = vi.mocked(downloadArtifact).mock.calls[2]!;
+  expect(recordName).toBe("run-command-attempt-output-partial.json");
+  expect(JSON.parse(await readDownload(recordBlob))).toEqual({
+    projectId, checkoutId: run.checkoutId, runId: run.id, process, stdout, stderr, truncated: true,
+  });
 
   fireEvent.contextMenu(activity.getByText("Exit code 17"));
   await user.click(screen.getByRole("menuitem", { name: "Compare saved attempt output…" }));
