@@ -720,6 +720,63 @@ it("starts Plan Mode delivery from the reviewed note revision and opens only its
   expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "real-task");
 });
 
+it("opens existing planning and a real linked Task for the clicked note's saved revision without launching work", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "repository_note_planning" && (args as { revisionId: string }).revisionId === "checklist-1") {
+      expect(args).toEqual({ projectId: props.checkout.projectId, checkoutId, revisionId: "checklist-1" });
+      return [{ runId: "earlier-planning-run", task: null },
+        { runId: "delivery-run", task: { id: "linked-task", title: "Verify checklist" } }];
+    }
+    return repository(command, args);
+  });
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  const note = await tree.findByRole("button", { name: "Checklist.md" });
+  async function planningDialog() {
+    fireEvent.contextMenu(note);
+    await user.click(await screen.findByRole("menuitem", { name: "Open linked planning / delivery…" }));
+    return within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
+  }
+  const dialog = await planningDialog();
+  expect(dialog.getByText(/notes\/Checklist\.md · checklist-1/)).toBeTruthy();
+  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
+  expect(openWorkspace).not.toHaveBeenCalled();
+  await user.click(await dialog.findByRole("button", { name: "Open planning · earlier-" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", "earlier-planning-run");
+
+  const reopened = await planningDialog();
+  await user.click(await reopened.findByRole("button", { name: "Open Task Verify checklist" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "linked-task");
+  expect(ipc).not.toHaveBeenCalledWith("start_repository_delivery", expect.anything());
+  expect(ipc).not.toHaveBeenCalledWith("launch_workflow_manual", expect.anything());
+});
+
+it("shows the saved revision's empty planning links while the tab has a draft", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Unpublished decision." } }));
+  fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
+  const plan = await screen.findByRole("menuitem", { name: "Plan from note…" });
+  expect(plan.getAttribute("aria-disabled")).toBe("true");
+  await user.click(screen.getByRole("menuitem", { name: "Open linked planning / delivery…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
+  expect(await dialog.findByText("No planning runs are linked to this saved revision.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("repository_note_planning", { projectId: props.checkout.projectId, checkoutId, revisionId: "release-1" });
+  expect(view.state.doc.toString()).toBe(releaseSource + "Unpublished decision.");
+});
+
 it.each(["Live Preview", "Reading"])("opens an unopened note from the full-text index in %s", async (mode) => {
   mockRepository();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });

@@ -39,7 +39,7 @@ import { ResizablePanel } from "@/panel-resize";
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
-import { RepositoryNotePlanning, useRepositoryNotePlans } from "@/repository-note-planning";
+import { LinkedRepositoryNotePlanning, RepositoryNotePlanning, useRepositoryNotePlans } from "@/repository-note-planning";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { asNoteLocation, linkPreviewValue, resolveRepositoryLink, suggestRepositoryLinks, useRepositoryLinkPreviews,
   type IndexedLinkLocation, type IndexedLinkResolution, type IndexedNoteDetails, type IndexedNoteRelationships } from "@/repository-note-links";
@@ -77,6 +77,7 @@ type KnowledgeDialog =
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "launch"; source: NoteRevision }
   | { kind: "plan"; source: NoteRevision }
+  | { kind: "linkedPlanning"; source: NoteRevision; ownerPanel?: FilePanelApi }
   | { kind: "linkedTasks" }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
   | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number; manual?: boolean }
@@ -500,11 +501,18 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     void loadNote(favorite.path).then((path) => { if (request === lastOpen.current) navigate(path); });
   };
 
-  const startFromSavedNote = (path: string, kind: "plan" | "launch") => {
+  const openSavedNoteAction = (path: string, kind: "plan" | "launch" | "linkedPlanning", ownerPanel?: FilePanelApi) => {
+    const request = ++lastOpen.current;
     void loadNote(path).then((canonical) => {
+      if (request !== lastOpen.current) return;
       const selected = canonical ? getNote(canonical) : undefined;
-      if (selected && !selected.sourceProblem && !isDirty(selected)) setDialog({ kind, source: selected.base });
-      else setProblem("Save the note and resolve external changes before using its revision.");
+      if (!selected || selected.sourceProblem || (kind !== "linkedPlanning" && isDirty(selected))) {
+        setProblem(kind === "linkedPlanning" ? "The saved note revision is unavailable."
+          : "Save the note and resolve external changes before using its revision.");
+        return;
+      }
+      if (kind === "linkedPlanning") setDialog({ kind, source: selected.base, ownerPanel });
+      else setDialog({ kind, source: selected.base });
     });
   };
   const mergeActions = (source: string, options?: { destination?: string; ownerPanel?: FilePanelApi }): MenuGroups[number] => {
@@ -538,8 +546,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       ...(external === undefined ? [] : [{ label: "Review external change", run: () => reviewExternalChange(path, external) }]),
     ], [
       ...(!simulated ? [
-        { label: "Plan from note…", disabled: isDirty(notes[path]), run: () => startFromSavedNote(path, "plan") },
-        { label: "Run workflow from note…", disabled: isDirty(notes[path]), run: () => startFromSavedNote(path, "launch") },
+        { label: "Plan from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "plan") },
+        { label: "Run workflow from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "launch") },
+        { label: "Open linked planning / delivery…", disabled: Boolean(repository.notes[path]?.sourceProblem),
+          run: () => openSavedNoteAction(path, "linkedPlanning", ownerPanel) },
       ] : []),
     ]];
   };
@@ -1045,6 +1055,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
 
       {dialog?.kind === "plan" && <RepositoryNotePlanning projectId={checkout.projectId} source={dialog.source}
         openWorkspace={openWorkspace} onClose={closeDialog} />}
+      {dialog?.kind === "linkedPlanning" && <LinkedRepositoryNotePlanning projectId={checkout.projectId} source={dialog.source}
+        openWorkspace={openWorkspace} onClose={closeDialog} ownerPanel={dialog.ownerPanel} />}
       {dialog?.kind === "linkedTasks" && <FileDialog title="Linked tasks" description="Choose a Task linked to this saved note revision." onClose={closeDialog}>
         <ul className="pipeline-stack">{linkedTasks.map(({ id, title }) => <li key={id}>
           <button type="button" className="fw-btn" onClick={() => { closeDialog(); openWorkspace("tasks", id); }}>{title}</button>
