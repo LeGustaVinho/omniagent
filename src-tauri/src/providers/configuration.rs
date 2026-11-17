@@ -8,12 +8,12 @@ use std::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
     },
-    path::{Path, PathBuf},
+    path::{Component, Components, Path, PathBuf, Prefix},
 };
 
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, GetFinalPathNameByHandleW,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, GetFinalPathNameByHandleW, GetLongPathNameW,
 };
 
 use super::{
@@ -394,30 +394,81 @@ fn open_local_file(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs:
             "expected a local file",
         ));
     }
-    // Check the opened handle as an ancestor could have changed after discovery.
-    let mut final_name = vec![0u16; path.as_os_str().encode_wide().count() + 8];
-    let length = unsafe {
-        GetFinalPathNameByHandleW(
-            file.as_raw_handle(),
-            final_name.as_mut_ptr(),
-            final_name.len() as u32,
-            0,
-        )
-    } as usize;
-    if length == 0 || length >= final_name.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "could not confirm local file path",
-        ));
-    }
-    let actual = PathBuf::from(OsString::from_wide(&final_name[..length]));
-    if dunce::simplified(&actual) != dunce::simplified(path) {
+    // Compare the opened handle with the requested name to detect changes in its ancestors.
+    let actual = windows_path(|buffer, capacity| unsafe {
+        GetFinalPathNameByHandleW(file.as_raw_handle(), buffer, capacity, 0)
+    })?;
+    if !same_file_path(&actual, path)
+        && !expand_local_dos_path(path).is_ok_and(|expanded| same_file_path(&actual, &expanded))
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "local file path changed",
         ));
     }
     Ok(file)
+}
+
+fn same_file_path(actual: &Path, expected: &Path) -> bool {
+    dunce::simplified(actual) == dunce::simplified(expected)
+        || strip_local_dos_prefix(actual, expected)
+            .is_some_and(|suffix| suffix.as_os_str().is_empty())
+}
+
+/// Compare exact components, treating `C:\` and `\\?\C:\` as the same local drive.
+pub(crate) fn strip_local_dos_prefix<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    let (drive, mut suffix) = local_dos_components(path)?;
+    let (root_drive, mut prefix) = local_dos_components(root)?;
+    (drive == root_drive && prefix.all(|component| suffix.next() == Some(component)))
+        .then(|| suffix.as_path())
+}
+
+fn local_dos_components(path: &Path) -> Option<(u8, Components<'_>)> {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return None;
+    };
+    match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) if path.is_absolute() => {
+            Some((drive, components))
+        }
+        _ => None,
+    }
+}
+
+/// Expand local DOS aliases without resolving junctions or symbolic links.
+pub(crate) fn expand_local_dos_path(path: &Path) -> io::Result<PathBuf> {
+    require_local_dos_path(path)?;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "local path contains a NUL character",
+        ));
+    }
+    wide.push(0);
+    windows_path(|buffer, capacity| unsafe { GetLongPathNameW(wide.as_ptr(), buffer, capacity) })
+}
+
+fn windows_path(read: impl Fn(*mut u16, u32) -> u32) -> io::Result<PathBuf> {
+    let mut buffer = vec![0; 260];
+    loop {
+        let length = read(buffer.as_mut_ptr(), buffer.len() as u32) as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < buffer.len() {
+            return Ok(PathBuf::from(OsString::from_wide(&buffer[..length])));
+        }
+        let required = length.max(buffer.len() + 1);
+        if required > 32_768 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "could not confirm local file path",
+            ));
+        }
+        buffer.resize(required, 0);
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +480,25 @@ mod tests {
         skills::SkillCatalog,
     };
     use serde_json::json;
+
+    #[test]
+    fn opens_a_verified_path_longer_than_the_win32_initial_buffer() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = dunce::canonicalize(temporary.path())?;
+        assert!(
+            matches!(root.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+        );
+        let directory = root.join("first".repeat(24)).join("second".repeat(24));
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("pin.txt");
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        fs::write(&path, b"pinned file")?;
+        let mut file = open_locked_local_file(&path)?;
+        let mut bytes = String::new();
+        file.read_to_string(&mut bytes)?;
+        assert_eq!(bytes, "pinned file");
+        Ok(())
+    }
 
     #[test]
     fn effective_revisions_follow_relative_scope_and_file_changes() -> anyhow::Result<()> {
@@ -517,20 +587,19 @@ mod tests {
     }
 }
 
-pub(crate) fn plain_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
-    // Do not follow a checkout junction into user files or a network share.
-    use std::path::{Component, Prefix};
-    if !path.is_absolute()
-        || !matches!(
-            path.components().next(),
-            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
-        )
-    {
+fn require_local_dos_path(path: &Path) -> io::Result<()> {
+    if local_dos_components(path).is_none() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "configuration path is not local",
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn plain_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    // Do not follow a checkout junction into user files or a network share.
+    require_local_dos_path(path)?;
     let mut current = PathBuf::new();
     let mut last = None;
     for component in path.components() {

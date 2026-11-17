@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     protection,
-    providers::configuration::{open_locked_local_file, plain_metadata},
+    providers::configuration::{
+        expand_local_dos_path, open_locked_local_file, plain_metadata, strip_local_dos_prefix,
+    },
     store::Store,
 };
 
@@ -160,8 +162,15 @@ fn capture(
     checkout: String,
     max: u64,
 ) -> Result<(RepositoryMarkdown, Vec<u8>)> {
-    let path = dunce::simplified(selected)
-        .strip_prefix(dunce::simplified(root))
+    ensure!(
+        !selected
+            .components()
+            .any(|part| matches!(part, Component::ParentDir)),
+        "select a Markdown file inside the current checkout"
+    );
+    let selected = expand_local_dos_path(selected)
+        .context("select a Markdown file inside the current checkout")?;
+    let path = strip_local_dos_prefix(&selected, root)
         .context("select a Markdown file inside the current checkout")?;
     let relative = path.to_str().context("the Markdown path is not UTF-8")?;
     ensure!(
@@ -283,4 +292,81 @@ pub(crate) fn bind_job_markdown(db: &Connection, job: &str, revision: &str) -> R
         "the Markdown revision requires a pipeline job"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        process::Command,
+    };
+
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    use super::*;
+
+    #[test]
+    fn captures_short_dos_paths_without_following_junctions_or_leaving_checkout() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let directory = dunce::canonicalize(temporary.path())?;
+        let root = directory.join("Repository with a very long Windows checkout name");
+        fs::create_dir(&root)?;
+        let initialized = Command::new(super::super::git_path()?)
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .output()?;
+        ensure!(
+            initialized.status.success(),
+            "could not initialize the fixture checkout"
+        );
+        let selected = root.join("Release Overview.md");
+        fs::write(&selected, "# Pinned release note\n")?;
+        let short = short_path(&selected)?;
+        // NTFS can disable allocation of new DOS names for the volume.
+        assert_eq!(dunce::simplified(&expand_local_dos_path(&short)?), selected);
+        drop(open_locked_local_file(&short)?);
+        let (document, _) = capture(&root, &short, "checkout".into(), 4096)?;
+        assert_eq!(document.revision.relative_path, "Release Overview.md");
+        assert_eq!(document.markdown, "# Pinned release note\n");
+        let mut with_nul = short.into_os_string();
+        with_nul.push("\0other.md");
+        assert!(capture(&root, Path::new(&with_nul), "checkout".into(), 4096).is_err());
+
+        let outside = directory.join("Outside note directory");
+        fs::create_dir(&outside)?;
+        let outside_note = outside.join("Outside review.md");
+        fs::write(&outside_note, "outside")?;
+        let junction = root.join("Other checkout junction");
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:OMNIAGENT_MARKDOWN_TEST_LINK -Target $env:OMNIAGENT_MARKDOWN_TEST_TARGET -ErrorAction Stop | Out-Null"])
+            .env("OMNIAGENT_MARKDOWN_TEST_LINK", &junction)
+            .env("OMNIAGENT_MARKDOWN_TEST_TARGET", &outside)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "could not create the fixture junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let linked = junction.join("Outside review.md");
+        assert_eq!(dunce::simplified(&expand_local_dos_path(&linked)?), linked);
+        assert!(open_locked_local_file(&linked).is_err());
+        assert!(capture(&root, &linked, "checkout".into(), 4096).is_err());
+        assert!(capture(&root, &short_path(&outside_note)?, "checkout".into(), 4096).is_err());
+        fs::remove_dir(junction)?;
+        Ok(())
+    }
+
+    fn short_path(path: &Path) -> Result<PathBuf> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut buffer = vec![0u16; 32_768];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) }
+                as usize;
+        ensure!(
+            length > 0 && length < buffer.len(),
+            "could not get the fixture DOS filename"
+        );
+        Ok(std::ffi::OsString::from_wide(&buffer[..length]).into())
+    }
 }
