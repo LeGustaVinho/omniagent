@@ -1712,7 +1712,7 @@ impl<'a> Evaluation<'a> {
                 let git = inputs
                     .get("git")
                     .context("The diff review lost its Git inspection")?;
-                let candidate = &super::templates::diff::inspection(git)?.candidate;
+                let candidate = &super::diff::inspection(git)?.candidate;
                 crate::repository::verification::require_candidate_review_dispatch(
                     self.db, run_id, candidate,
                 )?;

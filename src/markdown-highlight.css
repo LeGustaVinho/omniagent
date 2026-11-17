@@ -3,19 +3,19 @@ pre > code.hljs :is(.hljs-comment, .hljs-quote) {
 }
 
 pre > code.hljs :is(.hljs-keyword, .hljs-selector-tag) {
-  color: light-dark(#a21d35, #ff8291);
+  color: var(--syntax-keyword);
 }
 
 pre > code.hljs :is(.hljs-string, .hljs-regexp, .hljs-doctag) {
-  color: light-dark(#075987, #a5d6ff);
+  color: var(--syntax-string);
 }
 
 pre > code.hljs :is(.hljs-title, .hljs-section, .hljs-type, .hljs-built_in, .hljs-selector-class, .hljs-selector-id) {
-  color: light-dark(#6037a0, #d2a8ff);
+  color: var(--syntax-type);
 }
 
 pre > code.hljs :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-variable, .hljs-link, .hljs-attr) {
-  color: light-dark(#015793, #79c0ff);
+  color: var(--syntax-number);
 }
 
 pre > code.hljs :is(.hljs-attribute, .hljs-name, .hljs-selector-attr, .hljs-selector-pseudo) {

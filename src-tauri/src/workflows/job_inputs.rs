@@ -223,7 +223,7 @@ impl Store {
                 let id = input.artifacts.get("git").context("Diff review needs a pinned Git inspection")?;
                 let artifact = load_artifact(db, &project, &workflow, id, ArtifactKind::GitInspection)?
                     .context("The pinned Git inspection is unavailable")?;
-                let candidate = &super::templates::diff::inspection(&artifact)?.candidate;
+                let candidate = &super::diff::inspection(&artifact)?.candidate;
                 ensure!(input.unit_id.is_none() && candidate.checkout_id == checkout
                     && crate::repository::verification::load_selected_candidate(
                         db, &project, &candidate.target.task_id, &candidate.id,

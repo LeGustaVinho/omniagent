@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
+import { waitFor } from "@testing-library/react";
 import { Orientation, type SerializedDockview } from "dockview-react";
 import { expect, test } from "vitest";
-import { dockviewLayoutInMain, noteWindowTarget, readNoteWindowTarget } from "@/file-editor-popout";
+import { dockviewLayoutInMain, mirrorEditorAppearance, noteWindowTarget, readNoteWindowTarget } from "@/file-editor-popout";
 
 type GridNode = SerializedDockview["grid"]["root"];
 const group = (id: string, views: string[], activeView?: string): GridNode => ({
@@ -53,4 +55,33 @@ test("passes an exact note path with characters used by anchors and URLs", () =>
   expect(readNoteWindowTarget(noteWindowTarget(path, 1))).toBe(path);
   expect(noteWindowTarget(path, 1)).not.toBe(noteWindowTarget(path, 2));
   expect(readNoteWindowTarget(path)).toBeUndefined();
+});
+
+test("updates Monaco's colors in an open detached editor", async () => {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const popup = frame.contentWindow!;
+  const theme = document.createElement("style");
+  theme.className = "monaco-colors";
+  theme.textContent = ".monaco-editor { background-color: #11151d; }";
+  document.head.append(theme);
+  const snapshot = popup.document.createElement("style");
+  snapshot.textContent = theme.sheet!.cssRules[0]!.cssText;
+  popup.document.head.append(snapshot);
+  const editor = popup.document.createElement("div");
+  editor.className = "monaco-editor";
+  popup.document.body.append(editor);
+
+  const stop = mirrorEditorAppearance(popup);
+  try {
+    expect(popup.getComputedStyle(editor).backgroundColor).toBe("rgb(17, 21, 29)");
+    expect(snapshot.isConnected).toBe(false);
+
+    theme.textContent = ".monaco-editor { background-color: #f7f9fd; }";
+    await waitFor(() => expect(popup.getComputedStyle(editor).backgroundColor).toBe("rgb(247, 249, 253)"));
+  } finally {
+    stop();
+    theme.remove();
+    frame.remove();
+  }
 });

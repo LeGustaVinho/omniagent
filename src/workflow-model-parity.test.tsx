@@ -88,7 +88,7 @@ it("persists the same shared model through template, stage, and ordered comparis
           history: [templateVersion] } };
       case "conversation_template_revision":
         return { revision: { templateId: "template", template, version: templateVersion }, history: [templateVersion] };
-      case "workflow_graph_registry": return definitions;
+      case "workflow_node_definitions": return definitions;
       case "inspect_workflow_authoring": return { id: "draft", conversationId: "chat", base: null, head: stage,
         request: { jobId: "job", runId: null, state: "saved", diagnostic: null } };
       case "save_workflow_authoring_draft":

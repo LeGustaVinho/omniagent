@@ -1,12 +1,15 @@
 use omniagent::{
     store::Store,
-    workflows::{NodeDefinition, authoring::ProjectWorkflowDraft, builtin_registry},
+    workflows::{BuiltinNode, NodeDefinition, authoring::ProjectWorkflowDraft, builtin_registry},
 };
 use tauri::State;
 
 #[tauri::command]
-pub fn workflow_graph_registry() -> Vec<NodeDefinition> {
+pub fn workflow_node_definitions(kinds: Vec<BuiltinNode>) -> Vec<NodeDefinition> {
     builtin_registry()
+        .into_iter()
+        .filter(|definition| kinds.contains(&definition.kind))
+        .collect()
 }
 
 #[tauri::command]

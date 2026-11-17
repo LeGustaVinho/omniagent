@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { Handle, MarkerType, MiniMap, Position, useUpdateNodeInternals,
   type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance, type Viewport } from "@xyflow/react";
-import { ChevronRight, CircleAlert, Focus, GitBranch, MessageSquareText, Plus, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
+import { ChevronRight, CircleAlert, Focus, GitBranch, MessageSquareText, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
-import { PipelineNodeCatalog, workflowRegistryGroups } from "@/pipeline-catalog";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineToolbar } from "@/pipeline-layout";
 import { WorkflowAgileFields } from "@/workflow-agile-editor";
 import { CommandNodeConfiguration } from "@/workflow-command";
@@ -189,8 +188,8 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
-  backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, toolbarActions, initialViewport, onViewportChange,
-  createPrompt, promptRoles, inspectPrompt }: {
+  backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
+  promptRoles, inspectPrompt }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -209,10 +208,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   deriveDisabled?: boolean;
   fullHeight?: boolean;
   toolbarStart?: ReactNode;
-  toolbarActions?: ReactNode;
   initialViewport?: Viewport;
   onViewportChange?: (viewport: Viewport) => void;
-  createPrompt?: (id: string) => ReusableReference;
   promptRoles?: Record<string, string>;
   inspectPrompt?: (id: string) => ReactNode;
 }) {
@@ -221,9 +218,6 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [selected, select] = useState(graph.nodes[0]?.id ?? "");
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
-  const addNodeButton = useRef<HTMLButtonElement>(null);
-  const [catalogOpen, showCatalog] = useState(false);
-  const [catalogPosition, setCatalogPosition] = useState<{ x: number; y: number }>();
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConnection>();
   const [suggestDataFor, setSuggestDataFor] = useState<WorkflowWire>();
@@ -322,42 +316,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     apply({ ...state, graph: patch(graph) });
   }
 
-  function closeCatalog() {
-    showCatalog(false);
-    requestAnimationFrame(() => addNodeButton.current?.focus({ preventScroll: true }));
-  }
-
   function allocateId(stem: string) {
     let id = stem;
     for (let ordinal = 2; issuedIds.current.has(id) || graph.nodes.some((node) => node.id === id); ordinal += 1) id = `${stem}-${ordinal}`;
     issuedIds.current.add(id);
     return id;
-  }
-
-  function add(definition: WorkflowDefinition) {
-    const id = allocateId(definition.kind.replaceAll("_", "-"));
-    apply({ ...state, layout: catalogPosition ? { ...layout, [id]: catalogPosition } : layout,
-      graph: { ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration: defaultConfiguration(definition.configuration) }] } });
-    setSelectedNodes([id]);
-    select(id);
-    closeCatalog();
-    setCatalogPosition(undefined);
-  }
-
-  function addPrompt() {
-    if (!createPrompt || disabled) return;
-    const id = allocateId("prompt");
-    apply({
-      ...state,
-      layout: catalogPosition ? { ...layout, [id]: catalogPosition } : layout,
-      nodeBindings: { ...state.nodeBindings, [id]: { reference: createPrompt(id) } },
-      graph: { ...graph, nodes: [...graph.nodes, { id, kind: "subflow", configuration: { kind: "none" } }] },
-    });
-    setSelectedNodes([id]);
-    select(id);
-    revealInspector((request) => request + 1);
-    closeCatalog();
-    setCatalogPosition(undefined);
   }
 
   function capture(nodes: WorkflowGraphNode[]): GraphSelection {
@@ -563,10 +526,6 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
 
   function menuGroups(target: CanvasTarget): { label: string; groups: MenuGroups } | undefined {
     if (target.kind === "pane") return { label: "Pipeline canvas", groups: [[
-      { label: "Add node…", disabled, run: () => {
-        setCatalogPosition(menu && flow ? flow.screenToFlowPosition(menu.point) : undefined);
-        showCatalog(true);
-      } },
       { label: "Fit graph to view", disabled: !flow, run: () => { void flow?.fitView({ padding: 0.15, maxZoom: 1 }); } },
       ...(clipboard ? [{ label: clipboard.nodes.length === 1 ? "Paste node here" : `Paste ${clipboard.nodes.length} nodes here`, disabled,
         run: () => insert(clipboard, menu && flow ? flow.screenToFlowPosition(menu.point) : undefined) }] : []),
@@ -619,19 +578,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           activate: (side, name) => activatePort(item.id, side, name) },
       } };
   });
-  const entryKind = catalog.some(({ kind }) => kind === "typed_start") && !graph.nodes.some(({ kind }) => kind === "start") ? "typed_start" : "start";
-  const nativeGroups = workflowRegistryGroups(catalog.filter(({ kind }) => !isStartNode(kind) || kind === entryKind), (entry) => {
-    const alreadyPresent = isStartNode(entry.kind) && graph.nodes.some(({ kind }) => isStartNode(kind));
-    return { action: alreadyPresent || disabled ? undefined : () => add(entry),
-      unavailable: alreadyPresent ? "Already on the canvas" : undefined };
-  });
-
   const settingsAvailable = Boolean(node && definition &&
     (definition.configuration !== "none" || node.kind === "subflow" || state.nodeBindings?.[node.id]));
-  const groups = createPrompt ? [{
-    title: "Prompt steps", entries: [{ id: "prompt", label: "Prompt", input: "Role and typed data", output: "Flow routes and evidence",
-      detail: "Run instructions with a versioned Role.", action: disabled ? undefined : addPrompt }],
-  }, ...nativeGroups] : nativeGroups;
   const wireCount = node ? graph.wires.filter(({ from, to }) => from.node === node.id || to.node === node.id).length : 0;
 
   return <section aria-label="Pipeline graph editor" className="workflow-graph" data-full-height={fullHeight || undefined} onKeyDown={(event) => {
@@ -646,13 +594,6 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
-      <Button type="button" ref={addNodeButton} variant="outline" disabled={disabled} aria-expanded={catalogOpen} onClick={() => {
-        setCatalogPosition(undefined);
-        showCatalog(!catalogOpen);
-      }}>
-        <Plus size={15} /> Add node
-      </Button>
-      {toolbarActions}
       <div className="workflow-history" aria-label="Graph edit history" role="group">
         <Button type="button" variant="ghost" aria-label="Undo graph edit" title="Undo graph edit" disabled={disabled || !history.past.length}
           onClick={() => restore("undo")}><Undo2 size={16} /></Button>
@@ -665,9 +606,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       </details>}
     </PipelineToolbar>
     <PipelineCanvasFrame className="workflow-graph-frame" canvasLabel="Pipeline graph canvas" inspectorLabel="Node configuration"
-      onClosePalette={closeCatalog} collapsibleInspector={fullHeight} inspectorRequest={inspectorRequest}
-      inspectorClassName="workflow-graph-inspector pipeline-form" palette={catalogOpen && !disabled ?
-        <section aria-label="Node catalog"><PipelineNodeCatalog groups={groups} searchLabel="Search node catalog" compact /></section> : undefined}
+      collapsibleInspector={fullHeight} inspectorRequest={inspectorRequest} inspectorClassName="workflow-graph-inspector pipeline-form"
       canvas={<div ref={canvas} tabIndex={0} aria-label="Workflow canvas actions" className="workflow-graph-canvas" onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         if (!(event.target instanceof Element)) return;

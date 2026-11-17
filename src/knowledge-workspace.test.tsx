@@ -175,7 +175,6 @@ function mockRepository(extra: DocumentFixture[] = []) {
         { path: checklist, frontmatter: checklistProperties },
         ...extra.map(({ revision }) => ({ path: revision.relativePath, frontmatter: null })),
       ];
-      case "repository_note_planning": return [];
       case "rebuild_repository_note_index": return [
         { id: 1, path: release, title: "Release notes", tags: [], frontmatter: null },
         { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
@@ -762,108 +761,6 @@ it("previews a note merge and reports the exact remaining drafts when a reviewed
   expect(fixture.drafts.get(refPath)?.markdown).toBe(definitions[1]!.after);
 });
 
-it("starts Plan Mode delivery from the reviewed note revision and opens only its real linked Task", async () => {
-  mockRepository();
-  const ipc = vi.mocked(invoke);
-  const repository = ipc.getMockImplementation()!;
-  const openWorkspace = vi.fn();
-  const saved = documentAt(release, "release-1", releaseSource);
-  const source = { projectId: props.checkout.projectId, checkoutId, revisionId: saved.revision.id };
-  let plan: { runId: string; task: { id: string; title: string } | null } | undefined;
-  ipc.mockImplementation(async (command, args) => {
-    if (command === "repository_note_planning") {
-      expect(args).toEqual(source);
-      return plan ? [plan] : [];
-    }
-    if (command === "read_repository_markdown") {
-      expect(args).toEqual({ checkoutId, revisionId: saved.revision.id });
-      return saved;
-    }
-    if (command === "start_repository_delivery") {
-      expect(args).toEqual({ ...source, requestId: expect.any(String) });
-      plan = { runId: "planning-run", task: null };
-      return { id: plan.runId };
-    }
-    return repository(command, args);
-  });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
-  const user = userEvent.setup();
-  await editor(release);
-  expect(screen.queryByRole("button", { name: "Open linked task" })).toBeNull();
-  await user.click(screen.getByRole("button", { name: "Plan from note" }));
-  const review = within(await screen.findByRole("dialog", { name: "Plan from note" }));
-  await user.click(await review.findByText("Read saved Markdown"));
-  expect(review.getByText(/Open launch notes/).textContent).toBe(saved.markdown);
-  expect(ipc.mock.calls.some(([command]) => command === "start_repository_delivery")).toBe(false);
-  await user.click(review.getByRole("button", { name: "Start planning" }));
-  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "planning-run"));
-  expect(ipc.mock.calls.some(([command]) => command === "submit_repository_delivery_agent")).toBe(false);
-  expect(screen.queryByRole("button", { name: "Open linked task" })).toBeNull();
-
-  plan = { runId: "planning-run", task: { id: "real-task", title: "Prepare release" } };
-  await act(() => client.invalidateQueries({ queryKey: ["repository-note-planning"] }));
-  await user.click(await screen.findByRole("button", { name: "Open linked task" }));
-  expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "real-task");
-});
-
-it("opens existing planning and a real linked Task for the clicked note's saved revision without launching work", async () => {
-  mockRepository();
-  const ipc = vi.mocked(invoke);
-  const repository = ipc.getMockImplementation()!;
-  ipc.mockImplementation(async (command, args) => {
-    if (command === "repository_note_planning" && (args as { revisionId: string }).revisionId === "checklist-1") {
-      expect(args).toEqual({ projectId: props.checkout.projectId, checkoutId, revisionId: "checklist-1" });
-      return [{ runId: "earlier-planning-run", task: null },
-        { runId: "delivery-run", task: { id: "linked-task", title: "Verify checklist" } }];
-    }
-    return repository(command, args);
-  });
-  const openWorkspace = vi.fn();
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
-  const user = userEvent.setup();
-  await editor(release);
-  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
-  const folder = tree.getByRole("button", { name: "notes" });
-  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
-  const note = await tree.findByRole("button", { name: "Checklist.md" });
-  async function planningDialog() {
-    fireEvent.contextMenu(note);
-    await user.click(await screen.findByRole("menuitem", { name: "Open linked planning / delivery…" }));
-    return within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
-  }
-  const dialog = await planningDialog();
-  expect(dialog.getByText(/notes\/Checklist\.md · checklist-1/)).toBeTruthy();
-  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
-  expect(openWorkspace).not.toHaveBeenCalled();
-  await user.click(await dialog.findByRole("button", { name: "Open planning · earlier-" }));
-  expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", "earlier-planning-run");
-
-  const reopened = await planningDialog();
-  await user.click(await reopened.findByRole("button", { name: "Open Task Verify checklist" }));
-  expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "linked-task");
-  expect(ipc).not.toHaveBeenCalledWith("start_repository_delivery", expect.anything());
-  expect(ipc).not.toHaveBeenCalledWith("launch_workflow_manual", expect.anything());
-});
-
-it("shows the saved revision's empty planning links while the tab has a draft", async () => {
-  mockRepository();
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
-  const user = userEvent.setup();
-  const view = await editor(release);
-  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Unpublished decision." } }));
-  fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
-  const plan = await screen.findByRole("menuitem", { name: "Plan from note…" });
-  expect(plan.getAttribute("aria-disabled")).toBe("true");
-  await user.click(screen.getByRole("menuitem", { name: "Open linked planning / delivery…" }));
-  const dialog = within(await screen.findByRole("dialog", { name: "Linked planning and delivery" }));
-  expect(await dialog.findByText("No planning runs are linked to this saved revision.")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("repository_note_planning", { projectId: props.checkout.projectId, checkoutId, revisionId: "release-1" });
-  expect(view.state.doc.toString()).toBe(releaseSource + "Unpublished decision.");
-});
-
 it("hands off the saved revision for both a conflicted draft and a different clicked closed note", async () => {
   const repository = mockRepository();
   const openWorkspace = vi.fn();
@@ -877,7 +774,6 @@ it("hands off the saved revision for both a conflicted draft and a different cli
   act(() => repository.externalChange(documentAt(release, "release-2", "# New content on disk")));
   expect(await screen.findByRole("button", { name: "Review external change" })).toBeTruthy();
   fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
-  expect((await screen.findByRole("menuitem", { name: "Plan from note…" })).getAttribute("aria-disabled")).toBe("true");
   expect(screen.getByRole("menuitem", { name: "Run workflow from note…" }).getAttribute("aria-disabled")).toBe("true");
   await user.click(screen.getByRole("menuitem", { name: "Compare models from note…" }));
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(1));

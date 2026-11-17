@@ -89,7 +89,7 @@ it("edits a package member graph through the shared editor and saves the same pa
       case "conversation_models": return [];
       case "preview_workflow_package_revision": return { revision: draft.revision, revisions: [draft.revision],
         members: [{ key: member.key, graphDefinitions: { start } }] };
-      case "workflow_graph_registry": return [start, parallel];
+      case "workflow_node_definitions": return [start, parallel];
       case "save_workflow_package": return { ...draft, revision: "edited", package: (payload as { package: typeof draft.package }).package };
       default: throw Error(`Unexpected ${name}`);
     }
@@ -99,13 +99,13 @@ it("edits a package member graph through the shared editor and saves the same pa
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Add node" }));
-  await user.click(within(screen.getByRole("region", { name: "Node catalog" })).getByRole("button", { name: "Add Parallel" }));
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.clear(await screen.findByRole("textbox", { name: "Pipeline name" }));
+  await user.type(screen.getByRole("textbox", { name: "Pipeline name" }), "Edited delivery");
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
     projectId: exampleCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,
     package: { name: draft.package.name, members: [{ ...member, body: { ...member.body, graph: {
-      ...graph, nodes: [...graph.nodes, { id: "parallel", kind: "parallel", configuration: { kind: "none" } }],
+      ...graph, name: "Edited delivery",
     } } }] },
   });
 });

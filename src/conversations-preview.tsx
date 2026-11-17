@@ -4,12 +4,11 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ConversationEmptyState, ConversationLibraryGroup, ConversationLibraryLayout, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import {
-  createLibrary, createPreviewConversation, previewDeliveryPipeline, primaryProject,
+  createLibrary, createPreviewConversation, primaryProject,
   type PreviewConversation, type PreviewLibrary, type PreviewMessage,
 } from "@/conversation-preview-data";
 import { PreviewConversationPanel } from "@/conversation-preview-panel";
-import type { ConversationPipelineChoice } from "@/bindings/ConversationPipelineChoice";
-import { ConversationPipelinePicker, directConversationChoice, repositoryDeliveryChoice } from "@/conversation-pipeline-picker";
+import { ConversationPipelinePicker, directConversationChoice } from "@/conversation-pipeline-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type PreviewWorkspaceProps = WorkspaceProps & { compact?: boolean };
@@ -105,12 +104,11 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
     setPipelinePicker(true);
   }
 
-  function createConversation(pipeline: ConversationPipelineChoice) {
+  function createConversation() {
     setPipelinePicker(false);
     setLibrary((current) => {
       const id = `conversation-${current.nextId}`;
-      const next = { ...createPreviewConversation(id, `New conversation ${current.nextId}`),
-        pipeline: pipeline.kind === "repository_delivery" ? previewDeliveryPipeline : directConversationChoice.pipeline };
+      const next = { ...createPreviewConversation(id, `New conversation ${current.nextId}`), pipeline: directConversationChoice.pipeline };
       return selectConversation({
         ...current, nextId: current.nextId + 1, conversations: [...current.conversations, next],
       }, id);
@@ -283,7 +281,7 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
           : <ConversationEmptyState title="No conversation open">
             <button type="button" className="conv-primary-button" onClick={choosePipeline}>New conversation</button>
           </ConversationEmptyState>}
-      {pipelinePicker && <ConversationPipelinePicker options={[directConversationChoice, repositoryDeliveryChoice]}
+      {pipelinePicker && <ConversationPipelinePicker options={[directConversationChoice]}
         onCreate={createConversation} onClose={() => setPipelinePicker(false)} opener={creationTrigger.current} />}
       {dialog && <Dialog.Root open onOpenChange={(open) => { if (!open) setDialog(undefined); }}>
         <Dialog.Portal>

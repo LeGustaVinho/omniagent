@@ -115,7 +115,7 @@ it("retains fresh package authoring when no project conversation exists", async 
 it("routes feedback with the loaded draft revision and links the source conversation", async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "inspect_workflow_authoring") return draft;
-    if (command === "workflow_graph_registry") return [];
+    if (command === "workflow_node_definitions") return [];
     if (command === "conversation_models") return [{ option: { selection, name: "Authoring model", selectable: true, rating: null }, efforts: [] }];
     if (command === "request_workflow_authoring_changes") return { ...draft, request: { jobId: "job-2", runId: null, state: "queued", diagnostic: null } };
     throw new Error(`Unexpected ${command}`);

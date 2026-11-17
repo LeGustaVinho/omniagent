@@ -33,7 +33,7 @@ pub enum WorkflowHostRequest {
         document: RepositoryMarkdownRevision,
     },
     LoadContext,
-    ReadGit(super::templates::diff::GitSelection),
+    ReadGit(super::diff::GitSelection),
     VerifyReviewDiff,
     PublishDiffReport,
     LinkExistingTask {
@@ -166,13 +166,9 @@ impl Store {
                 let ArtifactValue::Markdown(document) = &inputs["document"].value else {
                     anyhow::bail!("Read Git needs the selected document's registered checkout");
                 };
-                let inspection = super::templates::diff::capture(
-                    self,
-                    &project_id,
-                    &document.checkout_id,
-                    selection,
-                )
-                .await?;
+                let inspection =
+                    super::diff::capture(self, &project_id, &document.checkout_id, selection)
+                        .await?;
                 HostAction::Publish("git", ArtifactValue::GitInspection(inspection))
             }
             (Executor::CheckSelectedGit, WorkflowHostRequest::VerifyReviewDiff) => {
@@ -183,18 +179,13 @@ impl Store {
                 else {
                     anyhow::bail!("The diff checks configuration is unavailable");
                 };
-                let checks = super::templates::diff::verify(
-                    self,
-                    &project_id,
-                    &inputs["git"],
-                    names,
-                    parallel_groups,
-                )
-                .await?;
+                let checks =
+                    super::diff::verify(self, &project_id, &inputs["git"], names, parallel_groups)
+                        .await?;
                 HostAction::Publish("checks", ArtifactValue::Checks(checks))
             }
             (Executor::ReportSelectedGit, WorkflowHostRequest::PublishDiffReport) => {
-                let report = super::templates::diff::report(
+                let report = super::diff::report(
                     self,
                     &project_id,
                     &inputs["git"],

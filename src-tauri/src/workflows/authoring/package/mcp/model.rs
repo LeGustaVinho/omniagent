@@ -16,7 +16,7 @@ pub(crate) enum ReadCatalog {
         #[serde(default)]
         offset: usize,
     },
-    BuiltinNodes {
+    DraftNodeDefinitions {
         #[serde(default)]
         offset: usize,
     },

@@ -19,6 +19,7 @@ mod control;
 pub mod conversation_turns;
 mod data_nodes;
 pub mod decision_nodes;
+pub mod diff;
 mod execution;
 mod generic_agent;
 #[cfg(test)]
@@ -49,7 +50,6 @@ mod stage_models;
 pub mod stage_plan;
 pub mod stage_requirements;
 mod subflow;
-pub mod templates;
 pub(crate) mod test_phase;
 #[cfg(test)]
 mod tests;
@@ -88,7 +88,7 @@ pub(crate) use job_inputs::{
     WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input,
 };
 pub use launch::{
-    ManualWorkflowLaunch, RepositoryNotePlanning, TypedStartConfiguration, WorkflowLaunchEvent,
+    ManualWorkflowLaunch, TypedStartConfiguration, WorkflowLaunchEvent,
     WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource,
     WorkflowStartSchema,
 };

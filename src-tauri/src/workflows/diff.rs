@@ -1,11 +1,15 @@
-use crate::repository::{AttemptWorktreeEvidence, verification::SelectedCandidate};
+use anyhow::{Context, Result, ensure};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    repository::{AttemptWorktreeEvidence, verification::SelectedCandidate},
+    store::Store,
+};
 
 use super::{
-    super::{ArtifactValue, ScopedEvidence, WorkflowArtifact},
-    *,
+    ArtifactValue, BuiltinNode, NodeInputs, ScopedEvidence, TaskReference, WorkflowArtifact,
 };
-use anyhow::Context;
-use rusqlite::params;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,7 +78,7 @@ impl Store {
                 &run,
                 &node,
                 None,
-                &super::super::NodeInputs::from([("document".into(), source.clone())]),
+                &NodeInputs::from([("document".into(), source.clone())]),
             )
             .await?;
         let ArtifactValue::Markdown(document) = &inputs["document"].value else {
@@ -99,53 +103,6 @@ impl Store {
                 crate::repository::verification::load_selected_candidate(db, &project, &task, &id)
             }).collect()
         }).await
-    }
-}
-
-pub(super) fn review_diff() -> WorkflowPackage {
-    use BuiltinNode::*;
-    let graph = WorkflowGraph {
-        name: "Review diff".into(),
-        nodes: vec![
-            node("start", Start, NodeConfiguration::None),
-            node("read-git", ReadGit, NodeConfiguration::None),
-            node("fan-out", Parallel, NodeConfiguration::None),
-            node("review", ReviewDiffCandidate, agent_role("diff reviewer")),
-            node(
-                "check",
-                VerifyReviewDiff,
-                NodeConfiguration::RequiredChecks {
-                    names: vec![],
-                    parallel_groups: vec![],
-                },
-            ),
-            node("join", Join, NodeConfiguration::None),
-            node("report", PublishDiffReport, NodeConfiguration::None),
-        ],
-        wires: vec![
-            wire("start", "start", "read-git", "ready"),
-            wire("start", "document", "read-git", "document"),
-            wire("read-git", "read", "fan-out", "ready"),
-            wire("fan-out", "branches", "review", "ready"),
-            wire("fan-out", "branches", "check", "ready"),
-            wire("read-git", "git", "review", "git"),
-            wire("read-git", "git", "check", "git"),
-            wire("review", "reviewed", "join", "branches"),
-            wire("check", "verified", "join", "branches"),
-            wire("join", "joined", "report", "ready"),
-            wire("read-git", "git", "report", "git"),
-            wire("review", "review", "report", "review"),
-            wire("check", "checks", "report", "checks"),
-        ],
-    };
-    WorkflowPackage {
-        name: graph.name.clone(),
-        members: vec![member(
-            "review-diff",
-            "Review diff",
-            PackageDestination::Project,
-            PackageArtifactBody::Pipeline { graph },
-        )],
     }
 }
 
@@ -215,7 +172,7 @@ pub(in crate::workflows) async fn verify(
         )
         .await?;
     Ok(ScopedEvidence {
-        task: super::super::TaskReference {
+        task: TaskReference {
             project_id: project.into(),
             task_id: candidate.target.task_id.clone(),
         },

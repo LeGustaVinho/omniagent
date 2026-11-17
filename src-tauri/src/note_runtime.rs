@@ -17,7 +17,6 @@ use omniagent::{
     repository::markdown_merge::{MarkdownMergePlan, MarkdownMergePreview},
     repository::markdown_tags::{MarkdownTagRenamePlan, MarkdownTagRenamePreview},
     store::Store,
-    workflows::{RepositoryNotePlanning, WorkflowLaunchSource},
 };
 use tauri::{State, ipc::Channel};
 
@@ -127,25 +126,6 @@ pub async fn stage_markdown_tag_rename(
     let plan = previews.take(&preview_id)?;
     store
         .stage_markdown_tag_rename(checkout_id, plan)
-        .await
-        .map_err(report)
-}
-
-#[tauri::command]
-pub async fn repository_note_planning(
-    store: State<'_, Store>,
-    project_id: String,
-    checkout_id: String,
-    revision_id: String,
-) -> Result<Vec<RepositoryNotePlanning>, String> {
-    store
-        .repository_note_planning(
-            project_id,
-            WorkflowLaunchSource {
-                checkout_id,
-                revision_id,
-            },
-        )
         .await
         .map_err(report)
 }

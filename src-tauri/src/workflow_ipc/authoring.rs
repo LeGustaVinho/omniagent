@@ -38,18 +38,6 @@ pub async fn describe_workflow_reusable_boundary(
 }
 
 #[tauri::command]
-pub async fn duplicate_workflow_template_draft(
-    store: State<'_, Store>,
-    project_id: String,
-    version: PackageArtifactVersion,
-) -> Result<WorkflowPackageDraft, String> {
-    store
-        .duplicate_workflow_template_draft(project_id, version)
-        .await
-        .map_err(report)
-}
-
-#[tauri::command]
 pub async fn derive_workflow_reusable(
     store: State<'_, Store>,
     project_id: String,

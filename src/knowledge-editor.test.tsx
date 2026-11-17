@@ -104,6 +104,22 @@ const select = (view: EditorView, anchor: number, head = anchor) => act(() => vi
 
 const expandFormat = () => fireEvent.keyDown(screen.getByRole("menuitem", { name: "Format Markdown" }), { key: "ArrowRight" });
 
+it.each(["source", "live"] as const)("updates Markdown link colors from the app palette in %s mode", (mode) => {
+  const { view } = openSource("See [Guide](./guide.md).", mode);
+  const mount = view.dom.parentElement!;
+  const tokens = [...view.contentDOM.querySelectorAll("span")];
+  const label = tokens.find((span) => span.textContent === "Guide")!;
+  const destination = tokens.find((span) => span.textContent === "./guide.md")!;
+
+  mount.style.setProperty("--primary", "#afb2ff");
+  expect(getComputedStyle(label).color).toBe("rgb(175, 178, 255)");
+  expect(getComputedStyle(destination).color).toBe("rgb(175, 178, 255)");
+
+  mount.style.setProperty("--primary", "#4943ab");
+  expect(getComputedStyle(label).color).toBe("rgb(73, 67, 171)");
+  expect(getComputedStyle(destination).color).toBe("rgb(73, 67, 171)");
+});
+
 it.each(["source", "live"] as const)("formats the selected text and inserts the Markdown link destination in %s mode", (mode) => {
   const source = "# Release\n\nRead café 🚀 and check the plan.";
   const { view } = openSource(source, mode, true);

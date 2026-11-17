@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    ArtifactValue, BuiltinNode, Executor, NodeInputs, WorkflowArtifact, WorkflowDeliveryUnit,
+    ArtifactValue, BuiltinNode, Executor, NodeInputs, WorkflowArtifact,
     WorkflowRevision, WorkflowRun,
 };
 
@@ -67,36 +67,6 @@ pub(crate) fn waiting_for_delivery_commit(
 }
 
 impl Store {
-    pub async fn workflow_operator_units(
-        &self,
-        project: String,
-        task: String,
-        run: String,
-    ) -> Result<Vec<WorkflowDeliveryUnit>> {
-        self.execute(move |db| {
-            let mut statement = db.prepare(
-                "SELECT u.pipeline_run_id, u.plan_revision, u.project_id,
-                    u.task_id, u.checkout_id, u.unit, u.commit_evidence_id
-                 FROM workflow_delivery_units u
-                 JOIN job_pipeline_runs r ON r.id = u.pipeline_run_id AND r.plan_revision = u.plan_revision
-                 WHERE u.project_id = ?1 AND u.task_id = ?2 AND u.pipeline_run_id = ?3
-                 ORDER BY u.ordinal",
-            )?;
-            let mut rows = statement.query(params![project, task, run])?;
-            let mut units = Vec::new();
-            while let Some(row) = rows.next()? {
-                let protected: Vec<u8> = row.get(5)?;
-                units.push(WorkflowDeliveryUnit {
-                    workflow_run_id: row.get(0)?, plan_revision: row.get(1)?, project_id: row.get(2)?,
-                    task_id: row.get(3)?, checkout_id: row.get(4)?,
-                    unit: serde_json::from_slice(&protection::unprotect(&protected)?)?,
-                    commit_evidence_id: row.get(6)?,
-                });
-            }
-            Ok(units)
-        }).await
-    }
-
     pub async fn current_workflow_host_outputs(
         &self,
         project: String,

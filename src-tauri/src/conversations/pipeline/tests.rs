@@ -20,7 +20,7 @@ async fn repo(store: &Store, path: PathBuf) -> Result<ProjectCheckout> {
     register(store, path).await
 }
 
-async fn save_workflow(
+pub(in crate::conversations) async fn save_workflow(
     store: &Store,
     project: String,
     name: &str,
@@ -106,18 +106,14 @@ async fn published_pipeline_selection_is_project_scoped_and_forks_pin_the_origin
             .iter()
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
-        [
-            "Direct conversation",
-            "Repository delivery",
-            "Published pipeline"
-        ]
+        ["Direct conversation", "Published pipeline"]
     );
     assert_eq!(
         store
             .conversation_pipeline_options(second.checkout_id.clone())
             .await?
             .len(),
-        2
+        1
     );
 
     assert!(
@@ -178,17 +174,22 @@ async fn published_pipeline_selection_is_project_scoped_and_forks_pin_the_origin
         .list_conversations(first.checkout_id.clone())
         .await?;
     assert!(list.contains(&chat) && list.contains(&fork));
-    let builtin = reopened
+    assert!(reopened
         .create_conversation_with_pipeline(
             first.checkout_id.clone(),
             "Delivery".into(),
             ConversationPipelineChoice::RepositoryDelivery,
         )
-        .await?;
-    assert!(matches!(
-        builtin.pipeline,
-        Some(ConversationPipeline::RepositoryDelivery { .. })
-    ));
+        .await.is_err());
+    let legacy_id = chat.id.clone();
+    reopened.execute(move |db| {
+        db.execute(
+            "UPDATE conversations SET pipeline = ?2 WHERE id = ?1",
+            params![legacy_id, r#"{"kind":"repository_delivery","workflow":{"id":"old","revision":"old"}}"#],
+        )?;
+        Ok(())
+    }).await?;
+    reopened.conversation(chat.id.clone()).await?.require_direct_turn()?;
     let direct = reopened
         .create_conversation_with_pipeline(
             first.checkout_id,

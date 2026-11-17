@@ -202,6 +202,7 @@ pub struct WorkflowPackageSummary {
     pub revision: String,
     pub name: String,
     pub member_count: usize,
+    pub standalone_pipeline: bool,
     pub published: bool,
 }
 
@@ -354,7 +355,33 @@ impl Store {
                 .map(|row| {
                     let (id, revision, bytes, published) = row?;
                     let document: PackageDocument = open(&bytes)?;
-                    Ok(WorkflowPackageSummary { id, revision, name: document.package.name, member_count: document.package.members.len(), published })
+                    let members = &document.package.members;
+                    let standalone_pipeline = match members.as_slice() {
+                        [member] if matches!(member.body, PackageArtifactBody::Pipeline { .. }) => true,
+                        _ => {
+                            // Drafts started on the canvas can gain reusable artifacts as they evolve.
+                            let (initial, authored): (Vec<u8>, bool) = db.query_row(
+                                "SELECT v.payload, EXISTS(
+                                    SELECT 1 FROM workflow_package_requests r
+                                    WHERE r.draft_id = v.draft_id AND r.parent_revision = v.id
+                                 )
+                                 FROM workflow_package_revisions v
+                                 WHERE v.draft_id = ?1 AND v.parent_revision IS NULL",
+                                [&id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )?;
+                            let initial: PackageDocument = open(&initial)?;
+                            match initial.package.members.as_slice() {
+                                [member] => authored || matches!(member.body, PackageArtifactBody::Pipeline { .. }),
+                                [] => authored,
+                                _ => false,
+                            }
+                        }
+                    };
+                    Ok(WorkflowPackageSummary {
+                        id, revision, name: document.package.name, member_count: members.len(),
+                        standalone_pipeline, published,
+                    })
                 }).collect()
         }).await
     }

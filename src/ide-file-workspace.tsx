@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent,
+  DockviewReact, themeDark, type DockviewApi, type DockviewReadyEvent,
   type IDockviewHeaderActionsProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps, type IWatermarkPanelProps,
   type SerializedDockview,
 } from "dockview-react";
@@ -119,21 +119,13 @@ function FileGroupControls({ group }: IDockviewHeaderActionsProps) {
 const filePanelComponents = { file: FileDockPanel };
 
 export function FileDock({ context, onReady }: { context: FileDockContextValue; onReady: (event: DockviewReadyEvent) => void }) {
-  const [light, setLight] = useState(false);
-  useEffect(() => {
-    const root = document.documentElement;
-    const update = () => setLight(getComputedStyle(root).colorScheme === "light");
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(root, { attributes: true });
-    return () => observer.disconnect();
-  }, []);
   return (
     <FileDockContext.Provider value={context}>
-      <DockviewReact className="file-dock" theme={light ? themeLight : themeDark}
-        components={filePanelComponents} onReady={onReady}
-        watermarkComponent={FileDockEmpty} defaultTabComponent={FileDockTab} rightHeaderActionsComponent={FileGroupControls}
-        getTabContextMenuItems={() => []} disableFloatingGroups popoutUrl={editorPopoutPath} />
+      <div className="file-dock">
+        <DockviewReact theme={themeDark} components={filePanelComponents} onReady={onReady}
+          watermarkComponent={FileDockEmpty} defaultTabComponent={FileDockTab} rightHeaderActionsComponent={FileGroupControls}
+          getTabContextMenuItems={() => []} disableFloatingGroups popoutUrl={editorPopoutPath} />
+      </div>
     </FileDockContext.Provider>
   );
 }
@@ -240,7 +232,6 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     const layoutChange = api.onDidLayoutChange(() => { updateGroups(); save(); });
     const cleanupPopouts = new Map<Window, () => void>();
     const addPopout = api.onDidAddPopoutGroup(({ group, window: popup }) => {
-      popup.document.querySelector(".dv-dockview")?.classList.add("file-dock");
       const stopAppearance = mirrorEditorAppearance(popup);
       const title = () => { popup.document.title = (group.activePanel?.title ?? "Editor group") + " · OmniAgent"; };
       title();

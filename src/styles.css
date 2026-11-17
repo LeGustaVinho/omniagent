@@ -33,6 +33,10 @@
   --success: #72d6a4;
   --warning: #f3c778;
   --danger: #ff9aa2;
+  --syntax-keyword: #ff8291;
+  --syntax-string: #a5d6ff;
+  --syntax-type: #d2a8ff;
+  --syntax-number: #79c0ff;
 }
 
 :root {
@@ -61,6 +65,10 @@
   --success: #176642;
   --warning: #805200;
   --danger: #a62d3d;
+  --syntax-keyword: #a21d35;
+  --syntax-string: #075987;
+  --syntax-type: #6037a0;
+  --syntax-number: #015793;
 }
 
 body {

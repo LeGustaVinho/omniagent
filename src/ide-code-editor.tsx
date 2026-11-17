@@ -6,7 +6,7 @@ import { useFileEditorDocument } from "@/file-editor-popout";
 import type { GitPermalinkLines } from "@/git-file-versions";
 import { GitLineBlameDialog, type GitLineBlameRequest } from "@/git-line-blame";
 import { isProjectSearchText } from "@/ide-file-search";
-import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { loadMonaco } from "@/ide-monaco";
 
 export interface CodeProblem {
   message: string;
@@ -77,7 +77,6 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   useEffect(() => {
     if (!mount.current) return;
     let cancelled = false;
-    let observer: MutationObserver | undefined;
     const subscriptions: { dispose: () => void }[] = [];
     const target = mount.current;
 
@@ -101,12 +100,11 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       const { model, autoLanguage } = record;
       const codeEditor = monaco.editor.create(target, {
         model,
-        theme: monacoTheme(),
         automaticLayout: true,
         minimap: { enabled: false },
         scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
         scrollBeyondLastLine: false,
-        fontFamily: '"Geist Mono", Consolas, monospace',
+        fontFamily: '"Geist Mono Variable", Consolas, monospace',
         fontSize: 13,
         lineHeight: 22,
         renderLineHighlight: "line",
@@ -309,8 +307,6 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
         if (resources.some((resource) => resource.toString() === uri.toString())) publishDiagnostics();
       }), model.onDidChangeLanguage(publishDiagnostics));
       publishDiagnostics();
-      observer = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
-      observer.observe(document.documentElement, { attributes: true });
       const location = fresh.current.jump;
       const previous = viewState.current;
       if (previous?.path === path && previous.scope === scope && previous.jump === location?.token && previous.state) {
@@ -325,7 +321,6 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
     });
     return () => {
       cancelled = true;
-      observer?.disconnect();
       subscriptions.forEach((subscription) => subscription.dispose());
       if (instance.current) viewState.current = { path, scope, jump: fresh.current.jump?.token, state: instance.current.saveViewState() };
       instance.current?.dispose();

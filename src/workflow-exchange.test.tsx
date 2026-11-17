@@ -8,7 +8,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { downloadArtifact } from "@/download-artifact";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import type { ExchangeBinding } from "@/workflow-exchange-bindings";
-import { WorkflowTemplateHistory } from "@/workflow-template-history";
 import { exampleCheckout } from "@/workbench-contract";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -100,24 +99,4 @@ it("exports the clicked library preset revision independently of the checked pac
   await user.click(screen.getByRole("button", { name: "Download package" }));
   await waitFor(() => expect(downloadArtifact).toHaveBeenCalledTimes(2));
   expect(invoke).toHaveBeenLastCalledWith("export_workflow_exchange", { projectId: "source-project", selected: [other] });
-});
-
-it("exports the exact saved template revision and surfaces a rejected export", async () => {
-  const clicked = { id: "pipeline", revision: "clicked-old-version", kind: "pipeline", destination: "library" };
-  const other = { ...clicked, revision: "new-version", destination: "project" };
-  const projectId = exampleCheckout.projectId;
-  const openWorkspace = vi.fn();
-  invoke.mockImplementation(async (command) => {
-    if (command === "workflow_package_catalog") return [{ version: other, name: "Release" }, { version: clicked, name: "Release" }];
-    if (command === "export_workflow_exchange") throw new Error("A selected revision or dependency is not visible in this project");
-    throw new Error(command);
-  });
-  mount(<WorkflowTemplateHistory checkout={exampleCheckout} openWorkspace={openWorkspace} />);
-  const user = userEvent.setup();
-  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Release.*clicked-old-/ }));
-  await user.click(await screen.findByRole("menuitem", { name: "Download package for this revision" }));
-  expect((await screen.findByRole("alert")).textContent).toContain("is not visible in this project");
-  expect(invoke).toHaveBeenLastCalledWith("export_workflow_exchange", { projectId, selected: [clicked] });
-  expect(downloadArtifact).not.toHaveBeenCalled();
-  expect(openWorkspace).not.toHaveBeenCalled();
 });

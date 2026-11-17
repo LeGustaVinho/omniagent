@@ -1,13 +1,19 @@
+#[cfg(test)]
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::store::Store;
 
 use super::{
-    BuiltinNode, Endpoint, NodeConfiguration, NodeInstance, Wire, WorkflowGraph, WorkflowRun,
+    BuiltinNode, Endpoint, NodeConfiguration, NodeInstance, Wire, WorkflowGraph,
 };
 
+#[cfg(test)]
+use super::WorkflowRun;
+
 pub(super) const BUILTIN_DELIVERY_ID: &str = "builtin-task-delivery";
+#[cfg(test)]
 pub(super) const MAINTENANCE_ACTIVATION_ID: &str = "activate-maintenance";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,18 +157,8 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
     }
 }
 
+#[cfg(test)]
 impl Store {
-    pub(crate) async fn pin_builtin_repository_delivery(
-        &self,
-        project: String,
-    ) -> Result<super::WorkflowRevision> {
-        let graph = self
-            .builtin_delivery_for_project(project.clone(), DeliveryRoles::default())
-            .await?;
-        self.save_workflow_revision(project, BUILTIN_DELIVERY_ID.into(), graph)
-            .await
-    }
-
     pub(super) async fn builtin_delivery_for_project(
         &self,
         project: String,

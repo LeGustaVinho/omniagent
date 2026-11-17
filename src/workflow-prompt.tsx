@@ -222,7 +222,7 @@ export function PromptInspector({ member, choices, catalog, disabled, onChange, 
       {Object.entries(PROMPT_EXECUTORS).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
     </select></label>
     {!disabled && missingRole && <p role="status">{choices.length
-      ? "Choose the Role that runs this prompt." : "Create a Role in Roles & templates, then select its revision here."}</p>}
+      ? "Choose the Role that runs this prompt." : "Create a Role in Roles, then select its revision here."}</p>}
 
     <PromptSection title="Inputs and outputs" icon={Braces} count={Object.keys(prompt.inputs).length + Object.keys(prompt.outputs).length}>
       {!disabled && suggestion?.((proposal) => update({ ...prompt, ...proposal }))}

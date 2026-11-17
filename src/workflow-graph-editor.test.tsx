@@ -6,7 +6,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import { PipelineCatalog } from "@/pipeline-catalog";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
@@ -131,96 +130,19 @@ it("requires the reusable review's prompt and subject from the same evidence col
     definitions)).toEqual([]);
 });
 
-it("opens the real Library and searches the same definitions used by the Builder", async () => {
+it("keeps the Library empty without loading the Builder node registry or packages", () => {
   const ipc = vi.mocked(invoke);
-  ipc.mockImplementation(async (command) => {
-    if (command === "workflow_graph_registry") return [start, context, plan];
-    if (command === "workflow_package_catalog") return [];
-    throw new Error(command);
-  });
-  const openWorkspace = vi.fn();
-  const user = userEvent.setup();
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={openWorkspace}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
-  </QueryClientProvider>);
-  const tabs = within(screen.getByRole("navigation", { name: "Pipelines views" }));
-  expect(tabs.getByRole("button", { name: "Library" }).getAttribute("aria-current")).toBe("page");
-  const library = within(screen.getByRole("region", { name: "Workflow library" }));
-  await library.findByRole("heading", { name: "Load context" });
-  expect(ipc).toHaveBeenCalledWith("workflow_graph_registry");
-  const loadContext = library.getByRole("button", { name: "Load context" });
-  loadContext.focus();
-  await user.keyboard("{Enter}");
-  const dialog = within(screen.getByRole("dialog", { name: "Load context" }));
-  expect(dialog.getByRole("heading", { name: "How it works" })).toBeTruthy();
-  expect(dialog.getByText("Prepare a planning input")).toBeTruthy();
-  expect(dialog.getByText("No editable parameters for this definition.")).toBeTruthy();
-  const outputs = within(dialog.getByRole("region", { name: "Outputs" }));
-  expect(outputs.getByText("loaded")).toBeTruthy();
-  expect(outputs.getByText("markdown")).toBeTruthy();
-  await user.keyboard("{Escape}");
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(document.activeElement).toBe(loadContext);
-
-  const category = library.getByRole("combobox", { name: "Category" });
-  const effect = library.getByRole("combobox", { name: "Effect" });
-  await user.selectOptions(category, "Entry and results");
-  expect(library.getByRole("status").textContent).toBe("2 of 3 nodes");
-  await user.selectOptions(effect, "Model calls");
-  expect(library.getByText("No nodes match your filters.")).toBeTruthy();
-  await user.click(library.getByRole("button", { name: "Clear filters" }));
-  expect(library.getByRole("status").textContent).toBe("3 nodes");
-  const search = library.getByRole("searchbox", { name: "Search pipeline nodes" });
-  expect(document.activeElement).toBe(search);
-
-  await user.type(search, "planned");
-  expect(library.queryByRole("heading", { name: "Load context" })).toBeNull();
-  expect(library.getByRole("heading", { name: "Plan" })).toBeTruthy();
-  await user.click(tabs.getByRole("button", { name: "Maintenance" }));
-  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "maintenance");
-});
-
-it("reads a published preset's pinned ports and editable parameters only when opened", async () => {
-  const version = { id: "review-preset", revision: "pinned-review-revision", kind: "preset", destination: "library" };
-  const definition = { ...plan, inputs: [data("notes", "markdown")] };
-  const ipc = vi.mocked(invoke);
-  ipc.mockImplementation(async (command) => {
-    if (command === "workflow_graph_registry") return [plan];
-    if (command === "workflow_package_catalog") return [{ name: "Review with notes", version, blockers: [] }];
-    if (command === "describe_workflow_reusable_node") return {
-      artifact: { name: "Review with notes", version, blockers: [], body: { kind: "preset" } },
-      definition,
-      editableOverrides: ["role"],
-    };
-    throw new Error(command);
-  });
-  const user = userEvent.setup();
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+  ipc.mockClear();
+  render(<QueryClientProvider client={new QueryClient()}>
     <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={vi.fn()}
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
-  const card = await screen.findByRole("button", { name: "Review with notes" });
-  expect(ipc).not.toHaveBeenCalledWith("describe_workflow_reusable_node", expect.anything());
-  await user.click(card);
-  const dialog = within(screen.getByRole("dialog", { name: "Review with notes" }));
-  expect(await dialog.findByText("Agent role")).toBeTruthy();
-  expect(dialog.queryByText("Stage model override")).toBeNull();
-  expect(dialog.getByText(/Editable fields: role/)).toBeTruthy();
-  expect(within(dialog.getByRole("region", { name: "Inputs" })).getByText("notes")).toBeTruthy();
-  expect(ipc).toHaveBeenCalledWith("describe_workflow_reusable_node", { projectId: exampleCheckout.projectId, version });
-});
-
-it("explains an example preset without treating its simulation contract as a live schema", async () => {
-  render(<PipelineCatalog library />);
-  const user = userEvent.setup();
-  await user.selectOptions(screen.getByRole("combobox", { name: "Category" }), "Presets");
-  await user.click(screen.getByRole("button", { name: "Build" }));
-  const dialog = within(screen.getByRole("dialog", { name: "Build" }));
-  expect(dialog.getByText("Presets · Simulation")).toBeTruthy();
-  expect(dialog.getByText("Compile a candidate")).toBeTruthy();
-  expect(dialog.getByText("Registered build command")).toBeTruthy();
-  expect(dialog.getByText(/no editable settings in the simulated Builder/)).toBeTruthy();
+  const library = within(screen.getByRole("region", { name: "Workflow library" }));
+  expect(library.getByText("No items in the library.")).toBeTruthy();
+  expect(library.queryByRole("searchbox")).toBeNull();
+  expect(library.queryByText("Import or export workflow packages")).toBeNull();
+  expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions");
+  expect(ipc).not.toHaveBeenCalledWith("workflow_package_catalog", expect.anything());
 });
 
 it("duplicates the selected graph with its internal wires, exact old pin and undo history", async () => {
@@ -351,77 +273,16 @@ it("reconnects only the edge source after validating the new output", async () =
   expect(observed).toEqual(original);
 });
 
-it("opens the graph from the exact saved workflow revision in Roles & templates", async () => {
-  const version = { id: "release-template", revision: "pinned-workflow-revision", kind: "pipeline", destination: "project" };
-  const name = "Release template";
-  const body = { kind: "pipeline", graph: { name, nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }], wires: [] } };
-  const ipc = vi.mocked(invoke);
-  const openWorkspace = vi.fn();
-  ipc.mockImplementation(async (command) => {
-    if (command === "list_conversation_templates") return [];
-    if (command === "workflow_package_catalog") return [{ name, version }];
-    if (command === "read_published_workflow_package_artifact") return {
-      name, version, definitions: { start: old }, references: {}, layout: { start: { x: 72, y: 15 } },
-      body,
-    };
-    if (command === "create_workflow_package") return { id: "revision-draft" };
-    throw new Error(command);
-  });
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="templates" openWorkspace={openWorkspace}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
-  </QueryClientProvider>);
-  const user = userEvent.setup();
-  const history = within(screen.getByRole("region", { name: "Saved workflow templates" }));
-  await user.click(await history.findByRole("button", { name: /^Release template/ }));
-  expect(ipc).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: exampleCheckout.projectId, version });
-  const template = within(await history.findByRole("region", { name: "Selected workflow template" }));
-  const card = await template.findByTestId("node-start");
-  expect(card.getAttribute("data-position")).toBe(JSON.stringify({ x: 72, y: 15 }));
-  expect(card.querySelector('[data-port-handle="source:old-document"]')).toBeTruthy();
-  expect(template.getByRole<HTMLButtonElement>("button", { name: "Add node" }).disabled).toBe(true);
-  expect(template.getByRole("button", { name: "Run published workflow" })).toBeTruthy();
-  await user.click(template.getByRole("button", { name: "Edit in Builder" }));
-  expect(ipc).toHaveBeenCalledWith("create_workflow_package", {
-    projectId: exampleCheckout.projectId, conversationId: null,
-    package: { name, members: [{ key: "pipeline", name, destination: "project", base: version, body, references: {} }] },
-  });
-  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:revision-draft"));
-});
-
-it("duplicates the template revision under the context menu", async () => {
-  const version = { id: "release-template", revision: "clicked-immutable-revision", kind: "pipeline", destination: "project" };
-  const other = { ...version, revision: "other-revision" };
-  const name = "Release template";
-  const openWorkspace = vi.fn();
-  vi.mocked(invoke).mockImplementation(async (command) => {
-    if (command === "list_conversation_templates") return [];
-    if (command === "workflow_package_catalog") return [{ name, version }, { name, version: other }];
-    if (command === "duplicate_workflow_template_draft") return { id: "independent-draft" };
-    throw new Error(command);
-  });
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="templates" openWorkspace={openWorkspace}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
-  </QueryClientProvider>);
-  const user = userEvent.setup();
-  const history = within(screen.getByRole("region", { name: "Saved workflow templates" }));
-  const row = await history.findByRole("button", { name: /^Release template.*clicked-immu/ });
-  fireEvent.contextMenu(row);
-  await user.click(await screen.findByRole("menuitem", { name: "Duplicate as project draft…" }));
-  expect(invoke).toHaveBeenCalledWith("duplicate_workflow_template_draft", { projectId: exampleCheckout.projectId, version });
-  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:independent-draft"));
-});
-
 it("opens a protected draft, reviews an affected port upgrade, wires typed nodes, and restores the saved graph and layout", async () => {
   const graph: WorkflowGraph = {
     name: "Versioned review",
-    nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }, { id: "context", kind: "load_context", configuration: { kind: "none" } }],
+    nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }, { id: "context", kind: "load_context", configuration: { kind: "none" } },
+      { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "" } }],
     wires: [wire("start", "start", "context", "ready"), wire("start", "old-document", "context", "document")],
   };
   const original = {
     id: "draft-1", conversationId: "chat-1", base: null,
-    head: { id: "first-revision", runId: null, graph, layout: {}, definitions: { start: old, context } },
+    head: { id: "first-revision", runId: null, graph, layout: {}, definitions: { start: old, context, plan } },
     request: { jobId: "job-1", runId: null, state: "saved", diagnostic: null },
   };
   let stored = original;
@@ -431,7 +292,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
         expect(input).toEqual({ projectId: exampleCheckout.projectId });
         return [{ id: stored.id, name: stored.head.graph.name, revision: stored.head.id }];
       case "inspect_workflow_authoring": return stored;
-      case "workflow_graph_registry": return [start, context, plan];
+      case "workflow_node_definitions": return [start, context, plan];
       case "conversation_models": return [];
       case "save_workflow_authoring_draft": {
         const args = input as { graph: WorkflowGraph; canvas: WorkflowCanvasEdit };
@@ -452,8 +313,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   expect(builder.getAttribute("aria-current")).toBe("page");
   await user.click(builder);
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "drafts");
-  await user.click(screen.getByRole("button", { name: "Repository delivery" }));
-  expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "delivery");
+  expect(screen.queryByRole("button", { name: "Repository delivery" })).toBeNull();
   await user.click(await screen.findByRole("button", { name: "Open draft" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:draft-1");
   list.unmount();
@@ -477,11 +337,10 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
     await user.click(inspector.getByRole("button", { name: "Connect ports" }));
   };
   await connect("start", "document", "document");
-  await user.click(screen.getByRole("button", { name: "Add node" }));
-  const catalog = within(screen.getByRole("region", { name: "Node catalog" }));
-  await user.type(catalog.getByRole("searchbox"), "plan");
-  expect(catalog.queryByRole("button", { name: "Add Load context" })).toBeNull();
-  await user.click(catalog.getByRole("button", { name: "Add Plan" }));
+  expect(screen.queryByRole("button", { name: "Add node" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add a reusable node" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "Node catalog" })).toBeNull();
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "plan");
   expect(screen.getByText(/Agent role is required/)).toBeTruthy();
   await user.type(inspector.getByRole("textbox", { name: "Agent role" }), "Qualified planner");
   await connect("context", "context", "ready");
@@ -494,7 +353,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   await waitFor(() => expect(screen.getByText("saved-revision")).toBeTruthy());
   expect(invoke).toHaveBeenCalledWith("save_workflow_authoring_draft", {
     projectId: exampleCheckout.projectId, draftId: "draft-1", selectedRevision: "first-revision",
-    graph: { ...graph, nodes: [...graph.nodes, { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "Qualified planner" } }],
+    graph: { ...graph, nodes: graph.nodes.map((node) => node.id === "plan" ? { ...node, configuration: { kind: "agent_role", role: "Qualified planner" } } : node),
       wires: [wire("start", "start", "context", "ready"), wire("start", "document", "context", "document"),
         wire("context", "loaded", "plan", "ready"), wire("context", "context", "plan", "context")] },
     canvas: { layout: { start: { x: 91, y: -8 } }, updateDefinitions: { start: 2 } },
@@ -523,6 +382,7 @@ it("configures a typed list and a bounded iteration in the package graph", async
   let edited: WorkflowGraph = { name: "Iteration", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
     { id: "list", kind: "build_list", configuration: defaultConfiguration("build_list") },
+    { id: "for-each", kind: "for_each", configuration: defaultConfiguration("for_each") },
   ], wires: [wire("start", "start", "list", "ready")] };
   function Editor() {
     const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
@@ -547,10 +407,7 @@ it("configures a typed list and a bounded iteration in the package graph", async
   expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "evidence", pointer: "/evidence/items" });
   expect(screen.getByText(/list.value requires a connection/)).toBeTruthy();
 
-  await user.click(screen.getByRole("button", { name: "Add node" }));
-  const nodes = within(screen.getByRole("region", { name: "Node catalog" }));
-  expect(nodes.queryByRole("button", { name: "Add Pin iteration list" })).toBeNull();
-  await user.click(nodes.getByRole("button", { name: "Add For each" }));
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "for-each");
   fireEvent.change(inspector.getByRole("spinbutton", { name: "Maximum items" }), { target: { value: "12" } });
   expect(within(inspector.getByRole("combobox", { name: "Subflow item input" })).queryByRole("option", { name: /wrong/ })).toBeNull();
   await user.selectOptions(inspector.getByRole("combobox", { name: "Subflow result output" }), "check");

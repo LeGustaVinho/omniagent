@@ -1,11 +1,11 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
-import { PipelineRolesTemplatesHeading } from "@/pipeline-layout";
+import { PipelineRolesHeading } from "@/pipeline-layout";
 import type { Capability } from "@/bindings/Capability";
 import type { JobRole } from "@/bindings/JobRole";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -58,8 +58,8 @@ function emptyDraft(): TemplateDraft {
   };
 }
 
-export function ConversationTemplateEditor({ checkout, openWorkspace, savedWorkflows }: {
-  checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"]; savedWorkflows?: ReactNode;
+export function ConversationTemplateEditor({ checkout, openWorkspace }: {
+  checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"];
 }) {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
@@ -105,8 +105,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace, savedWorkf
   }
 
   return <div className="pipeline-view pipeline-view-content">
-    <PipelineRolesTemplatesHeading />
-    {savedWorkflows}
+    <PipelineRolesHeading />
     <div className="pipeline-two-columns">
       <section className="pipeline-box pipeline-stack">
         <h3>Conversation templates</h3>

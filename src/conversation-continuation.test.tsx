@@ -69,7 +69,7 @@ it("asks for a pipeline on fresh continuation and opens a draft for the selected
     ], isPending: false, error: null, refetch: vi.fn() }} />);
   const dialog = within(screen.getByRole("dialog", { name: "Choose how to continue" }));
   expect(dialog.getByRole<HTMLButtonElement>("button", { name: "Continue and send" }).disabled).toBe(true);
-  expect(dialog.getByRole("radio", { name: /Repository delivery/ })).toBeTruthy();
+  expect(dialog.queryByRole("radio", { name: /Repository delivery/ })).toBeNull();
   await user.click(dialog.getByRole("radio", { name: /Review pipeline/ }));
   expect(dialog.getByTitle(pipeline.workflow.revision)).toBeTruthy();
   await user.click(dialog.getByRole("button", { name: "Open draft" }));

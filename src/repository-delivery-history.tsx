@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import { commitQuery, deliveryQuery, taskStateQuery, type VerifiedCommit, type VerifiedDeliveryUnitHistory } from "@/project-agile-model";
-import type { DeliverySnapshot, DeliverySource } from "@/repository-delivery-model";
+import type { DeliverySnapshot } from "@/repository-delivery-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type VerifiedPatch = { patchBase64: string };
@@ -29,28 +29,6 @@ const dateLabel = (date: string) => new Date(date).toLocaleString();
 function openSavedAttempt(openActivity: WorkspaceProps["openActivity"], runId: string, conversationId?: string) {
   if (conversationId) openActivity(runId, conversationId);
   else openActivity(runId);
-}
-
-export function SavedDeliverySource({ document }: { document: DeliverySource }) {
-  const [open, setOpen] = useState(false);
-  const query = useQuery({
-    queryKey: ["repository-markdown", document.checkoutId, document.id],
-    queryFn: () => invoke<{ markdown: string } | null>("read_repository_markdown", {
-      checkoutId: document.checkoutId, revisionId: document.id,
-    }),
-    enabled: open,
-    staleTime: Infinity,
-  });
-  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Saved Markdown · {document.relativePath}</summary>
-    {open && <>
-      <p className="break-all">Revision <code>{document.id}</code> · SHA-256 <code>{document.sha256}</code></p>
-      {query.isPending && <p role="status">Loading saved Markdown…</p>}
-      {query.error && <p role="alert">{String(query.error)}</p>}
-      {query.data === null && <p>Saved Markdown unavailable.</p>}
-      {query.data && <pre className="max-h-72 overflow-auto whitespace-pre-wrap">{query.data.markdown}</pre>}
-    </>}
-  </details>;
 }
 
 function AcceptedPatch({ projectId, taskId, evidenceId, initiallyOpen }: {

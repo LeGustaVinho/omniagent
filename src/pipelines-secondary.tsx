@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, Check, CircleAlert, Columns2, GitBranch, ListChecks, Plus, ShieldCheck } from "lucide-react";
 import { PipelineComparisonCard, PipelineComparisonChoice, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
-import { PipelineMaintenanceLayout, PipelinePluginItem, PipelineSectionHeading, PipelineTemplateList } from "@/pipeline-layout";
+import { PipelineMaintenanceLayout, PipelinePluginItem, PipelineSectionHeading, PipelineRevisionList } from "@/pipeline-layout";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
@@ -83,11 +83,11 @@ export function RoleEditor({ roles, onChange }: { roles: Role[]; onChange: (role
   );
 }
 
-export function TemplateHistory({ revisions, onLoad }: { revisions: WorkflowRevision[]; onLoad: (revision: WorkflowRevision) => void }) {
+export function DraftRevisionHistory({ revisions, onLoad }: { revisions: WorkflowRevision[]; onLoad: (revision: WorkflowRevision) => void }) {
   return (
     <section className="pipeline-box">
-      <h3>Saved templates</h3>
-      <PipelineTemplateList entries={[...revisions].reverse().map((revision) => ({
+      <h3>Saved draft revisions</h3>
+      <PipelineRevisionList entries={[...revisions].reverse().map((revision) => ({
         id: String(revision.revision), name: revision.label, detail: `Revision ${revision.revision} · ${revision.nodes.length} stages`,
       }))} onOpen={(id) => {
         const revision = revisions.find((item) => String(item.revision) === id);

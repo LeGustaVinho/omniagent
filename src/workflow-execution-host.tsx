@@ -2,7 +2,6 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { repositoryNotePlanningKey } from "@/repository-note-planning";
 import {
   controlForNode, wiredExecutionInputs, type ExecutionPinnedNode, type WorkflowExecutionSnapshot,
 } from "@/workflow-execution-model";
@@ -58,7 +57,6 @@ function HostActions({ projectId, runId, nodeId, kind, inputs, launchWork }: {
       client.invalidateQueries({ queryKey: ["repository-delivery", projectId] }),
       client.invalidateQueries({ queryKey: ["project-tasks", projectId] }),
       client.invalidateQueries({ queryKey: ["registered-checkouts"] }),
-      client.invalidateQueries({ queryKey: repositoryNotePlanningKey(projectId) }),
     ]),
   });
   const selectedWork = launchWork ?? tasks.data?.find(({ id }) => id === selected)?.id;

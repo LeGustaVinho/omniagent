@@ -22,12 +22,17 @@ pub(super) fn read(
             result["name"] = json!(document.package.name);
             result
         }
-        ReadCatalog::BuiltinNodes { offset } => page(
-            builtin_registry()
-                .into_iter()
-                .map(|definition| json!(definition)),
-            offset,
-        )?,
+        ReadCatalog::DraftNodeDefinitions { offset } => {
+            let (_, document) = read_document(db, &session.draft, &session.working)?;
+            page(
+                document.definitions.iter().flat_map(|(member, nodes)| {
+                    nodes.iter().map(move |(node, definition)| {
+                        json!({ "member": member, "node": node, "definition": definition })
+                    })
+                }),
+                offset,
+            )?
+        }
         ReadCatalog::Published { offset } => published_page(db, &session.project, offset)?,
         ReadCatalog::DraftMember {
             key,

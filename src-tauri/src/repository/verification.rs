@@ -817,7 +817,7 @@ fn ensure_repair_checks(gates: &[PinnedGate]) -> Result<()> {
     ensure!(
         gates.iter().any(|gate| !gate.deferred
             && required_command(&gate.gate, gate.executable_revision.as_deref())),
-        "Fix failed checks needs a configured executable check marked as required"
+        "Repair stages require a configured executable check marked as required"
     );
     Ok(())
 }

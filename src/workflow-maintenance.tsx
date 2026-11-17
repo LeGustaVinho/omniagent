@@ -212,10 +212,9 @@ function MaintenanceSettingsForm({ checkout, showRunningBuild }: { checkout: Pro
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
   });
-  const available = Array.from(new Map([
-    ["builtin-task-delivery", "Task delivery"],
-    ...(workflows.data ?? []).map(({ version, name }): [string, string] => [version.id, name]),
-  ]));
+  const available = Array.from(new Map((workflows.data ?? [])
+    .filter(({ version }) => version.id !== "builtin-task-delivery")
+    .map(({ version, name }) => [version.id, name] as const)));
   const error = maintenance.error ?? workflows.error ?? checkouts.error;
   return <section className="pipeline-stack pt-3" aria-label="Maintenance workflow settings">
     {error && <p role="alert">{String(error)}</p>}
@@ -274,7 +273,7 @@ function MaintenanceConfigurationForm({ projectId, checkoutId, settings, checkou
 }) {
   const client = useQueryClient();
   const [source, setSource] = useState(settings?.configuration.sourceCheckoutId ?? checkoutId);
-  const [workflow, setWorkflow] = useState(settings?.configuration.workflowId ?? "");
+  const [workflow, setWorkflow] = useState(settings?.configuration.workflowId === "builtin-task-delivery" ? "" : settings?.configuration.workflowId ?? "");
   const [build, setBuild] = useState(settings?.configuration.build.executable ?? "");
   const [argumentsText, setArguments] = useState(settings?.configuration.build.arguments.join("\n") ?? "");
   const [timeout, setTimeoutSeconds] = useState(String(settings?.configuration.build.timeoutSeconds ?? ""));

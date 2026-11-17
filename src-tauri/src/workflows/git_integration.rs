@@ -40,12 +40,11 @@ use super::{
 
 mod agile_checklists;
 mod attached_merge;
-mod audit_factory;
 mod backlog_saga;
 mod commit_intent;
 mod delivery_acceptance;
 mod destination_drift;
-mod factory_templates;
+mod diff_review;
 mod history_deletion;
 mod history_integration;
 mod live_cli_acceptance;

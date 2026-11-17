@@ -15,7 +15,7 @@ use super::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -140,10 +140,6 @@ impl Store {
                     name: "Direct conversation".into(),
                     pipeline: ConversationPipelineChoice::Direct,
                 },
-                ConversationPipelineOption {
-                    name: "Repository delivery".into(),
-                    pipeline: ConversationPipelineChoice::RepositoryDelivery,
-                },
             ];
             result.extend(published);
             Ok(result)
@@ -182,11 +178,7 @@ impl Store {
             .await?;
         let workflow = match pipeline {
             ConversationPipelineChoice::RepositoryDelivery => {
-                ConversationPipeline::RepositoryDelivery {
-                    workflow: self
-                        .pin_builtin_repository_delivery(project.clone())
-                        .await?,
-                }
+                anyhow::bail!("Repository delivery has been removed");
             }
             ConversationPipelineChoice::Published { workflow } => {
                 let exact = workflow.clone();
@@ -223,8 +215,12 @@ pub(super) fn read_optional_pipeline(
     index: usize,
 ) -> rusqlite::Result<Option<ConversationPipeline>> {
     row.get::<_, Option<String>>(index)?
-        .map(|json| serde_json::from_str(&json))
+        .map(|json| serde_json::from_str::<ConversationPipeline>(&json))
         .transpose()
+        .map(|pipeline| match pipeline {
+            Some(ConversationPipeline::RepositoryDelivery { .. }) => Some(ConversationPipeline::Direct),
+            pipeline => pipeline,
+        })
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 index,

@@ -109,7 +109,7 @@ it("saves a display label against exact revisions without replacing the template
 
 it("saves all template fields with a qualified model and reopens the exact prior revision", async () => {
   const user = setup({ workspace: true });
-  await user.click(screen.getByRole("button", { name: "Roles & templates" }));
+  await user.click(screen.getByRole("button", { name: "Roles" }));
   await user.click(screen.getByRole("button", { name: "New conversation template" }));
   await user.type(screen.getByRole("textbox", { name: "Name" }), first.name);
   await user.selectOptions(screen.getByRole("combobox", { name: "Role" }), first.role);

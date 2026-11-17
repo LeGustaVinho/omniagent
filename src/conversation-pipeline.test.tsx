@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ConversationPanel, ConversationSidebar } from "@/conversation-panels";
-import { directConversationChoice, repositoryDeliveryChoice } from "@/conversation-pipeline-picker";
+import { directConversationChoice } from "@/conversation-pipeline-picker";
 import { ConversationPipelineTurnStatus, useConversationPipelineTurns } from "@/conversation-pipeline-turns";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { useWorkspace } from "@/workspace-state";
@@ -61,7 +61,7 @@ test("requires a conversation pipeline choice and creates the exact published re
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "list_conversations") return [];
     if (command === "conversation_pipeline_options") return [
-      directConversationChoice, repositoryDeliveryChoice, { name: "Code review", pipeline: published },
+      directConversationChoice, { name: "Code review", pipeline: published },
     ];
     if (command === "create_conversation") return conversation;
     throw new Error(command);

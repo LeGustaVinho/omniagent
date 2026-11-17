@@ -9,7 +9,7 @@ use crate::{protection, runtime_inspection::BuildIdentity, store::Store};
 
 use super::{
     ApprovalDecisionSource, BuiltinNode, Executor, NodeInputs, PinnedNode, Wire, WorkflowRevision,
-    artifacts::insert_scoped_artifact, builtin::BUILTIN_DELIVERY_ID, control,
+    artifacts::insert_scoped_artifact, control,
     inspection::record_workflow_input_ids,
 };
 
@@ -387,9 +387,10 @@ pub(crate) fn load_settings(db: &Connection, project: &str) -> Result<Option<Mai
     .map_err(Into::into)
 }
 
+#[cfg(test)]
 pub(super) fn builtin_enabled(db: &Connection, project: &str) -> Result<bool> {
     Ok(load_settings(db, project)?
-        .is_some_and(|settings| settings.configuration.workflow_id == BUILTIN_DELIVERY_ID))
+        .is_some_and(|settings| settings.configuration.workflow_id == super::builtin::BUILTIN_DELIVERY_ID))
 }
 
 pub(super) fn validate_activation_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Result<()> {

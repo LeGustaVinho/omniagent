@@ -29,31 +29,7 @@ A direct Codex or Claude Code session is a good fit for a quick question, a smal
 
 Use OmniAgent when the work spans several steps you want to track together. The app runs your installed provider CLI and keeps the plan, implementation attempt, verification results, and Git change linked to the task. You can also give two providers the same prompt and committed code, or reuse a reviewed pipeline for the next task.
 
-![The Task delivery pipeline connecting planning, conditional review, implementation approval, verification, and merge](docs/images/pipeline-builder.png)
-
-*The built-in Task delivery example in Simulate mode.*
-
 ## Use cases
-
-### Deliver a change from a Markdown spec
-
-Suppose your release guide needs a rollback section. Save the request in a repository note such as `docs/release.md`.
-
-> Document how to restore the last known-good installer and verify that the previous version opens the existing workspace.
-
-1. In **Pipelines → Repository delivery**, choose **Select Markdown file** and open the note. You can also pick a **Saved source revision**. Then choose **Start repository delivery**.
-2. Run planning and plan review, then choose **Create and link Task**. With both provider profiles configured, you can use Codex for planning and Claude Code for the review.
-3. Choose **Approve implementation** and **Prepare managed worktree**. Run the implementation and select the candidate it produced.
-4. Review the candidate, run the configured checks, and confirm the completion criteria before choosing **Accept diff**. The project's Git policy determines how the accepted change is committed and merged.
-
-The task history ties the accepted patch and verification results to the attempt that produced them. You can reopen the saved diff after the working tree has moved on.
-
-<details>
-<summary>See the saved diff and Git delivery controls</summary>
-
-![A split view of the saved Git diff beside its candidate commit and merge controls in Simulate mode](docs/images/git-delivery.png)
-
-</details>
 
 ### Compare Codex and Claude Code before editing
 

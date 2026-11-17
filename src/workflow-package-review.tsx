@@ -1,9 +1,9 @@
-import { useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { Viewport } from "@xyflow/react";
 import { FileDiff, FlaskConical, Workflow } from "lucide-react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { workflowGraphRegistryQuery } from "@/pipeline-catalog";
+import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
 import { Button } from "@/components/ui/button";
 import { WorkflowSimulationCanvas, type WorkflowSimulationGraph } from "@/workflow-simulation-canvas";
 import { WorkflowStartValueField, initialWorkflowStartFields, initialWorkflowStartValue,
@@ -13,13 +13,13 @@ import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { PromptInspector, PromptRevisionView } from "@/workflow-prompt";
 import { PromptContractSuggestion } from "@/workflow-prompt-suggestion";
-import { promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename, type PromptRoleChoice,
+import { PROMPT_EXECUTORS, promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename, type PromptRoleChoice,
   initialPromptSample, type PromptSample } from "@/workflow-prompt-model";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions,
   type WorkflowEndpoint, type WorkflowGraph, type WorkflowLayout, type WorkflowPortType, type WorkflowReuseSelection } from "@/workflow-graph-model";
-import { PublishedSubflow, ReusableCatalog, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
-  type ReusableBody, type ReusableDescription, type ReusableReference } from "@/workflow-reusable";
+import { PublishedSubflow, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
+  type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 
 type Version = { id: string; revision: string; destination: "project" | "library"; kind: string };
 type Reference = { source: "draft"; key: string } | { source: "published"; version: Version }
@@ -64,15 +64,14 @@ type GraphMember = {
 
 export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, savedRevision, graphs, draftPresets = {}, disabled, edit,
   layouts = {}, canvasByMember, changeCanvas, deriveDisabled, onDerived, selection, select, viewports,
-  promptMembers = [], memberKeys = [], draftRoles = [], editPrompt }: {
+  promptMembers = [], draftRoles = [], editPrompt }: {
   projectId: string; checkoutId: string; draftId: string; savedRevision: string; graphs: GraphMember[]; disabled: boolean;
   draftPresets?: Record<string, ReusableBody>;
   layouts?: Record<string, WorkflowLayout>;
   canvasByMember: Record<string, WorkflowCanvasEdit>;
   changeCanvas: (key: string, canvas: WorkflowCanvasEdit) => void;
-  edit: (key: string, graph: WorkflowGraph, references?: Record<string, ReusableReference>, promptKeys?: string[]) => void;
+  edit: (key: string, graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
   promptMembers?: PromptMember[];
-  memberKeys?: string[];
   draftRoles?: PromptRoleChoice[];
   editPrompt?: (prompt: PromptMember, rename?: PromptPortRename) => void;
   deriveDisabled: boolean;
@@ -86,13 +85,17 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
   const graph = graphs.find(({ key }) => key === selection) ?? graphs[0];
   const show = Boolean(prompt || graph);
   const preview = usePackagePreview(projectId, draftId, savedRevision, show);
-  const registry = useQuery({ ...workflowGraphRegistryQuery, enabled: show });
+  const nodeKinds = graphs.flatMap(({ graph }) => graph.nodes.map(({ kind }) => kind));
+  if (promptMembers.length || nodeKinds.includes("subflow")) {
+    nodeKinds.push("subflow", ...Object.keys(PROMPT_EXECUTORS));
+  }
+  const registry = useQuery(workflowNodeDefinitionsQuery(nodeKinds));
   const roleCatalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId], enabled: Boolean(prompt),
     queryFn: () => invoke<{ name: string; version: Version }[]>("workflow_package_catalog", { projectId }),
   });
   if (!show) return <div className="workflow-builder-empty"><Workflow size={24} aria-hidden />
-    <p>This package has no editable graph. Open Package details to add or edit its members.</p>
+    <p>This draft has no editable graph. Open Draft artifacts to add or edit a graph.</p>
   </div>;
   const authoredPromptKeys = new Set(graphs.flatMap((member) => Object.values(member.references ?? {}).flatMap((ref) =>
     ref.source === "draft" ? [ref.key] : [])));
@@ -123,8 +126,8 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         canvas={canvasByMember[graph.key] ?? { layout: layouts[graph.key] ?? {}, updateDefinitions: {} }}
         setCanvas={(canvas) => changeCanvas(graph.key, canvas)}
         pinned={pinned} catalog={registry.data} disabled={disabled} graphs={graphs} memberKey={graph.key}
-        edit={(next, references, promptKeys) => edit(graph.key, next, references, promptKeys)}
-        promptMembers={promptMembers} memberKeys={memberKeys} draftRoles={draftRoles} editPrompt={editPrompt}
+        edit={(next, references) => edit(graph.key, next, references)}
+        promptMembers={promptMembers} draftRoles={draftRoles} editPrompt={editPrompt}
         previewMembers={preview.data.members}
         onDerive={setDerivation} deriveDisabled={deriveDisabled} toolbarStart={memberPicker}
         initialViewport={viewports.get(graph.key)} onViewportChange={(viewport) => viewports.set(graph.key, viewport)}
@@ -148,12 +151,11 @@ function promptRoles(drafts: PromptRoleChoice[], published?: { name: string; ver
 
 function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow,
   canvas, setCanvas, graphs, memberKey, onDerive, deriveDisabled, toolbarStart, initialViewport, onViewportChange,
-  promptMembers, memberKeys, draftRoles, editPrompt, previewMembers }: {
+  promptMembers, draftRoles, editPrompt, previewMembers }: {
   projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
   references: Record<string, ReusableReference>; draftPresets: Record<string, ReusableBody>;
-  edit: (graph: WorkflowGraph, references?: Record<string, ReusableReference>, promptKeys?: string[]) => void;
+  edit: (graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
   promptMembers: PromptMember[];
-  memberKeys: string[];
   draftRoles: PromptRoleChoice[];
   editPrompt?: (prompt: PromptMember, rename?: PromptPortRename) => void;
   previewMembers: Member[];
@@ -168,8 +170,6 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   initialViewport?: Viewport;
   onViewportChange: (viewport: Viewport) => void;
 }) {
-  const client = useQueryClient();
-  const issuedPromptKeys = useRef(new Set<string>());
   const published = graph.nodes.flatMap(({ id }) => {
     const reference = references[id];
     return reference?.source === "published" && (reference.version.kind === "preset" || reference.version.kind === "subflow")
@@ -202,13 +202,6 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
       body: { kind: "prompt", prompt }, references: artifact.references };
     return [[id, member] as const];
   }));
-  function createPrompt(): ReusableReference {
-    const root = "prompt-card";
-    let key = root;
-    for (let i = 2; memberKeys.includes(key) || issuedPromptKeys.current.has(key); i += 1) key = root + "-" + i;
-    issuedPromptKeys.current.add(key);
-    return { source: "draft", key };
-  }
   const discovered: WorkflowDefinitions = { ...pinned };
   const nodeBindings: NonNullable<WorkflowEditorState["nodeBindings"]> = Object.create(null);
   const nodes = graph.nodes.map((node) => {
@@ -306,25 +299,13 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
         .map((field) => [field, node.configuration[field]]));
       return { ...node, configuration: { kind: "preset_overrides", fields } };
     });
-    const promptKeys = [...retained.values()].flatMap((reference) => reference.source === "draft" && issuedPromptKeys.current.has(reference.key)
-      ? [reference.key] : []);
-    edit({ ...next.graph, nodes: updated }, Object.fromEntries(retained), promptKeys);
+    edit({ ...next.graph, nodes: updated }, Object.fromEntries(retained));
   };
-  function add({ artifact, definition, ...details }: ReusableDescription) {
-    client.setQueryData(reusableNodeQuery(projectId, artifact.version).queryKey, { artifact, definition, ...details });
-    const occupied = new Set(graph.nodes.map(({ id }) => id));
-    const stem = `reusable-${definition.kind.replaceAll("_", "-")}`;
-    let id = stem;
-    for (let ordinal = 2; occupied.has(id); ordinal += 1) id = `${stem}-${ordinal}`;
-    const configuration = artifact.version.kind === "preset" ? { kind: "preset_overrides", fields: {} } : { kind: "none" };
-    edit({ ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration }] },
-      { ...references, [id]: { source: "published", version: artifact.version } });
-  }
   return <>
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
       fullHeight toolbarStart={toolbarStart} initialViewport={initialViewport} onViewportChange={onViewportChange}
-      createPrompt={editPrompt ? createPrompt : undefined} promptRoles={rolesByNode}
+      promptRoles={rolesByNode}
       inspectPrompt={(id) => {
         const member = promptsByNode.get(id);
         if (!member) return null;
@@ -335,7 +316,6 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
           suggestion={(onApply) => <PromptContractSuggestion projectId={projectId} checkoutId={checkoutId}
             prompt={member.body.prompt} cardFingerprint={JSON.stringify(member)} disabled={disabled} onApply={onApply} />} />;
       }}
-      toolbarActions={<ReusableCatalog projectId={projectId} disabled={disabled} onAdd={add} />}
       problems={graphProblems(presented, definitions, backlogBound)} disabled={disabled} backlogBound={backlogBound}
       onDerive={onDerive} deriveDisabled={deriveDisabled}
       allowDefinitionUpdates={(id) => !promptsByNode.has(id) &&

@@ -10,7 +10,7 @@ import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
 import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 import { GitDiffFrame } from "@/git-diff-view";
 import { fileName } from "@/ide-knowledge-data";
-import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { loadMonaco } from "@/ide-monaco";
 import { SavedAttemptComparison, type AttemptChoice } from "@/saved-attempt-comparison";
 import { SavedPatchDialog, type SavedPatchPart } from "@/saved-patch-dialog";
 import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
@@ -261,10 +261,8 @@ function RecordedMonaco({ label, text, language, commands, reviewSelection }: {
     let active = true;
     let model: MonacoEditor.ITextModel | undefined;
     let editor: MonacoEditor.IStandaloneCodeEditor | undefined;
-    let observer: MutationObserver | undefined;
     void loadMonaco().then((monaco) => {
       if (!active || !host.current) return;
-      const theme = () => monaco.editor.setTheme(monacoTheme());
       model = monaco.editor.createModel(text, language);
       editor = monaco.editor.create(host.current, {
         model, ariaLabel: label, readOnly: true, automaticLayout: true,
@@ -296,13 +294,9 @@ function RecordedMonaco({ label, text, language, commands, reviewSelection }: {
           },
         });
       }
-      theme();
-      observer = new MutationObserver(theme);
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
     }).catch(() => { if (active) setError(true); });
     return () => {
       active = false;
-      observer?.disconnect();
       editor?.dispose();
       model?.dispose();
     };

@@ -40,7 +40,6 @@ import { useKnowledgeProperties, useKnowledgePropertySearch, type NotePropertyFi
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
-import { LinkedRepositoryNotePlanning, RepositoryNotePlanning, useRepositoryNotePlans } from "@/repository-note-planning";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { workflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 import { asNoteLocation, linkPreviewValue, resolveRepositoryLink, suggestRepositoryLinks, useRepositoryLinkPreviews,
@@ -79,9 +78,6 @@ type KnowledgeDialog =
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "launch"; source: NoteRevision }
-  | { kind: "plan"; source: NoteRevision }
-  | { kind: "linkedPlanning"; source: NoteRevision; ownerPanel?: FilePanelApi }
-  | { kind: "linkedTasks" }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
   | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number; manual?: boolean }
   | { kind: "repositoryAttachment"; paths: string[]; label: string }
@@ -172,12 +168,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     : inspectorOverride;
   const savedNote = active ? repository.notes[active] : undefined;
   const canLaunchFromNote = Boolean(savedNote && !savedNote.sourceProblem && !isDirty(savedNote));
-  const notePlans = useRepositoryNotePlans(checkout.projectId, savedNote && !savedNote.sourceProblem ? savedNote.base : undefined);
-  const linkedTasks = [...new Map(notePlans.data?.flatMap(({ task }) => task ? [[task.id, task] as const] : [])).values()];
   const sampleDeliveryNote = simulation && active === deliveryNote;
-  const showPlanAction = savedNote || sampleDeliveryNote && simulation.delivery === "note";
-  const showLinkedTask = linkedTasks.length > 0 || sampleDeliveryNote && simulation.delivery !== "note";
-  const canPlan = savedNote ? canLaunchFromNote : !isDirty(note);
+  const showPlanAction = sampleDeliveryNote && simulation.delivery === "note";
+  const showLinkedTask = sampleDeliveryNote && simulation.delivery !== "note";
+  const canPlan = !isDirty(note);
   const conflictRecovery = dialog?.kind === "conflict" ? repository.notes[dialog.path]?.recovery : undefined;
   const source = note?.content ?? "";
   const activeProperties = propertiesOf(source);
@@ -535,12 +529,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     void loadNote(favorite.path).then((path) => { if (request === lastOpen.current) navigate(path); });
   };
 
-  const openSavedNoteAction = (path: string, kind: "plan" | "launch" | "linkedPlanning" | "compare", ownerPanel?: FilePanelApi) => {
+  const openSavedNoteAction = (path: string, kind: "launch" | "compare") => {
     const request = ++lastOpen.current;
     void loadNote(path).then((canonical) => {
       if (request !== lastOpen.current) return;
       const selected = canonical ? getNote(canonical) : undefined;
-      const browseSaved = kind === "linkedPlanning" || kind === "compare";
+      const browseSaved = kind === "compare";
       if (!selected || selected.sourceProblem || (!browseSaved && isDirty(selected))) {
         setProblem(browseSaved ? "The saved note revision is unavailable."
           : "Save the note and resolve external changes before using its revision.");
@@ -549,8 +543,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       if (kind === "compare") {
         const { id, relativePath, sha256, checkoutId } = selected.base;
         openWorkspace("pipelines", workflowComparisonNoteTarget({ checkoutId, revisionId: id, relativePath, sha256 }));
-      } else if (kind === "linkedPlanning") setDialog({ kind, source: selected.base, ownerPanel });
-      else setDialog({ kind, source: selected.base });
+      } else setDialog({ kind, source: selected.base });
     });
   };
   const mergeActions = (source: string, options?: { destination?: string; ownerPanel?: FilePanelApi }): MenuGroups[number] => {
@@ -587,12 +580,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       ...(external === undefined ? [] : [{ label: "Review external change", run: () => reviewExternalChange(path, external) }]),
     ], [
       ...(!simulated ? [
-        { label: "Plan from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "plan") },
         { label: "Run workflow from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "launch") },
         { label: "Compare models from note…", disabled: Boolean(repository.notes[path]?.sourceProblem),
           run: () => openSavedNoteAction(path, "compare") },
-        { label: "Open linked planning / delivery…", disabled: Boolean(repository.notes[path]?.sourceProblem),
-          run: () => openSavedNoteAction(path, "linkedPlanning", ownerPanel) },
       ] : []),
     ]];
   };
@@ -1086,14 +1076,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             {showPlanAction && <button type="button" className="fw-btn fw-primary" disabled={!canPlan}
               title={canPlan ? "Start Plan Mode from the saved note" : "Save this note without conflicts before starting Plan Mode"}
               onClick={() => {
-                if (savedNote) setDialog({ kind: "plan", source: savedNote.base });
-                else if (simulation) { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }
-              }}><Wand2 size={14} />Plan from note</button>}
+                if (simulation) { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }
+              }}><Wand2 size={14} />Simulate planning</button>}
             {showLinkedTask && <button type="button" className="fw-btn" onClick={() => {
-                if (simulation) openWorkspace("tasks", "release");
-                else if (linkedTasks.length === 1) openWorkspace("tasks", linkedTasks[0]?.id);
-                else setDialog({ kind: "linkedTasks" });
-              }}><GitFork size={14} />{linkedTasks.length > 1 ? "Open linked tasks" : "Open linked task"}</button>}
+                openWorkspace("tasks", "release");
+              }}><GitFork size={14} />Open linked task</button>}
             {savedNote && <button type="button" className="fw-btn" disabled={!canLaunchFromNote}
               title={canLaunchFromNote ? "Choose a published workflow and review this revision" : "A saved note without conflicts is required"}
               onClick={() => setDialog({ kind: "launch", source: savedNote.base })}><Wand2 size={14} />Run workflow from note</button>}
@@ -1101,15 +1088,6 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         </footer>}
       </div>
 
-      {dialog?.kind === "plan" && <RepositoryNotePlanning projectId={checkout.projectId} source={dialog.source}
-        openWorkspace={openWorkspace} onClose={closeDialog} />}
-      {dialog?.kind === "linkedPlanning" && <LinkedRepositoryNotePlanning projectId={checkout.projectId} source={dialog.source}
-        openWorkspace={openWorkspace} onClose={closeDialog} ownerPanel={dialog.ownerPanel} />}
-      {dialog?.kind === "linkedTasks" && <FileDialog title="Linked tasks" description="Choose a Task linked to this saved note revision." onClose={closeDialog}>
-        <ul className="pipeline-stack">{linkedTasks.map(({ id, title }) => <li key={id}>
-          <button type="button" className="fw-btn" onClick={() => { closeDialog(); openWorkspace("tasks", id); }}>{title}</button>
-        </li>)}</ul>
-      </FileDialog>}
       {treeActions.dialog}
       {filePreview.dialog}
       {conversationActions.dialog}

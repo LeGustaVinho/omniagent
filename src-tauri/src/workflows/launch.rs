@@ -4,7 +4,6 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use uuid::Uuid;
 
 use crate::{
     protection,
@@ -17,9 +16,9 @@ use crate::{
 };
 
 use super::{
-    ArtifactKind, ArtifactValue, BuiltinNode, DeliveryRoles, NodeConfiguration, TaskReference,
-    WorkflowArtifact, WorkflowHostRequest, WorkflowRevision, WorkflowRun,
-    artifacts::{insert_artifact, load_artifact},
+    ArtifactValue, BuiltinNode, NodeConfiguration, TaskReference, WorkflowArtifact,
+    WorkflowHostRequest, WorkflowRevision, WorkflowRun, artifacts::insert_artifact,
+    builtin::BUILTIN_DELIVERY_ID,
     digest,
     execution::{host_request_revision, record_host_completion},
     registry::supports_pinned_execution,
@@ -199,13 +198,6 @@ pub struct WorkflowLaunchReceipt {
     pub checklist_item: Option<ChecklistProgressReceipt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepositoryNotePlanning {
-    pub run_id: String,
-    pub task: Option<crate::tasks::ProjectTask>,
-}
-
 impl Store {
     pub async fn launch_workflow_manual(
         &self,
@@ -260,41 +252,6 @@ impl Store {
         Ok(run)
     }
 
-    pub async fn launch_builtin_repository_delivery(
-        &self,
-        project: String,
-        source: WorkflowLaunchSource,
-    ) -> Result<WorkflowRun> {
-        self.launch_builtin_repository_delivery_request(project, source, Uuid::new_v4().to_string())
-            .await
-    }
-
-    pub async fn launch_builtin_repository_delivery_request(
-        &self,
-        project: String,
-        source: WorkflowLaunchSource,
-        request_id: String,
-    ) -> Result<WorkflowRun> {
-        let graph = self
-            .builtin_delivery_for_project(project.clone(), DeliveryRoles::default())
-            .await?;
-        let revision = self
-            .save_workflow_revision(
-                project.clone(),
-                super::builtin::BUILTIN_DELIVERY_ID.into(),
-                graph,
-            )
-            .await?;
-        self.launch_workflow_manual(ManualWorkflowLaunch {
-            project_id: project,
-            workflow: revision,
-            source,
-            request_id,
-            work_id: None,
-        })
-        .await
-    }
-
     pub async fn workflow_launch(
         &self,
         project: String,
@@ -302,61 +259,6 @@ impl Store {
     ) -> Result<Option<WorkflowLaunchReceipt>> {
         self.execute(move |db| load_workflow_launch(db, &project, &run))
             .await
-    }
-
-    pub async fn repository_note_planning(
-        &self,
-        project: String,
-        source: WorkflowLaunchSource,
-    ) -> Result<Vec<RepositoryNotePlanning>> {
-        self.execute(move |db| {
-            validate_workflow_launch_source(
-                db,
-                &project,
-                &source.checkout_id,
-                &source.revision_id,
-            )?;
-            let mut statement = db.prepare(
-                "SELECT l.pipeline_run_id, l.payload, (
-                    SELECT c.artifact_id FROM workflow_host_completions c
-                    WHERE c.pipeline_run_id = l.pipeline_run_id AND c.node_instance_id = 'work'
-                      AND c.execution_key IN ('', r.plan_revision)
-                    ORDER BY length(c.execution_key) DESC LIMIT 1
-                 )
-                 FROM workflow_launches l
-                 JOIN workflow_run_pins p ON p.pipeline_run_id = l.pipeline_run_id
-                 JOIN job_pipeline_runs r ON r.id = l.pipeline_run_id
-                 WHERE l.project_id = ?1 AND p.workflow_id = ?2 ORDER BY l.pipeline_run_id",
-            )?;
-            let mut rows =
-                statement.query(params![project, super::builtin::BUILTIN_DELIVERY_ID])?;
-            let mut matches = Vec::new();
-            while let Some(row) = rows.next()? {
-                let payload: Vec<u8> = row.get(1)?;
-                let launch = open_receipt(&payload)?;
-                if !launch.source.is_some_and(|note| {
-                    note.checkout_id == source.checkout_id && note.id == source.revision_id
-                }) {
-                    continue;
-                }
-                let run_id: String = row.get(0)?;
-                let artifact: Option<String> = row.get(2)?;
-                let task = artifact
-                    .as_deref()
-                    .map(|id| load_artifact(db, &project, &run_id, id, ArtifactKind::Task))
-                    .transpose()?
-                    .flatten();
-                let task = match task.map(|artifact| artifact.value) {
-                    Some(ArtifactValue::Task(task)) if task.project_id == project => {
-                        crate::tasks::load_project_task(db, &project, &task.task_id)?
-                    }
-                    _ => None,
-                };
-                matches.push(RepositoryNotePlanning { run_id, task });
-            }
-            Ok(matches)
-        })
-        .await
     }
 }
 
@@ -485,6 +387,7 @@ pub(super) fn prepare_entry(
     entry: &LaunchEntry,
     origin: &WorkflowLaunchOrigin,
 ) -> Result<PreparedLaunch> {
+    ensure!(revision.id != BUILTIN_DELIVERY_ID, "Repository delivery has been removed");
     validate_workflow_launch_checkout(db, project, &entry.checkout_id)?;
     let work = if let Some(work) = origin.work_id() {
         let exists: bool = db.query_row(

@@ -45,11 +45,11 @@ const sampleNode = {
     delegates: [{ alias: "tests", required: false }, { alias: "correctness", required: true }] },
 };
 
-function mountPromptEditor(sampleNodes = [sampleNode]) {
+function mountPromptEditor(sampleNodes = [sampleNode], opened = draft) {
   vi.mocked(invoke).mockImplementation(async (name, payload) => {
     switch (name) {
-      case "inspect_workflow_package": return draft;
-      case "workflow_graph_registry": return [start, subflow];
+      case "inspect_workflow_package": return opened;
+      case "workflow_node_definitions": return [start, subflow];
       case "workflow_package_catalog": return [savedPrompt];
       case "describe_workflow_reusable_node": return {
         artifact: savedPrompt, definition: subflow, graphDefinitions: {}, editableOverrides: [],
@@ -74,10 +74,15 @@ function mountPromptEditor(sampleNodes = [sampleNode]) {
   return userEvent.setup();
 }
 
-it("creates a versioned Prompt member and applies proposed ports only to the matching card snapshot", async () => {
-  const user = mountPromptEditor([]);
-  await user.click(await screen.findByRole("button", { name: "Add node" }));
-  await user.click(screen.getByRole("button", { name: "Add Prompt" }));
+it("edits a saved Prompt and applies proposed ports only to the matching card snapshot", async () => {
+  const member = { key: "prompt-card", name: "Prompt", destination: "project",
+    body: { kind: "prompt", prompt: { text: "", inputs: {}, outputs: {}, routes: [], executor: "agent", delegates: [] } },
+    references: { role: { source: "draft", key: role.key } } };
+  const linked = { ...pipeline, body: { ...pipeline.body, graph: { ...pipeline.body.graph,
+    nodes: [...pipeline.body.graph.nodes, { id: "prompt", kind: "subflow", configuration: { kind: "none" } }] } },
+    references: { prompt: { source: "draft", key: member.key } } };
+  const user = mountPromptEditor([], { ...draft, package: { ...draft.package, members: [linked, role, member] } });
+  await user.selectOptions(await screen.findByRole("combobox", { name: "Inspect node" }), "prompt");
   const prompt = screen.getByRole("textbox", { name: "Prompt" });
   await user.type(prompt, "Review candidate");
   await user.selectOptions(screen.getByRole("combobox", { name: "Role revision" }), JSON.stringify(["draft", role.key]));
@@ -128,7 +133,7 @@ it("creates a versioned Prompt member and applies proposed ports only to the mat
   await user.selectOptions(screen.getByRole("combobox", { name: "Inspect node" }), "prompt");
   expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Prompt" }).value).toBe("Review the updated candidate");
 
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
     ...scope, expectedRevision: draft.revision, package: { name: draft.package.name, members: [
       { ...pipeline, references: { prompt: { source: "draft", key: "prompt-card" } }, body: { ...pipeline.body, graph: {
@@ -163,24 +168,13 @@ it("simulates alternate routes and optional invited Roles by the matching native
   expect(invoke).toHaveBeenCalledWith("simulate_workflow_package_revision", sample("deliver"));
 });
 
-it("adds an exact published Prompt revision and shows its read-only contract", async () => {
-  const user = mountPromptEditor([]);
-  await user.click(await screen.findByRole("button", { name: "Add a reusable node" }));
-  await user.selectOptions(await screen.findByRole("combobox", { name: "Published reusable node" }),
-    JSON.stringify(savedPrompt.version));
-  await user.click(screen.getByRole("button", { name: "Add pinned node" }));
-  await user.selectOptions(screen.getByRole("combobox", { name: "Inspect node" }), "reusable-subflow");
-  const prompt = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Prompt" });
+it("shows a pinned published Prompt's read-only contract", async () => {
+  const linked = { ...pipeline, body: { ...pipeline.body, graph: { ...pipeline.body.graph,
+    nodes: [...pipeline.body.graph.nodes, { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } }] } },
+    references: { "reusable-subflow": { source: "published", version: savedPrompt.version } } };
+  const user = mountPromptEditor([], { ...draft, package: { ...draft.package, members: [linked, role] } });
+  await user.selectOptions(await screen.findByRole("combobox", { name: "Inspect node" }), "reusable-subflow");
+  const prompt = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Prompt" });
   expect(prompt.value).toBe("Evaluate carefully.");
   expect(prompt.disabled).toBe(true);
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
-  expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
-    package: expect.objectContaining({ members: [
-      expect.objectContaining({ ...pipeline, body: expect.objectContaining({ graph: expect.objectContaining({
-        nodes: [...pipeline.body.graph.nodes, { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } }],
-      }) }),
-      references: { "reusable-subflow": { source: "published", version: savedPrompt.version } } }),
-      role,
-    ] }),
-  }));
 });

@@ -271,7 +271,6 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
           {kind === "Epic" && !children.length && <p className="text-sm text-muted-foreground">No Tasks linked to this Epic.</p>}
           <div className="flex flex-wrap gap-2">
             <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={edit}>Edit {kind.toLowerCase()}</Button>
-            {isDelivery && <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={() => props.openWorkspace("pipelines", "task-delivery")}>Run pipeline</Button>}
             {isDelivery && <TaskActions simulation={sim} openWorkspace={props.openWorkspace} openActivity={props.openActivity} openChanges={props.openChanges} setTab={setTab} />}
           </div>
         </>}

@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, ChevronUp, CircleCheck, Columns2, ExternalLink, FileCode2, FileImage, GitCompare, Rows3, X } from "lucide-react";
 import type { editor, IPosition, IRange } from "monaco-editor";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { loadMonaco } from "@/ide-monaco";
 import { FileDialog } from "@/ide-file-workspace";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { ResizablePanel } from "@/panel-resize";
@@ -409,11 +409,9 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
     let active = true;
     let original: editor.ITextModel | undefined;
     let modified: editor.ITextModel | undefined;
-    let themeObserver: MutationObserver | undefined;
 
     void loadMonaco().then((monaco) => {
       if (!active) return;
-      const theme = () => monaco.editor.setTheme(monacoTheme());
       original = monaco.editor.createModel(file.original, file.language);
       modified = monaco.editor.createModel(file.modified, file.language);
       const opened = monaco.editor.createDiffEditor(host, {
@@ -515,9 +513,6 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
           },
         });
       }
-      theme();
-      themeObserver = new MutationObserver(theme);
-      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
       ready?.(opened);
       setOpened(opened);
     }).catch(() => { if (active) setError(true); });
@@ -525,7 +520,6 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
     return () => {
       active = false;
       ready?.(null);
-      themeObserver?.disconnect();
       instance.current?.dispose();
       instance.current = null;
       original?.dispose();

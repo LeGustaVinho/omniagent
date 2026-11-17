@@ -1,13 +1,14 @@
 import { autocompletion, type Completion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { codeFolding, defaultHighlightStyle, ensureSyntaxTree, foldable, foldEffect, foldedRanges, syntaxHighlighting, syntaxTree, unfoldEffect } from "@codemirror/language";
+import { codeFolding, ensureSyntaxTree, foldable, foldEffect, foldedRanges, HighlightStyle, syntaxHighlighting, syntaxTree, unfoldEffect } from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
   Decoration, drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers, ViewPlugin, WidgetType,
   type Command, type DecorationSet, type ViewUpdate,
 } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 import { Braces, CheckSquare, List, Redo2, Search, Table2, Undo2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
@@ -29,18 +30,36 @@ export interface NoteJump {
 
 const editorTheme = EditorView.theme({
   "&": { height: "100%", backgroundColor: "var(--background)", color: "var(--foreground)", fontSize: "13px" },
-  ".cm-scroller": { fontFamily: '"Geist Mono", Consolas, monospace', lineHeight: "1.75", overflow: "auto" },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.75", overflow: "auto" },
   ".cm-content": { padding: "16px 0 22px", caretColor: "var(--foreground)" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--primary)" },
   ".cm-line": { padding: "0 12px" },
   ".cm-gutters": { backgroundColor: "var(--background)", borderRight: "1px solid var(--border)", color: "var(--muted-foreground)" },
   ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "color-mix(in srgb, var(--muted) 65%, transparent)" },
-  ".cm-panels": { backgroundColor: "var(--card)", color: "var(--foreground)" },
-  ".cm-tooltip": { backgroundColor: "var(--card)", color: "var(--foreground)", border: "1px solid var(--border)" },
+  ".cm-panels, .cm-tooltip": { backgroundColor: "var(--elevated)", color: "var(--foreground)" },
+  ".cm-panels-top": { borderBottom: "1px solid var(--border)" },
+  ".cm-tooltip": { border: "1px solid var(--border)" },
+  ".cm-tooltip-autocomplete ul li[aria-selected]": { background: "var(--muted)", color: "var(--foreground)" },
+  ".cm-button, .cm-button:active": { background: "var(--muted)", border: "1px solid var(--border)", borderRadius: "4px" },
+  ".cm-textfield": { background: "var(--background)", border: "1px solid var(--input)", borderRadius: "4px" },
+  ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--warning) 20%, transparent)" },
+  ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in srgb, var(--warning) 35%, transparent)" },
   ".cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": { backgroundColor: "color-mix(in srgb, var(--primary) 28%, transparent)" },
   "&.cm-focused": { outline: "none" },
   ".cm-note-link": { color: "var(--primary)", textDecoration: "underline", textUnderlineOffset: "2px" },
   ".cm-note-check": { accentColor: "var(--primary)", marginRight: "6px", verticalAlign: "middle" },
 });
+
+const markdownSyntax = syntaxHighlighting(HighlightStyle.define([
+  { tag: tags.heading, fontWeight: "bold" },
+  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.strong, fontWeight: "bold" },
+  { tag: tags.strikethrough, textDecoration: "line-through" },
+  { tag: [tags.link, tags.url], color: "var(--primary)", textDecoration: "underline", textUnderlineOffset: "2px" },
+  { tag: [tags.monospace, tags.string], color: "var(--syntax-string)" },
+  { tag: [tags.atom, tags.labelName, tags.escape], color: "var(--syntax-number)" },
+  { tag: [tags.comment, tags.quote, tags.contentSeparator, tags.processingInstruction], color: "var(--muted-foreground)" },
+]));
 
 class ConcealedWiki extends WidgetType {
   constructor(readonly label: string, readonly target: string, readonly start: number) { super(); }
@@ -368,7 +387,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
         extensions: [
           markdown({ base: markdownLanguage }), codeFolding(), lineNumbers(), highlightActiveLine(), drawSelection(), history(), search({ top: true }),
           keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          markdownSyntax,
           editorTheme,
           canonicalSyntax,
           compartment.of(fresh.current.mode === "live" ? (fresh.current.analyze ? canonicalLivePreview : livePreview) : []),

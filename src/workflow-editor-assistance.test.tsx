@@ -73,7 +73,7 @@ it("uses the role revision selected in the live editor and links the resulting d
       case "workflow_authoring_bases": case "conversation_workflow_authoring": return [];
       case "list_workflow_packages": {
         expect(input).toEqual({ projectId: checkout.projectId, conversationId: result.conversationId });
-        return [{ id: result.id, revision: result.revision, name: result.package.name, memberCount: 0, published: false }];
+        return [{ id: result.id, revision: result.revision, name: result.package.name, memberCount: 0, standalonePipeline: true, published: false }];
       }
       default: throw Error(command);
     }
@@ -88,7 +88,7 @@ it("uses the role revision selected in the live editor and links the resulting d
   await waitFor(() => expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:${result.id}`));
   editor.unmount();
   const draft = mount(<WorkflowPackageEditor {...props} draftId={result.id} />);
-  await user.click(await screen.findByRole("button", { name: "Package details" }));
+  await user.click(await screen.findByRole("button", { name: "Draft artifacts" }));
   await user.click(await screen.findByRole("button", { name: "Open source conversation" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("conversations", result.conversationId);
   await user.click(screen.getByRole("button", { name: "Open queued authoring job" }));
@@ -98,13 +98,13 @@ it("uses the role revision selected in the live editor and links the resulting d
   await user.click(screen.getByRole("button", { name: "Create or edit with AI" }));
   await user.selectOptions(screen.getByRole("combobox", { name: "Source conversation" }), await screen.findByRole("option", { name: "Editor source" }));
   props.openWorkspace.mockClear();
-  await user.click(await screen.findByRole("button", { name: "Open linked package" }));
+  await user.click(await screen.findByRole("button", { name: "Open linked visual draft" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:${result.id}`);
 });
 
-it("preserves the selected published pipeline and reusable artifact revisions", async () => {
+it("preserves selected revisions and omits legacy presets from published artifact choices", async () => {
   const workflow = { id: "published-graph", revision: "exact-pipeline" };
-  const reusable = { id: "local-node", revision: "exact-reusable", kind: "preset", destination: "library" };
+  const reusable = { id: "local-tool", revision: "exact-reusable", kind: "command", destination: "library" };
   const publication: WorkflowPublication = { id: "pipeline-publication", workflow, base: null, draftId: "graph",
     reviewedRevisionId: "review", originatingRequestId: null, originatingRunId: "run", decisionSource: "desktop_user", confirmedAt: 1600000000 };
   mock((command) => {
@@ -112,9 +112,10 @@ it("preserves the selected published pipeline and reusable artifact revisions", 
       case "inspect_workflow_authoring": return { id: "graph", conversationId: "chat", base: null,
         head: { id: "review", graph: { name: "Pipeline", nodes: [], wires: [] } }, request: { state: "saved", runId: "run" },
         publication };
-      case "workflow_graph_registry": return [];
+      case "workflow_node_definitions": return [];
       case "inspect_workflow_package": return { ...result, request: null };
-      case "workflow_package_catalog": return [{ version: reusable, name: "Saved reusable node", blockers: [] }];
+      case "workflow_package_catalog": return [{ version: reusable, name: "Saved command", blockers: [] },
+        { version: { ...reusable, kind: "preset" }, name: "Old node preset", blockers: [] }];
       default: throw Error(command);
     }
   });
@@ -128,11 +129,12 @@ it("preserves the selected published pipeline and reusable artifact revisions", 
   pipeline.unmount();
 
   mount(<WorkflowPackageEditor {...props} draftId="new-package" />);
-  await user.click(await screen.findByRole("button", { name: "Package details" }));
-  await user.click(await screen.findByText("Edit package"));
+  await user.click(await screen.findByRole("button", { name: "Draft artifacts" }));
+  await user.click(await screen.findByText("Edit draft source"));
   await user.click(screen.getByText("Published artifacts"));
   await user.selectOptions(screen.getByRole("combobox", { name: "Published artifact" }),
-    await screen.findByRole("option", { name: /Saved reusable node/ }));
+    await screen.findByRole("option", { name: /Saved command/ }));
+  expect(screen.queryByRole("option", { name: /Old node preset/ })).toBeNull();
   await submit(user, reusable.revision);
   expect(invoke).toHaveBeenCalledWith("start_workflow_editor_authoring", { ...args, base: reusable });
 });

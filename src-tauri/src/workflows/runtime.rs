@@ -608,7 +608,7 @@ impl Store {
                 !request.requires_bridge && input.pinned.is_none() && unit_id.is_none(),
                 "Diff review needs a new read-only session without a release or bridge"
             );
-            let git = super::templates::diff::inspection(&resolved["git"])?;
+            let git = super::diff::inspection(&resolved["git"])?;
             ensure!(
                 git.candidate.target.project_id == project_id
                     && request.checkout_id.as_ref() == Some(&git.candidate.checkout_id)

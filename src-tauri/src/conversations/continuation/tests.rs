@@ -26,6 +26,13 @@ async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_wit
     )
     .await?;
     let current = store.conversation(original.id).await?;
+    let checkout = current.checkout_id.clone();
+    let project = store.execute(move |db| {
+        Ok(db.query_row("SELECT project_id FROM checkouts WHERE id = ?1", [&checkout], |row| row.get(0))?)
+    }).await?;
+    let workflow = crate::conversations::pipeline::tests::save_workflow(
+        &store, project, "Continuation pipeline", true,
+    ).await?;
     let source = store
         .create_conversation(current.checkout_id.clone(), "Reference".into())
         .await?;
@@ -72,7 +79,7 @@ async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_wit
             preview_id.clone(),
             next_scope.clone(),
             text.clone(),
-            ConversationPipelineChoice::RepositoryDelivery,
+            ConversationPipelineChoice::Published { workflow: workflow.clone() },
         )
         .await
         .unwrap_err();
@@ -93,12 +100,12 @@ async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_wit
             preview_id.clone(),
             next_scope.clone(),
             text.clone(),
-            ConversationPipelineChoice::RepositoryDelivery,
+            ConversationPipelineChoice::Published { workflow: workflow.clone() },
         )
         .await?;
     assert!(matches!(
         destination.pipeline,
-        Some(ConversationPipeline::RepositoryDelivery { .. })
+        Some(ConversationPipeline::Published { .. })
     ));
     assert_eq!(destination.checkout_id, current.checkout_id);
     assert_eq!(
@@ -133,7 +140,7 @@ async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_wit
                 preview_id,
                 next_scope,
                 text,
-                ConversationPipelineChoice::RepositoryDelivery
+                ConversationPipelineChoice::Published { workflow }
             )
             .await
             .is_err()

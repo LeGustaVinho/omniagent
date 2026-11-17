@@ -13,7 +13,8 @@ use crate::{
 
 use super::*;
 
-const WORKER: &str = "workflows::git_integration::factory_templates::diff::review_runner::frozen_diff_protocol_worker";
+const WORKER: &str =
+    "workflows::git_integration::diff_review::review_runner::frozen_diff_protocol_worker";
 const THREAD: &str = "frozen-diff-fixture";
 const TURN: &str = "frozen-diff-turn";
 

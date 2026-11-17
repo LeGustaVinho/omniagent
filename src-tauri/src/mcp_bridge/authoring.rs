@@ -53,7 +53,7 @@ pub(super) fn tools() -> [Tool; 3] {
         ),
     ];
     let catalog = json!({"type":"object","additionalProperties":false,"required":["view"],"properties":{
-        "view":{"enum":["draft","builtin_nodes","published","draft_member","published_member"]},
+        "view":{"enum":["draft","draft_node_definitions","published","draft_member","published_member"]},
         "offset":offset,"key":text,"expectedRevision":text,
         "version":{"type":"object","required":["destination","kind","id","revision"],
             "additionalProperties":false,"properties":{
@@ -70,7 +70,7 @@ pub(super) fn tools() -> [Tool; 3] {
         "requestId":text, "expectedRevision":text
     }});
     [
-        (READ, "Read this request's package and only its project and local-library catalog. Use view draft for the working revision, builtin_nodes for typed ports, published for exact artifact versions, and draft_member or published_member for JSON chunks. Pass nextOffset to continue.", catalog, true),
+        (READ, "Read this request's package and only its project and local-library catalog. Use view draft for the working revision, draft_node_definitions for the definitions pinned to this draft, published for exact artifact versions, and draft_member or published_member for JSON chunks. Pass nextOffset to continue.", catalog, true),
         (APPLY, "Apply typed edits to this attempt's working revision. Use the last revision returned by a successful call and repeat the same requestId and content to retry. An edit affects the protected draft workspace.", apply, false),
         (SUBMIT, "Submit this working revision for human review. Use the last working revision and a new requestId. This records a reviewed proposal in the package editor.", submit, false),
     ].map(|(name, description, schema, read_only)| {

@@ -210,7 +210,7 @@ fn enqueue(
     let id = new_id();
     let prompt = format!(
         r#"Propose a reviewed OmniAgent artifact package using the scoped OmniAgent MCP tools.
-Read read_authoring_catalog with view draft for the working revision. Use builtin_nodes for typed ports,
+Read read_authoring_catalog with view draft for the working revision. Use draft_node_definitions for the definitions pinned to this draft,
 published for visible exact versions, and draft_member to inspect a saved member.
 Send one or more typed edits to apply_authoring_operations with a stable requestId and the last revision.
 Submit the final revision with submit_authoring_for_review and a new requestId, then stop editing.

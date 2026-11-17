@@ -6,9 +6,8 @@ use omniagent::{
     store::Store,
     workflows::{
         ArtifactValue, BuiltinNode, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
-        WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission,
-        WorkflowLaunchReceipt, WorkflowLaunchSource, WorkflowOperatorJob, WorkflowPlanHistory,
-        WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun, WorkflowUnitOutcome,
+        WorkflowHostRequest, WorkflowHostSubmission, WorkflowPlanHistory, WorkflowPlanProposal,
+        WorkflowPlanRevisionRequest, WorkflowRun, WorkflowUnitOutcome,
         WorkflowUnitRequest, WorkflowUnitSubmission,
     },
 };
@@ -23,6 +22,7 @@ pub mod command;
 pub mod comparison;
 pub mod conversation_turns;
 pub mod decisions;
+pub mod diff;
 pub mod github;
 pub mod goal;
 pub mod graph_editor;
@@ -32,22 +32,10 @@ pub mod maintenance;
 pub mod mcp_tools;
 pub mod role_templates;
 pub mod stage_requirements;
-pub mod templates;
 pub mod triggers;
 
 fn report(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepositoryDelivery {
-    run: WorkflowRun,
-    definition: WorkflowDefinition,
-    artifacts: Vec<WorkflowArtifact>,
-    jobs: Vec<WorkflowOperatorJob>,
-    host_outputs: NodeInputs,
-    launch: Option<WorkflowLaunchReceipt>,
 }
 
 #[derive(Serialize)]
@@ -70,78 +58,11 @@ pub enum DeliveryHostAction {
 }
 
 #[tauri::command]
-pub async fn start_repository_delivery(
-    store: State<'_, Store>,
-    project_id: String,
-    checkout_id: String,
-    revision_id: String,
-    request_id: Option<String>,
-) -> Result<WorkflowRun, String> {
-    let source = WorkflowLaunchSource {
-        checkout_id,
-        revision_id,
-    };
-    match request_id {
-        Some(request) => {
-            store
-                .launch_builtin_repository_delivery_request(project_id, source, request)
-                .await
-        }
-        None => {
-            store
-                .launch_builtin_repository_delivery(project_id, source)
-                .await
-        }
-    }
-    .map_err(report)
-}
-
-#[tauri::command]
 pub async fn list_repository_deliveries(
     store: State<'_, Store>,
     project_id: String,
 ) -> Result<Vec<WorkflowRun>, String> {
     store.list_workflow_runs(project_id).await.map_err(report)
-}
-
-#[tauri::command]
-pub async fn inspect_repository_delivery(
-    store: State<'_, Store>,
-    project_id: String,
-    run_id: String,
-) -> Result<Option<RepositoryDelivery>, String> {
-    async {
-        let Some(run) = store
-            .workflow_run(project_id.clone(), run_id.clone())
-            .await?
-        else {
-            return Ok(None);
-        };
-        let definition = store
-            .workflow_definition(project_id.clone(), run.version.clone())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("The pinned delivery definition is unavailable"))?;
-        let artifacts = store
-            .workflow_run_artifacts(project_id.clone(), run_id.clone())
-            .await?;
-        let host_outputs = store
-            .current_workflow_host_outputs(project_id.clone(), run_id.clone())
-            .await?;
-        let launch = store
-            .workflow_launch(project_id.clone(), run_id.clone())
-            .await?;
-        let jobs = store.workflow_operator_jobs(project_id, run_id).await?;
-        Ok(Some(RepositoryDelivery {
-            run,
-            definition,
-            artifacts,
-            jobs,
-            host_outputs,
-            launch,
-        }))
-    }
-    .await
-    .map_err(report)
 }
 
 #[tauri::command]
@@ -160,19 +81,6 @@ pub async fn repository_delivery_tasks(
             title: work.task.title,
         })
         .collect())
-}
-
-#[tauri::command]
-pub async fn repository_delivery_units(
-    store: State<'_, Store>,
-    project_id: String,
-    task_id: String,
-    run_id: String,
-) -> Result<Vec<WorkflowDeliveryUnit>, String> {
-    store
-        .workflow_operator_units(project_id, task_id, run_id)
-        .await
-        .map_err(report)
 }
 
 #[tauri::command]

@@ -146,7 +146,7 @@ export function PreviewConversationPanel(props: PanelProps) {
   const history = useRef<HTMLDivElement>(null);
   const sideQuestionButton = useRef<HTMLButtonElement>(null);
   const stickToEnd = useRef(true);
-  const step = conversation.id === deliveryConversation || conversation.pipeline?.kind === "repository_delivery" ? simulation?.delivery : undefined;
+  const step = conversation.id === deliveryConversation ? simulation?.delivery : undefined;
   const activeRun = step === "running";
   const provider = selection?.provider;
   const { draft, goal, sideQuestion } = conversation;

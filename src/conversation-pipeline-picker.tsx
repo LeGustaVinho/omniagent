@@ -12,7 +12,6 @@ import { conversationLibraryKey } from "@/conversation-library";
 import "./conversation-pipeline.css";
 
 export const directConversationPipeline = { kind: "direct" } as const;
-export const repositoryDeliveryChoice = { name: "Repository delivery", pipeline: { kind: "repository_delivery" } } as const;
 export const directConversationChoice = { name: "Direct conversation", pipeline: directConversationPipeline } as const;
 
 export function conversationPipelineKey(pipeline: ConversationPipelineChoice) {
@@ -30,6 +29,7 @@ export function ConversationPipelineOptions({ options, selected, onSelect, disab
   return <fieldset className="conversation-pipeline-options" disabled={disabled}>
     <legend className="sr-only">Pipeline</legend>
     {options.map(({ pipeline, name: label }) => {
+      if (pipeline.kind === "repository_delivery") return null;
       const key = conversationPipelineKey(pipeline);
       const Icon = pipelineIcons[pipeline.kind];
       return <label className="conversation-pipeline-option" key={key}>
@@ -46,14 +46,13 @@ export function ConversationPipelineOptions({ options, selected, onSelect, disab
 const pipelineIcons = { direct: MessageSquare, repository_delivery: GitPullRequest, published: Workflow };
 const pipelineDescriptions = {
   direct: "Talk directly with an agent in this worktree.",
-  repository_delivery: "Start the repository delivery workflow with a saved Markdown revision.",
   published: "Run this published revision for each message.",
 };
 
 export function ConversationPipelineLabel({ pipeline }: { pipeline: ChatPipeline }) {
   const Icon = pipelineIcons[pipeline.kind];
   const name = pipeline.kind === "published" ? pipeline.name
-    : pipeline.kind === "repository_delivery" ? repositoryDeliveryChoice.name : directConversationChoice.name;
+    : pipeline.kind === "repository_delivery" ? "Archived pipeline" : directConversationChoice.name;
   const revision = pipeline.kind === "direct" ? undefined : pipeline.workflow.revision;
   return <span className="conversation-pipeline-label" title={revision ? `${name} · ${revision}` : name} aria-label={revision ? `${name}, revision ${revision}` : name}>
     <Icon size={14} aria-hidden /> <span>{name}</span>{revision && <code>{revision.slice(0, 10)}</code>}
@@ -71,7 +70,7 @@ export function ConversationPipelinePicker({ options, loading, error, onRetry, o
   opener?: HTMLElement | null;
 }) {
   const [selected, setSelected] = useState("");
-  const choice = options.find(({ pipeline }) => conversationPipelineKey(pipeline) === selected);
+  const choice = options.find(({ pipeline }) => pipeline.kind !== "repository_delivery" && conversationPipelineKey(pipeline) === selected);
   const formId = useId();
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !pending) onClose(); }}>
     <Dialog.Portal>

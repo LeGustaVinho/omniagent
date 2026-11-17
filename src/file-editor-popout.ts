@@ -79,5 +79,37 @@ export function mirrorEditorAppearance(popup: Window) {
   sync();
   const observer = new MutationObserver(sync);
   observer.observe(source, { attributes: true });
-  return () => observer.disconnect();
+  const stopMonacoTheme = mirrorMonacoTheme(popup.document);
+  return () => {
+    observer.disconnect();
+    stopMonacoTheme();
+  };
+}
+
+function mirrorMonacoTheme(popup: Document) {
+  const copy = popup.createElement("style");
+  const update = () => {
+    const source = document.head.querySelector<HTMLStyleElement>("style.monaco-colors");
+    if (!source) return;
+
+    if (!copy.isConnected) {
+      // Dockview snapshots styles one rule at a time when it opens the window.
+      const snapshot = new Set(Array.from(source.sheet?.cssRules ?? [], (rule) => rule.cssText));
+      for (const style of popup.head.querySelectorAll("style")) {
+        if (snapshot.has(style.textContent ?? "")) style.remove();
+      }
+      copy.media = source.media;
+      popup.head.append(copy);
+      observer.disconnect();
+      observer.observe(source, { childList: true });
+    }
+    copy.textContent = source.textContent;
+  };
+  const observer = new MutationObserver(update);
+  observer.observe(document.head, { childList: true });
+  update();
+  return () => {
+    observer.disconnect();
+    copy.remove();
+  };
 }

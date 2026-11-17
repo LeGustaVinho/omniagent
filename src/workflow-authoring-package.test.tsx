@@ -88,16 +88,16 @@ function mount({ stale = false, publication = null, openWorkspace = vi.fn(), mem
 }
 
 async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Package details" }));
-  await user.click(await screen.findByText("Edit package"));
+  await user.click(await screen.findByRole("button", { name: "Draft artifacts" }));
+  await user.click(await screen.findByText("Edit draft source"));
   await user.click(screen.getByText("Published artifacts"));
   const candidate = await screen.findByRole("option", { name: /Repository checker/ });
   await user.selectOptions(screen.getByRole("combobox", { name: "Published artifact" }), candidate);
-  await user.click(screen.getByRole("button", { name: "Edit this revision in the package" }));
+  await user.click(screen.getByRole("button", { name: "Edit this revision in the draft" }));
   expect(invoke).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: exampleCheckout.projectId, version });
-  const text = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Package document" });
+  const text = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Draft document" });
   await waitFor(() => expect(JSON.parse(text.value).members[1]?.base).toEqual(version));
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
     projectId: exampleCheckout.projectId, draftId: "draft", expectedRevision: "first-review",
     package: expect.objectContaining({ members: [pipeline, expect.objectContaining({ base: version })] }),
@@ -105,46 +105,21 @@ async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByTitle(published.reviewedRevision);
 }
 
-it("opens an editable project draft from the selected factory template revision", async () => {
-  const openWorkspace = vi.fn();
-  vi.mocked(invoke).mockImplementation(async (name) => {
-    switch (name) {
-      case "list_workflow_packages": return [];
-      case "workflow_factory_templates": return [
-        { id: "task_delivery", name: "Task delivery", revision: 1, members: ["Task delivery"] },
-      ];
-      case "create_workflow_factory_draft": return initial;
-      default: throw new Error(name);
-    }
-  });
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineBuilderLanding checkout={exampleCheckout} openWorkspace={openWorkspace} />
-  </QueryClientProvider>);
-  const user = userEvent.setup();
-  await user.click(screen.getByText("Start from a template"));
-  await user.click(await screen.findByRole("button", { name: "Create Task delivery draft" }));
-  expect(invoke).toHaveBeenCalledWith("create_workflow_factory_draft", {
-    projectId: exampleCheckout.projectId, template: "task_delivery", revision: 1,
-  });
-  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:draft"));
-  expect(invoke).not.toHaveBeenCalledWith("publish_reviewed_workflow_package", expect.anything());
-});
-
 it("opens exact published bases, confirms one saved revision and shows every package result", async () => {
   const user = mount();
   await addPublishedRevision(user);
-  await user.click(screen.getByRole("button", { name: "Review package publication" }));
-  const dialog = within(await screen.findByRole("dialog", { name: "Publish this package revision" }));
+  await user.click(screen.getByRole("button", { name: "Review publication" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Publish this draft revision" }));
   expect(dialog.getByText(published.reviewedRevision)).toBeTruthy();
   await user.click(dialog.getByText(/Artifacts in this publication/));
   expect(dialog.getByText("Repository checker · library")).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "publish_reviewed_workflow_package")).toBe(false);
   expect(await dialog.findByText("Field changes (1)")).toBeTruthy();
-  await user.click(dialog.getByRole("button", { name: "Confirm package publication" }));
+  await user.click(dialog.getByRole("button", { name: "Confirm publication" }));
   expect(invoke).toHaveBeenCalledWith("publish_reviewed_workflow_package", {
     projectId: exampleCheckout.projectId, draftId: "draft", reviewedRevision: published.reviewedRevision,
   });
-  const receipt = within(await screen.findByRole("region", { name: "Package publication receipt" }));
+  const receipt = within(await screen.findByRole("region", { name: "Publication receipt" }));
   expect(receipt.getByText("result-v1")).toBeTruthy();
   expect(receipt.getByText("published-v2")).toBeTruthy();
   expect(receipt.getByText(artifact.blockers[0]!)).toBeTruthy();
@@ -153,16 +128,16 @@ it("opens exact published bases, confirms one saved revision and shows every pac
 it("preserves the whole draft and displays the current published revision on conflict", async () => {
   const user = mount({ stale: true });
   await addPublishedRevision(user);
-  await user.click(screen.getByRole("button", { name: "Review package publication" }));
+  await user.click(screen.getByRole("button", { name: "Review publication" }));
   await screen.findByText("Field changes (1)");
-  await user.click(screen.getByRole("button", { name: "Confirm package publication" }));
+  await user.click(screen.getByRole("button", { name: "Confirm publication" }));
   await user.click(await screen.findByRole("button", { name: "Compare published base" }));
   const conflict = within(await screen.findByRole("region", { name: "Current published package artifact" }));
   expect(conflict.getByText("updated-elsewhere")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Close published version changed" }));
   expect(screen.getByTitle(published.reviewedRevision)).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Package details" }));
-  expect(screen.getByRole("list", { name: "Saved package members" }).textContent).toContain("Repository checker");
+  await user.click(screen.getByRole("button", { name: "Draft artifacts" }));
+  expect(screen.getByRole("list", { name: "Saved draft artifacts" }).textContent).toContain("Repository checker");
 });
 
 it("runs the exact pipeline from its package receipt and opens its execution graph", async () => {
@@ -217,10 +192,10 @@ it("pins the chosen pipeline model on unbound stages and locally edited presets 
   await user.click(bulk);
   expect(screen.queryByText("Configure stage models")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Edit with AI" }));
-  expect(await screen.findByRole("button", { name: "Package authoring model · Choose model" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Draft authoring model · Choose model" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Close edit with ai" }));
   expect(invoke).not.toHaveBeenCalledWith("save_workflow_package", expect.anything());
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
 
   const configured = { ...agent, model: selected };
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
@@ -241,7 +216,10 @@ it("pins the chosen pipeline model on unbound stages and locally edited presets 
 it("starts a named pipeline directly in the visual Builder", async () => {
   const openWorkspace = vi.fn();
   vi.mocked(invoke).mockImplementation(async (command, args) => {
-    if (command === "list_workflow_packages") return [];
+    if (command === "list_workflow_packages") return [
+      { id: "legacy-package", name: "Old factory package", standalonePipeline: false, published: false },
+      { id: "saved-draft", name: "Existing pipeline draft", standalonePipeline: true, published: false },
+    ];
     if (command === "create_workflow_package") return { id: "visual-draft", revision: "new", package: (args as { package: unknown }).package };
     throw Error(command);
   });
@@ -250,6 +228,10 @@ it("starts a named pipeline directly in the visual Builder", async () => {
     <PipelineBuilderLanding checkout={exampleCheckout} openWorkspace={openWorkspace} />
   </QueryClientProvider>);
   const user = userEvent.setup();
+  expect(await screen.findByText("Existing pipeline draft")).toBeTruthy();
+  expect(screen.queryByText("Old factory package")).toBeNull();
+  expect(screen.queryByRole("button", { name: "New workflow package" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Start from a template" })).toBeNull();
   await user.click(await screen.findByRole("button", { name: "New pipeline" }));
   const dialog = within(screen.getByRole("dialog", { name: "New pipeline" }));
   await user.type(dialog.getByRole("textbox", { name: "Pipeline name" }), "Visual review");

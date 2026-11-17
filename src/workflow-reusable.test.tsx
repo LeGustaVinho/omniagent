@@ -102,7 +102,7 @@ it("opens the saved preset and typed subflow review from the clicked canvas node
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "inspect_workflow_package") return sourceDraft;
     if (command === "conversation_models") return [];
-    if (command === "workflow_graph_registry") return [start, verify];
+    if (command === "workflow_node_definitions") return [start, verify];
     if (command === "preview_workflow_package_revision") return { revisions: [], members: [{ key: "pipeline", graphDefinitions: {} }] };
     if (command === "describe_workflow_reusable_boundary") return {
       inputs: [{ wire: edge, value: control }], outputs: [{ endpoint: output, value: checks, consumedOutsideSelection: true }],
@@ -138,7 +138,7 @@ it("opens the saved preset and typed subflow review from the clicked canvas node
   } });
 });
 
-it("adds pinned reusable nodes, saves an editable override, and opens a child with the same graph inspector", async () => {
+it("edits pinned reusable nodes, saves an editable override, and opens a child with the same graph inspector", async () => {
   const presetVersion = { kind: "preset", id: "preset", revision: "preset-r1", destination: "library" };
   const subflowVersion = { kind: "subflow", id: "subflow", revision: "subflow-r1", destination: "library" };
   const preset = {
@@ -151,13 +151,22 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
     definition: { ...verify, kind: "subflow", configuration: "none", title: "Review subflow" },
     graphDefinitions: { start, verify }, editableOverrides: [],
   };
+  const member = draft.package.members[0]!;
+  const opened = { ...draft, package: { ...draft.package, members: [{
+    ...member, body: { ...member.body, graph: { ...graph, nodes: [...graph.nodes,
+      { id: "reusable-verify-candidate", kind: "verify_candidate", configuration: { kind: "preset_overrides", fields: {} } },
+      { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } },
+    ] } },
+    references: { "reusable-verify-candidate": { source: "published", version: presetVersion },
+      "reusable-subflow": { source: "published", version: subflowVersion } },
+  }] } };
   vi.mocked(invoke).mockImplementation(async (name, payload) => {
     switch (name) {
-      case "inspect_workflow_package": return draft;
+      case "inspect_workflow_package": return opened;
       case "conversation_models": return [];
       case "preview_workflow_package_revision": return { revision: draft.revision, revisions: [draft.revision],
         members: [{ key: "pipeline", graphDefinitions: { start, verify } }] };
-      case "workflow_graph_registry": return [start, verify];
+      case "workflow_node_definitions": return [start, verify];
       case "workflow_package_catalog": return [preset.artifact, subflow.artifact];
       case "describe_workflow_reusable_node": return (payload as { version: typeof presetVersion }).version.kind === "preset" ? preset : subflow;
       case "save_workflow_package": return { ...draft, revision: "saved-next", package: (payload as { package: typeof draft.package }).package };
@@ -167,11 +176,7 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
     startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Add a reusable node" }));
-  const pick = screen.getByLabelText("Published reusable node");
-  await user.selectOptions(pick, await screen.findByRole("option", { name: /Test preset ·/ }));
-  await user.click(screen.getByRole("button", { name: "Add pinned node" }));
-  const parent = screen.getByRole("region", { name: "Pipeline graph editor" });
+  const parent = await screen.findByRole("region", { name: "Pipeline graph editor" });
   const inspect = within(parent).getByLabelText("Inspect node");
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Test preset · reusable/ }));
   const names = within(parent).getByLabelText(/Required checks/);
@@ -185,9 +190,6 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   expect(screen.queryByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Redo graph edit" }));
   expect(screen.getByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Add a reusable node" }));
-  await user.selectOptions(screen.getByLabelText("Published reusable node"), screen.getByRole("option", { name: /Review subflow ·/ }));
-  await user.click(screen.getByRole("button", { name: "Add pinned node" }));
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Review subflow · reusable/ }));
   await user.click(within(parent).getByRole("button", { name: "Open pinned subflow" }));
   const child = await screen.findByRole("region", { name: "Pinned subflow Review subflow" });
@@ -196,15 +198,16 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   await user.selectOptions(childInspect, "verify");
   expect((within(child).getByLabelText(/Required checks/) as HTMLTextAreaElement).disabled).toBe(true);
   await user.click(screen.getByRole("button", { name: "Close pinned subflow" }));
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
+  expect(await screen.findByText("saved-next")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
     expectedRevision: "saved",
     package: { ...draft.package, members: [{ ...draft.package.members[0], body: { kind: "pipeline", graph: {
       ...graph, nodes: [...graph.nodes, { id: "reusable-verify-candidate", kind: "verify_candidate",
         configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } },
+      { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } },
       { id: "reusable-verify-candidate-2", kind: "verify_candidate",
-        configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } },
-      { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } }],
+        configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } }],
     } }, references: {
       "reusable-verify-candidate": { source: "published", version: presetVersion },
       "reusable-verify-candidate-2": { source: "published", version: presetVersion },

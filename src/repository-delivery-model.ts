@@ -1,8 +1,6 @@
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
-import type { WorkflowLaunchReceipt } from "@/workflow-launch";
-import type { StageGoalConfiguration } from "@/workflow-stage-goal";
 
 export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candidate" | "review-diff" | "agent";
 export type DeliveryInputs = Record<string, string>;
@@ -31,22 +29,8 @@ export type DeliveryArtifact = {
 
 export type DeliveryRun = { id: string; planRevision: string | null; version?: { id: string; revision: string } };
 export type DeliveryJob = { nodeId: DeliveryNode; unitId: string | null; inputs: DeliveryInputs; job: Job };
-export type DeliveryWorkflowDefinition = {
-  nodes: { instance: { id: string; kind: string; configuration?: {
-    kind: string; model?: ModelSelection | null; requirements?: { goal?: StageGoalConfiguration };
-  } }; definition: { title: string } }[];
-  wires: { from: { node: string; port: string }; to: { node: string; port: string } }[];
-};
 export type DeliverySnapshot = {
   run: DeliveryRun; artifacts: DeliveryArtifact[]; jobs: DeliveryJob[];
-  definition?: DeliveryWorkflowDefinition; hostOutputs?: DeliveryInputs;
-  launch?: WorkflowLaunchReceipt | null;
-};
-export type DeliveryUnit = {
-  checkoutId: string;
-  taskId: string;
-  unit: { id: string; ordinal: number; purpose: string; completionCriteria: string[] };
-  commitEvidenceId: string | null;
 };
 export type DeliveryTarget = { projectId: string; runId: string };
 export type DeliveryAction = (operation: () => Promise<unknown>) => void;
@@ -54,25 +38,3 @@ export type DeliveryActions = { execute: DeliveryAction; busy: boolean };
 export type DeliveryModelChoice = ModelSelection | null;
 
 export const deliveryProviders: Provider[] = ["codex", "claude", "antigravity"];
-
-export function pinnedDeliveryStageModel(delivery: DeliverySnapshot, nodeId: DeliveryNode) {
-  const config = delivery.definition?.nodes.find(({ instance }) => instance.id === nodeId)?.instance.configuration;
-  return config?.kind === "agent_role" ? config.model : undefined;
-}
-
-export function deliveryGitControlId(runId: string, nodeId: string, unitId: string) {
-  return `delivery-${runId}-${nodeId}-${unitId}`;
-}
-
-export function matchingJob(delivery: DeliverySnapshot, nodeId: DeliveryNode, inputs: DeliveryInputs, unitId: string | null = null) {
-  return delivery.jobs.findLast((entry) =>
-    entry.nodeId === nodeId && entry.unitId === unitId &&
-    Object.entries(inputs).every(([port, id]) => entry.inputs[port] === id),
-  )?.job;
-}
-
-export function matchingReview(delivery: DeliverySnapshot, job: Job | undefined) {
-  return delivery.artifacts.find(({ value }) =>
-    value.kind === "review" && value.evidence.run_id === job?.latestAttempt?.runId,
-  );
-}

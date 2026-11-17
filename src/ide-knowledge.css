@@ -56,14 +56,25 @@
 .file-workspace-main { min-height: 0; min-width: 0; display: flex; flex: 1; flex-direction: column; }
 .file-dock-body { display: flex; flex: 1; min-height: 0; min-width: 0; position: relative; }
 .file-dock { flex: 1; min-height: 0; min-width: 0; }
-.file-dock.dv-dockview {
+.file-dock .dockview-theme-dark,
+.file-editor-popup .dockview-theme-dark {
+  color-scheme: inherit;
   --dv-group-view-background-color: var(--background);
   --dv-tabs-and-actions-container-background-color: var(--card);
-  --dv-activegroup-visiblepanel-tab-background-color: var(--background);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--muted);
   --dv-activegroup-hiddenpanel-tab-background-color: var(--card);
   --dv-inactivegroup-visiblepanel-tab-background-color: var(--muted);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--card);
   --dv-activegroup-visiblepanel-tab-color: var(--foreground);
   --dv-activegroup-hiddenpanel-tab-color: var(--muted-foreground);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--muted-foreground);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--muted-foreground);
+  --dv-tab-divider-color: var(--border);
+  --dv-tabs-container-scrollbar-color: var(--input);
+  --dv-icon-hover-background-color: var(--elevated);
+  --dv-drag-over-background-color: color-mix(in srgb, var(--primary) 18%, transparent);
+  --dv-edge-dock-indicator-color: var(--primary);
+  --dv-paneview-header-border-color: var(--border);
   --dv-separator-border: var(--border);
 }
 

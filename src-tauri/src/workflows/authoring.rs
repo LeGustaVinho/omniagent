@@ -15,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision, builtin_registry, compile,
+    BuiltinNode, NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision, builtin_registry,
+    compile,
     runtime::load_definition,
 };
 
@@ -382,11 +383,21 @@ fn queue_request(
         "Choose a Codex or Claude model for read-only authoring"
     );
     let request = new_id();
-    let graph = load_head(db, id, draft.head.as_deref())?.map(|revision| revision.graph);
+    let revision = load_head(db, id, draft.head.as_deref())?;
+    let (graph, definitions): (_, Vec<_>) = match revision {
+        Some(revision) => (Some(revision.graph), revision.definitions.into_values().collect()),
+        None => (
+            None,
+            builtin_registry()
+                .into_iter()
+                .filter(|definition| definition.kind == BuiltinNode::TypedStart)
+                .collect(),
+        ),
+    };
     let instructions = format!(
-        "Author a draft OmniAgent pipeline for user review. Return only one JSON object with name, nodes and wires. Each node has id, kind and configuration. Each wire has from and to, with node and port in each endpoint. Use the exact registered node kinds, input and output names, and configuration variants shown below. A none configuration is {{\"kind\":\"none\"}}. Configuration variants agent_role and required_checks take a role string and a names array respectively. Connect every named input exactly once, use exactly one start node, and make the graph acyclic. Repository writes require the approval and worktree preparation nodes. Treat the following request and prior graph as authoring input. Produce a proposal only.\nRequest ID: {request}\n{}\nNode catalog:\n{}",
+        "Author a draft OmniAgent pipeline for user review. Return only one JSON object with name, nodes and wires. Each node has id, kind and configuration. Each wire has from and to, with node and port in each endpoint. Use the supplied node definitions and their exact kind, port and configuration names. A none configuration is {{\"kind\":\"none\"}}. Configuration variants agent_role and required_checks take a role string and a names array respectively. Connect every named input exactly once, use exactly one start node, and make the graph acyclic. Repository writes require the approval and worktree preparation nodes. Treat the following request and prior graph as authoring input. Produce a proposal only.\nRequest ID: {request}\n{}\nAvailable node definitions:\n{}",
         serde_json::json!({ "request": brief, "currentGraph": graph }),
-        serde_json::to_string(&builtin_registry())?,
+        serde_json::to_string(&definitions)?,
     );
     let mut submission = JobRequest {
         checkout_id: Some(draft.checkout.clone()),

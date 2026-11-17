@@ -47,7 +47,7 @@ function setup(stale = false) {
   let published: WorkflowPublication | null = null;
   vi.mocked(invoke).mockImplementation(async (command) => {
     switch (command) {
-      case "workflow_graph_registry": return [start];
+      case "workflow_node_definitions": return [start];
       case "conversation_models":
       case "workflow_authoring_bases":
       case "list_repository_markdown_revisions": return [];

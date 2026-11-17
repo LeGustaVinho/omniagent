@@ -141,7 +141,7 @@ it("keeps the authored package reference when the graph editor saves the Goal se
     switch (name) {
       case "inspect_workflow_package": return draft;
       case "conversation_models": return [];
-      case "workflow_graph_registry": return [definition];
+      case "workflow_node_definitions": return [definition];
       case "preview_workflow_package_revision": return { revision: draft.revision, revisions: [draft.revision],
         members: [{ key: "flow", graphDefinitions: { [nodeId]: definition } }] };
       case "preview_workflow_stage_goal": return { pin, route: { route: "native_candidate", evidenceId: "published-role-evidence" } };
@@ -164,7 +164,7 @@ it("keeps the authored package reference when the graph editor saves the Goal se
     projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId, selection: model,
     node: { ...nextNode, configuration: { ...nextConfiguration, requirements: { ...nextConfiguration.requirements, boundRole: version } } },
   });
-  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   const member = draft.package.members[0]!;
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
     projectId: exampleCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,

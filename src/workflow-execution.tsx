@@ -5,7 +5,7 @@ import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react"
 import { ArrowUpRight, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ContextActions, PositionedContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
-import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineTemplateList, PipelineToolbar } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineRevisionList, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
@@ -192,7 +192,6 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       <div className="pipeline-actions">
         {waiting && <Button variant="outline" type="button" onClick={() => viewStage(waiting.node.instance.id)}>View waiting stage</Button>}
         {failed && <Button variant="outline" type="button" onClick={() => viewStage(failed.node.instance.id)}>View failed stage</Button>}
-        <Button variant="outline" type="button" onClick={() => navigation.openWorkspace("pipelines", run.id)}>Open delivery controls</Button>
       </div>
     </PipelineToolbar>
     {comparisonHandoff && !review && !snapshot.jobs.some(({ nodeId, inputs }) =>
@@ -326,7 +325,6 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
     const plan = run.planRevision;
     return [[
       { label: "Open execution graph", run: () => goToRun(run.id) },
-      { label: "Open delivery controls", run: () => openWorkspace("pipelines", run.id) },
       ...(workId ? [{ label: "Open linked work", run: () => openWorkspace("tasks", workId) }] : []),
     ], [
       { label: "Copy workflow run ID", run: () => copy(run.id) },
@@ -357,7 +355,7 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
           {!runId && runs.isPending && <p role="status">Loading workflow runs…</p>}
           {execution.data === null && <p>The requested execution is unavailable in this project.</p>}
           {!runId && !!runs.data?.length && <section aria-label="Saved workflow runs" className="pipeline-stack">
-            <PipelineTemplateList kind="run" onOpen={goToRun} entries={runs.data.map((run) => ({
+            <PipelineRevisionList kind="run" onOpen={goToRun} entries={runs.data.map((run) => ({
               id: run.id, name: run.id, detail: `Workflow revision ${run.version.revision.slice(0, 12)}`, menu: actions(run),
             }))} />
           </section>}

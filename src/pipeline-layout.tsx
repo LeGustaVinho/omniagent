@@ -41,15 +41,15 @@ export function PipelineSectionHeading({ title, description, icon }: { title: st
   </header>;
 }
 
-export function PipelineRolesTemplatesHeading() {
-  return <PipelineSectionHeading title="Roles & templates" description="Set reusable instructions, tools and review requirements."
+export function PipelineRolesHeading() {
+  return <PipelineSectionHeading title="Roles" description="Set reusable instructions, tools and review requirements."
     icon={<Layers3 size={20} aria-hidden />} />;
 }
 
-export function PipelineTemplateList({ entries, onOpen, kind = "template" }: {
+export function PipelineRevisionList({ entries, onOpen, kind = "draft" }: {
   entries: { id: string; name: string; detail: string; menu?: MenuGroups }[];
   onOpen: (id: string) => void;
-  kind?: "template" | "run";
+  kind?: "draft" | "run";
 }) {
   const Icon = kind === "run" ? CirclePlay : FileCode2;
   return entries.length ? <ul className="pipeline-select-list">
@@ -62,7 +62,7 @@ export function PipelineTemplateList({ entries, onOpen, kind = "template" }: {
         </button>
       </ContextActions>
     </li>)}
-  </ul> : <p className="text-muted-foreground">{kind === "run" ? "No saved runs." : "No saved templates."}</p>;
+  </ul> : <p className="text-muted-foreground">{kind === "run" ? "No saved runs." : "No saved draft revisions."}</p>;
 }
 
 export function PipelineMaintenanceLayout({ proposals, releases, inventory }: {
@@ -151,11 +151,10 @@ export function PipelineInspectorHeader({ detail, title, children }: { detail: s
   </header>;
 }
 
-export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, palette, paletteLabel, className, inspectorRequest, onClosePalette, collapsibleInspector }: {
+export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, className, inspectorRequest, collapsibleInspector }: {
   canvas: ReactNode; canvasLabel: string; inspector: ReactNode; inspectorLabel: string;
-  inspectorClassName?: string; palette?: ReactNode; paletteLabel?: string; className?: string;
+  inspectorClassName?: string; className?: string;
   inspectorRequest?: number;
-  onClosePalette?: () => void;
   collapsibleInspector?: boolean;
 }) {
   const inspectorId = useId();
@@ -164,7 +163,6 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
   const inspectorOrigin = useRef<HTMLElement | null>(null);
   const { width } = useWorkspaceSize(workspace);
   const drawer = width < 792;
-  const paletteDrawer = width < 1032;
   const [inspectorPreference, setInspectorPreference] = useState(false);
   const [dismissedRequest, setDismissedRequest] = useState(0);
   const [dockedInspector, setDockedInspector] = useState(true);
@@ -187,15 +185,7 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
       (origin?.isConnected ? origin : toggle.current)?.focus({ preventScroll: true });
     });
   }
-  return <div ref={workspace} className={className ? `pipeline-editor ${className}` : "pipeline-editor"} data-palette={Boolean(palette) && !paletteDrawer}>
-    {palette != null && <WorkbenchPanel as="aside" open drawer={paletteDrawer} label={paletteLabel ?? "Node catalog"}
-      drawerClass="pipeline-palette-drawer" className="pipeline-palette" aria-label={paletteLabel}
-      onClose={() => onClosePalette?.()} edge={["right", "bottom"]} resizeKey="pipeline-palette" resizeLabel={paletteLabel ?? "node palette"}>
-      {paletteDrawer && <div className="work-panel-header"><span>{paletteLabel ?? "Node catalog"}</span>
-        <Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close node catalog" onClick={onClosePalette}><X size={16} aria-hidden /></Button>
-      </div>}
-      <div className="pipeline-palette-scroll">{palette}</div>
-    </WorkbenchPanel>}
+  return <div ref={workspace} className={className ? `pipeline-editor ${className}` : "pipeline-editor"}>
     <ResizablePanel className="pipeline-canvas" role="region" aria-label={canvasLabel} edge="bottom"
       resizeKey={canvasLabel} resizeLabel={canvasLabel}>{canvas}</ResizablePanel>
     {(drawer || (collapsibleInspector && !dockedInspector)) && <Button type="button" ref={toggle} variant="ghost"
@@ -211,7 +201,7 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
       <PanelRight size={16} aria-hidden /> {drawer && inspectorOpen ? "Hide inspector" : "Show inspector"}
     </Button>}
     <WorkbenchPanel as="aside" id={inspectorId} drawer={drawer}
-      open={drawer ? inspectorOpen && !(paletteDrawer && palette) : !collapsibleInspector || dockedInspector}
+      open={drawer ? inspectorOpen : !collapsibleInspector || dockedInspector}
       label={inspectorLabel} drawerClass="pipeline-inspector-drawer" onClose={closeInspector}
       className={inspectorClassName ? `pipeline-inspector ${inspectorClassName}` : "pipeline-inspector"} aria-label={inspectorLabel}
       edge="left" resizeKey={inspectorLabel} resizeLabel={inspectorLabel}>

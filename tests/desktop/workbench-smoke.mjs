@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Key, remote } from "webdriverio";
 
-import { verifyAuditFactory, verifyVisualPipelineBuilder, verifyVisualPromptBuilder } from "./visual-pipeline-builder.mjs";
+import { verifyVisualPipelineBuilder, verifyVisualPromptBuilder } from "./visual-pipeline-builder.mjs";
 
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const packagedOrigin = "http://tauri.localhost";
@@ -392,7 +392,7 @@ async function checkSimulation(browser, checkout) {
   await knowledge.$(".note-graph-canvas canvas:first-child").waitForDisplayed();
   await capture(browser, "08-knowledge-graph");
   await click(knowledge, "button=Graph");
-  await click(browser, "button=Plan from note");
+  await click(browser, "button=Simulate planning");
   await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
   await click(browser, 'button[aria-label="Tasks"]');
   const taskWorkspace = browser.$(shown);
@@ -530,16 +530,6 @@ async function checkSimulation(browser, checkout) {
   await scenario.selectByAttribute("value", "pipelines");
   await browser.$(shown).$(".react-flow").waitForDisplayed();
   await capture(browser, "03-pipelines");
-  await click(browser.$(shown), "button=Roles & templates");
-  const roles = browser.$(shown).$(".pipeline-view:not([hidden])");
-  const roleModel = 'button[aria-label^="Default model ·"]';
-  await click(roles, roleModel);
-  await browser.$('.model-picker-menu [aria-label="GPT‑6.1 Sol"][aria-checked="true"]').waitForDisplayed();
-  await capture(browser, "03-role-model-picker");
-  await click(browser, '.model-picker-menu [aria-label="GPT‑6 Luna"]');
-  assert.equal(await roles.$(roleModel).getText(), "GPT‑6 Luna");
-  await click(roles, roleModel);
-  await click(browser, '.model-picker-menu [aria-label="GPT‑6.1 Sol"]');
   await click(browser.$(shown), "button=Compare");
   await click(browser.$(shown).$(".pipeline-view:not([hidden])"), 'button[aria-label="Select models · 3 selected"]');
   await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
@@ -547,21 +537,12 @@ async function checkSimulation(browser, checkout) {
   await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
   await browser.keys("Escape");
   await click(browser.$(shown), "button=Library");
-  const catalog = browser.$(shown).$(".pipeline-view:not([hidden])");
-  await catalog.$('input[aria-label="Search pipeline nodes"]').setValue("verified source commit");
-  await catalog.$("h4=Commit").waitForDisplayed();
-  await catalog.$("h4=Merge").waitForDisplayed();
-  await capture(browser, "03-node-library");
+  await browser.$(shown).$('[aria-label="Workflow library"]').$("p=No items in the library.").waitForDisplayed();
   await click(browser.$(shown).$('[aria-label="Pipelines views"]'), "button=Builder");
   const demoCanvas = browser.$(shown).$('[aria-label="Simulation graph canvas"]');
-  await demoCanvas.$(".workflow-node-card[data-selected]").waitForDisplayed();
+  assert.equal(await demoCanvas.$(".workflow-node-card").isExisting(), false);
   await demoCanvas.$(".react-flow__controls-fitview").waitForDisplayed();
-  await click(browser.$(shown), "button=Add node");
-  const nodePicker = browser.$('.pipeline-catalog-dialog');
-  await nodePicker.$('input[aria-label="Search pipeline nodes"]').setValue("result artifact");
-  await nodePicker.$("h4=Result").waitForDisplayed();
-  assert.equal(await nodePicker.$("button=Add").isExisting(), false);
-  await click(nodePicker, 'button[aria-label="Close node catalog"]');
+  assert.equal(await browser.$(shown).$("button=Add node").isExisting(), false);
   await click(browser, 'button[aria-label="Settings"]');
   await click(browser, "button=Git and delivery");
   const gitMode = browser.$('select[id="after-acceptance"]');
@@ -569,27 +550,6 @@ async function checkSimulation(browser, checkout) {
   assert.equal(await gitMode.getValue(), "automatic_commit_user_merge");
   await gitMode.selectByAttribute("value", "user_commits_and_merges");
   await click(browser, 'button[aria-label="Close settings"]');
-  const pipeline = browser.$(shown);
-  const stageWait = { timeout: 15_000 };
-  await click(pipeline, "button=Run pipeline");
-  await click(pipeline, "button=View waiting stage", stageWait);
-  await click(pipeline, "button=Answer question");
-  await click(pipeline, "button=View waiting stage", stageWait);
-  await click(pipeline, "button=Approve implementation");
-  await click(pipeline, "button=View failed stage", stageWait);
-  await click(pipeline, "button=Retry stage");
-  await click(pipeline, "button=View waiting stage", stageWait);
-  await click(pipeline, "button=Accept diff");
-  await click(pipeline, "button=View waiting stage", stageWait);
-  const gitWait = pipeline.$(".pipeline-inspector-scroll > .pipeline-stack > p");
-  await gitWait.waitForDisplayed();
-  assert.equal(await gitWait.getText(), "Waiting for commit");
-  await capture(browser, "03-pipeline-waiting-commit");
-  await click(pipeline, "button=Open Git delivery");
-  await click(browser.$(shown), "button=Commit accepted candidate");
-  await capture(browser, "12-git-delivery");
-  await click(browser, 'button[aria-label="Pipelines"]');
-  await browser.$(shown).$(".pipeline-toolbar .pipeline-status[data-status='succeeded']").waitForDisplayed();
   await scenario.selectByAttribute("value", "windows");
   await click(browser, "button=Create backup");
   await click(browser, "button=Continue");
@@ -2028,9 +1988,6 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
     const checkout = await invoke(browser, "register_project", { directory: repo });
     await selectCheckout(browser, checkout);
     await click(browser, 'button[aria-label="Pipelines"]');
-    await click(browser.$('nav[aria-label="Pipelines views"]'), "button=Repository delivery");
-    await browser.$('.repo-delivery [aria-label="Repository Markdown source"]').$("button=Select Markdown file").waitForDisplayed();
-    await capture(browser, "real-repository-delivery");
     await verifyVisualPipelineBuilder({
       browser, application, checkout, invoke, capture, emulateDisplay,
       restart: async (current) => {
@@ -2062,28 +2019,6 @@ test("authors, simulates and runs a pipeline of Prompt cards on Windows", { time
     await selectCheckout(browser, checkout);
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
     await verifyVisualPromptBuilder({ browser, checkout, invoke, capture });
-  } finally {
-    await browser?.deleteSession().catch(() => undefined);
-    driver.kill();
-  }
-});
-
-test("publishes and launches the Audit factory from prompt and Markdown", { timeout: 180_000 }, async (t) => {
-  const { application, scratch } = await copyTestApplication(t);
-  const repo = join(scratch, "Audit factory checkout");
-  git(scratch, "init", "-q", repo);
-  await writeFile(join(repo, "README.md"), "# Audit factory test\n");
-  git(repo, "add", "README.md");
-  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
-    "-c", "commit.gpgsign=false", "commit", "-qm", "Audit factory fixture");
-
-  const driver = startTestDriver(application);
-  let browser;
-  try {
-    browser = await connectTestDriver(driver, application);
-    const checkout = await invoke(browser, "register_project", { directory: repo });
-    await selectCheckout(browser, checkout);
-    await verifyAuditFactory({ browser, application, checkout, invoke, capture });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();
@@ -2838,7 +2773,7 @@ test("persists real conversation organization through a desktop restart", { time
   }
 });
 
-test("starts real planning from the saved Markdown revision and finds it from Knowledge", { timeout: 90_000 }, async (t) => {
+test("compares models from a saved Markdown revision in Knowledge", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Saved notes repository");
   const path = "Release plan.md";
@@ -2858,42 +2793,10 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
     const { projectId, checkoutId } = await invoke(browser, "register_project", { directory: repo });
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
     await selectCheckout(browser, { projectId, checkoutId });
-    const opened = await invoke(browser, "open_repository_document", { checkoutId, path });
-    assert.equal(opened.status, "document");
-    const revisionId = opened.document.revision.id;
-    const noteScope = { projectId, checkoutId, revisionId };
-    assert.deepEqual(await invoke(browser, "repository_note_planning", noteScope), []);
-
     await click(browser, '.work-rail button[aria-label="Knowledge"]');
     const knowledge = browser.$('[aria-label="Knowledge workspace"]');
     await click(knowledge, `button=${path}`);
-    await click(knowledge, "button=Plan from note");
-    const dialog = browser.$('[role="dialog"][aria-labelledby]');
-    await dialog.waitForDisplayed();
-    assert.ok((await dialog.getText()).includes(path));
-    await click(dialog, "button=Start planning");
-    await browser.$('[aria-label="Pipelines workspace"]').waitForDisplayed();
-    let planned;
-    await browser.waitUntil(async () => {
-      planned = await invoke(browser, "repository_note_planning", noteScope);
-      return planned.length === 1;
-    }, { timeout: 15_000, timeoutMsg: "Knowledge did not find planning for the exact saved revision" });
-    const delivery = await invoke(browser, "inspect_repository_delivery", { projectId, runId: planned[0].runId });
-    assert.equal(delivery.run.id, planned[0].runId);
-    assert.equal(delivery.launch?.source?.id, revisionId);
-    assert.equal(planned[0].task, null);
-    await browser.$("button=Queue planning").waitForDisplayed();
-    await browser.waitUntil(() => browser.execute(() => {
-      const graph = document.querySelector('[aria-label="Delivery Git graph"] .react-flow');
-      if (!graph) return false;
-      const style = getComputedStyle(graph);
-      const card = style.getPropertyValue("--card").trim();
-      return Boolean(card) && style.getPropertyValue("--xy-node-background-color").trim() === card;
-    }), { timeoutMsg: "Delivery Git nodes should use the application's card theme" });
-    await capture(browser, "real-plan-from-note");
-    await click(browser, 'button[aria-label="Back to Knowledge"]');
-    await knowledge.$("button=Plan from note").waitForDisplayed();
-    assert.equal(await browser.$('.work-rail button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
+    assert.equal(await knowledge.$("button=Plan from note").isExisting(), false);
 
     const comparisonDocument = await invoke(browser, "open_repository_document", { checkoutId, path: comparisonPath });
     assert.equal(comparisonDocument.status, "document");

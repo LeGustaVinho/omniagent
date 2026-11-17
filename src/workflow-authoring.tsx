@@ -15,7 +15,7 @@ import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type Workf
 import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
 import { PipelineBuilderLanding, WorkflowPackageEditor, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
-import { workflowGraphRegistryQuery } from "@/pipeline-catalog";
+import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -96,6 +96,7 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
     queryKey: ["workflow-packages", projectId, "conversation", conversationId],
     queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId, conversationId }),
     enabled: Boolean(source),
+    select: (items) => items.filter(({ standalonePipeline, published }) => standalonePipeline && !published),
   });
   const selectedBase = bases.data?.find((item) => baseKey(item.version) === base)?.version ?? null;
   const sourceReady = Boolean(source || (!conversationId && output === "package"));
@@ -145,7 +146,7 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
           if (ready && !busy) request.mutate();
         }}>
           <label>Output<select value={output} onChange={(event) => setOutput(event.currentTarget.value === "pipeline" ? "pipeline" : "package")} disabled={busy}>
-            <option value="package">Workflow package</option>
+            <option value="package">Visual pipeline draft</option>
             <option value="pipeline">Pipeline draft</option>
           </select></label>
           <label>Source conversation<select value={conversationId} onChange={(event) => setConversationId(event.currentTarget.value)} disabled={busy}>
@@ -182,10 +183,10 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
           </div>)}
         </section>}
         {packages.error && <p role="alert">{String(packages.error)}</p>}
-        {!!packages.data?.length && <section aria-label="Linked workflow packages" className="grid gap-2">
+        {!!packages.data?.length && <section aria-label="Linked visual pipeline drafts" className="grid gap-2">
           {packages.data.map((draft) => <div key={draft.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2">
-            <div><strong>{draft.name}</strong><p>{draft.published ? "Published" : "Draft"} · {draft.memberCount} artifacts</p></div>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenDraft(`package:${draft.id}`)}>Open linked package</Button>
+            <div><strong>{draft.name}</strong></div>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenDraft(`package:${draft.id}`)}>Open linked visual draft</Button>
           </div>)}
         </section>}
       </div>
@@ -277,7 +278,7 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
   const client = useQueryClient();
   const original: WorkflowEditorState = { graph: revision.graph, layout: revision.layout ?? {}, updateDefinitions: {} };
   const [editor, setEditor] = useState(original);
-  const registry = useQuery(workflowGraphRegistryQuery);
+  const registry = useQuery(workflowNodeDefinitionsQuery(editor.graph.nodes.map(({ kind }) => kind)));
   const catalog = registry.data ?? [];
   const definitions = editorDefinitions(editor, revision.definitions ?? {}, catalog);
   const problems = graphProblems(editor.graph, definitions);
@@ -311,7 +312,7 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
     if (ready) request.mutate();
   }
   return <div className="pipeline-stack">
-    {registry.isPending && <p role="status">Loading node registry…</p>}
+    {registry.isPending && <p role="status">Loading node definitions…</p>}
     {registry.error && <p role="alert">{String(registry.error)}</p>}
     {registry.data && <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={editor} setState={setEditor} definitions={definitions}
       catalog={catalog} problems={problems} disabled={editingDisabled} />}

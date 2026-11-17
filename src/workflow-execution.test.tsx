@@ -57,7 +57,7 @@ const output = (nodeInstanceId: string, id: string, port: string, kind: string, 
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
 });
 
-it("shows recorded backlog progress and links between the exact parent stage and task run", async () => {
+it("opens a legacy run link in Runs and navigates between the parent backlog and task run", async () => {
   const backlog = node("delivery", "Run backlog");
   const sourceCommit = "b".repeat(40);
   const childId = "pinned-child-run";
@@ -77,13 +77,15 @@ it("shows recorded backlog progress and links between the exact parent stage and
   });
   const openWorkspace = vi.fn();
   function Harness() {
-    const [target, setTarget] = useState(`run:${runId}`);
+    const [target, setTarget] = useState(runId);
     return <PipelinesWorkspace checkout={exampleCheckout} target={target} simulation={null} startSimulation={vi.fn()}
       openWorkspace={(workspace, next) => { openWorkspace(workspace, next); setTarget(next ?? ""); }}
       openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={new QueryClient()}><Harness /></QueryClientProvider>);
   expect(await screen.findByText("Waiting for a verified merge.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Runs" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByRole("button", { name: "Open delivery controls" })).toBeNull();
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Open run for DOC-2" }));
   expect(openWorkspace).toHaveBeenLastCalledWith("pipelines", `run:${childId}`);
