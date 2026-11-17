@@ -233,7 +233,7 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
             {conversations.map((conversation) => (
               <li key={conversation.id}>
                 <ConversationRow {...conversation}
-                  available={(action) => action !== "activity" && action !== "copy-worktree"}
+                  available={(action) => action !== "activity" && action !== "copy-worktree" && action !== "export-markdown"}
                   sections={library.sections[conversation.project]?.map((name) => ({ id: name, name }))}
                   onAction={(action, section) => rowAction(conversation, action, section)}>
                   <button type="button" className="conv-session-button" data-conversation-id={conversation.id}

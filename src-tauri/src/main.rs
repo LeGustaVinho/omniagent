@@ -6,6 +6,7 @@ mod composer_customization_ipc;
 mod composer_suggestion_ipc;
 mod conversation_attachment_ipc;
 mod conversation_compaction_ipc;
+mod conversation_export_ipc;
 mod conversation_continuation_runtime;
 mod conversation_fork_runtime;
 mod conversation_goal_runtime;
@@ -614,6 +615,7 @@ fn main() {
             ipc::rename_conversation,
             ipc::conversation_messages,
             ipc::conversation_history,
+            conversation_export_ipc::export_conversation_markdown,
             ipc::rewind_conversation_history,
             conversation_runtime::conversation_history_inspection,
             conversation_runtime::conversation_history_revision,

@@ -1,10 +1,10 @@
-import { Activity, Archive, ChevronRight, Clipboard, Ellipsis, Eye, GitFork, Link, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
+import { Activity, Archive, ChevronRight, Clipboard, Download, Ellipsis, Eye, GitFork, Link, ListPlus, MessageSquare, Pencil, Pin, Trash2 } from "lucide-react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
 import { useRef, useState, type ReactNode } from "react";
 
 export type ConversationAction =
   | "open" | "activity" | "rename" | "pin" | "unread" | "move" | "new-section" | "fork"
-  | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "archive" | "delete";
+  | "copy-title" | "copy-id" | "copy-worktree" | "copy-reference" | "export-markdown" | "archive" | "delete";
 
 export type ConversationMenuProps = {
   title: string;
@@ -39,6 +39,7 @@ function readActions(props: ConversationMenuProps) {
     { action: "new-section", label: "New section…", icon: <ListPlus /> },
   ];
   const fork: ItemDescription = { action: "fork", label: "Create fork…", icon: <GitFork /> };
+  const exportTranscript: ItemDescription = { action: "export-markdown", label: "Export conversation as Markdown…", icon: <Download /> };
   const copy: ItemDescription[] = [
     { action: "copy-title", label: "Title" },
     { action: "copy-id", label: "Conversation ID" },
@@ -49,12 +50,12 @@ function readActions(props: ConversationMenuProps) {
     { action: "archive", label: props.archived ? "Unarchive" : "Archive", icon: <Archive /> },
     { action: "delete", label: "Delete permanently…", icon: <Trash2 /> },
   ];
-  return { navigation, organize, section, fork, copy, retain };
+  return { navigation, organize, section, fork, copy, exportTranscript, retain };
 }
 
 function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & { variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
-  const { navigation, organize, section, fork, copy, retain } = readActions(props);
+  const { navigation, organize, section, fork, copy, exportTranscript, retain } = readActions(props);
   const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? true);
   const retentionItems = availableItems(retain);
   const navigationItems = availableItems(navigation);
@@ -91,6 +92,7 @@ function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & 
       <Separator className="conv-menu-separator" />
       {availableItems([fork]).map(item)}
       {submenu("Copy", <Clipboard />, copy)}
+      {availableItems([exportTranscript]).map(item)}
       {retentionItems.length > 0 && <Separator className="conv-menu-separator" />}
       {retentionItems.map(item)}
     </>

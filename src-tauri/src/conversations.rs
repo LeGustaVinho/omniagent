@@ -34,6 +34,7 @@ mod library;
 pub(crate) mod native_fork;
 pub(crate) mod reference_delivery;
 pub mod references;
+pub mod transcript;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
 pub use continuation::{
     ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,

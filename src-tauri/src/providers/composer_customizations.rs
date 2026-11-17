@@ -326,6 +326,25 @@ pub(crate) fn contains_skill_token(text: &str) -> bool {
         .any(|token| parts(token.as_str()).is_some())
 }
 
+pub(crate) fn display_skill_invocations(text: &str) -> Cow<'_, str> {
+    if !text.contains(PREFIX) {
+        return Cow::Borrowed(text);
+    }
+    // Match the transcript's JavaScript whitespace semantics, including BOM separators.
+    let separator = |ch: char| ch == '\u{feff}' || (ch != '\u{0085}' && ch.is_whitespace());
+    let mut displayed = String::with_capacity(text.len());
+    for segment in text.split_inclusive(separator) {
+        let token = segment.trim_end_matches(separator);
+        if parts(token).is_some() {
+            displayed.push_str("[Skill invocation]");
+            displayed.push_str(&segment[token.len()..]);
+        } else {
+            displayed.push_str(segment);
+        }
+    }
+    Cow::Owned(displayed)
+}
+
 /// A selected skill is an input action on the latest message. Replaying prior
 /// message revisions as history must never select or invoke those skills again.
 pub(crate) fn project_composer_messages(

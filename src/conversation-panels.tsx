@@ -34,6 +34,7 @@ import { ConversationCompactionControl, useConversationCompaction } from "@/conv
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { readDraft, saveDraft } from "@/conversation-draft-writes";
 import { ConversationRow } from "@/conversation-menu";
+import { useConversationTranscriptExport } from "@/conversation-transcript-export";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
 import { ConversationAttachments, useConversationAttachmentReview, useConversationAttachments } from "@/conversation-attachments";
 import { ComposerCustomizationPicker, conversationSkillMessage, hasComposerSkills, useComposerCustomizations,
@@ -119,6 +120,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
 }) {
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState("");
+  const exportTranscript = useConversationTranscriptExport(setNotice);
   const [renaming, setRenaming] = useState<Conversation>();
   const [title, setTitle] = useState("");
   const sidebar = useRef<HTMLElement>(null);
@@ -133,7 +135,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
     onRenamed?.(updated);
     setRenaming(undefined);
   });
-  const error = start.error ?? conversations.error;
+  const error = start.error ?? exportTranscript.error ?? conversations.error;
   const matching = conversations.data?.filter(({ title }) => title.toLowerCase().includes(filter.trim().toLowerCase()));
   return (
     <section ref={sidebar} className="conv-sessions" aria-label="Conversation list">
@@ -154,7 +156,8 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
       <ul className="conv-session-list">
         {matching?.map((conversation) => (
           <li key={conversation.id}>
-            <ConversationRow title={conversation.title} available={(action) => ["open", "copy-id", "copy-title", "rename"].includes(action)}
+            <ConversationRow title={conversation.title} available={(action) => ["open", "copy-id", "copy-title", "rename"].includes(action) ||
+              (action === "export-markdown" && !exportTranscript.isPending)}
               onAction={(action) => {
                 if (action === "open") {
                   onOpen(conversation);
@@ -164,6 +167,10 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
                   setRenaming(conversation);
                   setTitle(conversation.title);
                   rename.reset();
+                  return;
+                }
+                if (action === "export-markdown") {
+                  exportTranscript.mutate(conversation);
                   return;
                 }
                 const title = action === "copy-title";

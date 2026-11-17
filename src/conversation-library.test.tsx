@@ -104,6 +104,9 @@ function repository(archiveMessages: MessageRevision[] = []) {
         });
       case "conversation_library_sections":
         return sections.filter(({ projectId }) => !input.projectId || projectId === input.projectId);
+      case "export_conversation_markdown":
+        if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong export scope");
+        return true;
       case "organize_conversation": {
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong organization scope");
         const change = input.change!;
@@ -406,6 +409,25 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   expect(await library().findByRole("region", { name: "Release notes" })).toBeTruthy();
   await reopened.user.click(library().getByRole("button", { name: original }));
   await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
+});
+
+it("exports the clicked conversation using its actual checkout, including from Archived", async () => {
+  repository();
+  const { user, onOpenOtherCheckout } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.selectOptions(await library().findByRole("combobox", { name: "Project" }), "");
+  async function choose(title: string, action: string) {
+    fireEvent.contextMenu(await library().findByRole("button", { name: title }));
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+  }
+  await choose("Audit details", "Export conversation as Markdown…");
+  expect(invoke).toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: other.checkoutId, conversationId: externalId });
+  expect(await library().findByText("Conversation exported as Markdown.")).toBeTruthy();
+  await choose("Audit details", "Archive");
+  await user.click(library().getByRole("button", { name: "Archived" }));
+  await choose("Audit details", "Export conversation as Markdown…");
+  await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "export_conversation_markdown")).toHaveLength(2));
+  expect(onOpenOtherCheckout).not.toHaveBeenCalled();
 });
 
 it("opens an all-project result in its own worktree from the actual application shell", async () => {
