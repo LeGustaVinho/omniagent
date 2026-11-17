@@ -88,6 +88,31 @@ pub async fn git_checkout_history(
 }
 
 #[tauri::command]
+pub async fn git_checkout_commit_details(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHistoryCommitRequest,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDetails, String> {
+    store
+        .git_checkout_commit_details(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_checkout_commit_diff(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHistoryCommitRequest,
+    path: String,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_checkout_commit_diff(checkout_id, request, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_file_history(
     store: State<'_, Store>,
     checkout_id: String,

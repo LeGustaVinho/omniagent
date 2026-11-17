@@ -4,7 +4,7 @@ use std::{
     io,
     os::windows::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -26,6 +26,7 @@ use super::{
 mod blame;
 mod comments;
 mod commit;
+mod commit_history;
 mod comparison;
 mod conflicts;
 mod content;
@@ -38,6 +39,7 @@ mod permalink;
 mod reviewed_files;
 mod saved_patch;
 pub use blame::GitLineBlame;
+pub use commit_history::{GitHistoryCommitDetails, GitHistoryCommitDiff, GitHistoryCommitRequest};
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::{GitConflictProposal, GitConflictReview};
@@ -616,15 +618,18 @@ fn passive_command(root: &Path) -> Result<Command> {
 }
 
 fn passive(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    check(passive_output(root, args)?, args[0])
+}
+
+fn passive_output(root: &Path, args: &[&str]) -> Result<Output> {
     // The caller verifies the checkout using Git's normal trust settings.
     // Carry that decision into the isolated command for this checkout only.
     let directory = root.to_string_lossy().replace('\\', "/");
-    let output = passive_command(root)?
+    Ok(passive_command(root)?
         .arg("-c")
         .arg(format!("safe.directory={directory}"))
         .args(args)
-        .output()?;
-    check(output, args[0])
+        .output()?)
 }
 
 fn branches(root: &Path) -> Result<Vec<GitReviewBranch>> {

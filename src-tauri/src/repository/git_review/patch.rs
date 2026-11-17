@@ -63,6 +63,23 @@ pub(super) fn between(view: &IsolatedGit, base: &str, head: &str, path: &str) ->
     GitReviewPatch::result(read(view, &[base, head, "--", path], false))
 }
 
+pub(super) fn history_file(
+    view: &IsolatedGit,
+    base: &str,
+    head: &str,
+    path: &str,
+    previous_path: Option<&str>,
+) -> GitReviewPatch {
+    match previous_path {
+        Some(previous) => GitReviewPatch::result(read(
+            view,
+            &["--find-renames", base, head, "--", previous, path],
+            false,
+        )),
+        None => between(view, base, head, path),
+    }
+}
+
 fn read(view: &IsolatedGit, tail: &[&str], no_index: bool) -> Result<String> {
     let mut diagnostics = tempfile::tempfile()?;
     let mut child = view

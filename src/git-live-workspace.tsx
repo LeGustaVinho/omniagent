@@ -1,21 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitCommitHorizontal, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ContextActions } from "@/components/ui/context-actions";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { GitCheckoutChanges, useGitCheckoutReview, type CheckoutReview, type Worktree } from "@/git-checkout-changes";
+import { GitCheckoutChanges, comparisonFile, useGitCheckoutReview, type CheckoutReview, type Worktree } from "@/git-checkout-changes";
+import { GitDiffReview, type GitComparedFile } from "@/git-diff-view";
 import { GitFileHistoryView } from "@/git-file-history";
 import { SavedGitDiffs } from "@/git-saved-diffs";
 import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
+import { FileDialog } from "@/ide-file-workspace";
 import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
 import { fileContextActions, isGitCheckoutTarget, isNewWorktreeTarget, openWorkspaceFile, readFileHistoryTarget, readWorkingDiffTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
+type CommitRequest = { branch: string | null; expectedHead: string; sha: string; parent: string | null };
+type CommitFile = { path: string; previousPath: string | null; status: string };
+type CommitDetails = { message: string; parents: string[]; parent: string | null; files: CommitFile[]; comparisonUnavailable?: string | null };
 type WorktreeBase = { reference: string; label: string; expectedHead: string };
+
+const commitChangeLabels: Record<string, string> = { A: "Added", C: "Copied", D: "Deleted", M: "Modified", R: "Renamed", T: "Type changed" };
+
+function commitDetailsQuery(checkoutId: string, request: CommitRequest) {
+  return {
+    queryKey: ["git-commit-details", checkoutId, request],
+    queryFn: () => invoke<CommitDetails>("git_checkout_commit_details", { checkoutId, request }),
+    retry: false,
+  };
+}
+
+function loadCommitFile(checkoutId: string, request: CommitRequest, path: string) {
+  return invoke<GitComparedFile>("git_checkout_commit_diff", { checkoutId, request, path });
+}
 
 const tabs = ["Changes", "Worktrees", "History", "Saved attempts"] as const;
 type Tab = typeof tabs[number];
@@ -194,19 +213,20 @@ function WorktreeTable({ review, project, select, createFrom }: {
 function CommitHistory({ review, createFrom }: { review: CheckoutReview; createFrom: (base: WorktreeBase) => void }) {
   const [branch, setBranch] = useState("");
   const [selection, select] = useState<string>();
-  const [status, setStatus] = useState("");
-  const [error, setError] = useState("");
+  const clipboard = useContextActionFeedback();
+  const client = useQueryClient();
   const branchRef = review.branches.find((entry) => entry.reference === branch);
+  const expectedHead = branch ? branchRef?.sha : review.revision.head;
   const history = useQuery({
     queryKey: ["git-history", review.checkoutId, review.revision.head, branch, branchRef?.sha],
     queryFn: () => invoke<HistoryEntry[]>("git_checkout_history", { checkoutId: review.checkoutId, branch: branch || null }), retry: false,
   });
   const commits = history.error ? [] : history.data ?? [];
   const selected = commits.find((commit) => commit.sha === selection) ?? commits[0];
+  const requestFor = (sha: string): CommitRequest | undefined => expectedHead ? { branch: branch || null, expectedHead, sha, parent: null } : undefined;
+  const selectedRequest = selected && requestFor(selected.sha);
   function copy(text: string, copied: string) {
-    setError("");
-    setStatus("");
-    void Promise.resolve().then(() => navigator.clipboard.writeText(text)).then(() => setStatus(copied), () => setError("Could not copy to the clipboard."));
+    void clipboard.run(() => navigator.clipboard.writeText(text), copied);
   }
   return <div className="delivery-body">
     <div className="delivery-main p-4">
@@ -225,8 +245,8 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
       </ContextActions>
       {history.isPending && <p role="status" className="text-sm">Loading commits…</p>}
       {history.error && <InlineIssue>{String(history.error)}</InlineIssue>}
-      {error && <InlineIssue>{error}</InlineIssue>}
-      {status && <p role="status" className="mb-2 text-xs">{status}</p>}
+      {clipboard.feedback?.failed && <InlineIssue>{clipboard.feedback.text}</InlineIssue>}
+      {clipboard.feedback && !clipboard.feedback.failed && <p role="status" className="mb-2 text-xs">{clipboard.feedback.text}</p>}
       {history.data?.length === 0 && <p className="text-sm text-muted-foreground">No commits in this branch.</p>}
       {commits.length > 0 && <GitWorkspaceTable label="Repository commit history" columns={["Commit", "Author", "Recorded"]}>
         {commits.map((commit) => <tr key={commit.sha}>
@@ -239,6 +259,11 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
             { label: "Copy commit SHA", run: () => copy(commit.sha, "Copied commit SHA") },
             { label: "Copy short SHA", run: () => copy(commit.sha.slice(0, 12), "Copied short SHA") },
             ...(commit.subject ? [{ label: "Copy commit subject", run: () => copy(commit.subject, "Copied commit subject") }] : []),
+            ...(expectedHead ? [{ label: "Copy full commit message", run: () => void clipboard.run(async () => {
+              const request = requestFor(commit.sha)!;
+              const details = await client.fetchQuery(commitDetailsQuery(review.checkoutId, request));
+              await navigator.clipboard.writeText(details.message);
+            }, "Copied commit message") }] : []),
           ]]}><button type="button" onClick={() => select(commit.sha)} aria-pressed={selected?.sha === commit.sha} className="grid gap-1 text-left font-medium hover:underline">
             {commit.subject || "Commit"}<code className="text-xs text-muted-foreground">{commit.sha.slice(0, 12)}</code>
           </button></ContextActions></td>
@@ -247,14 +272,85 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
         </tr>)}
       </GitWorkspaceTable>}
     </div>
-    {selected && <DeliveryDetailPanel label="Selected commit" resizeKey="git-commit">
-      <div className="delivery-detail-content grid content-start gap-3 p-3.5">
-        <h3 className="flex items-center gap-2 text-sm font-semibold"><GitCommitHorizontal size={17} aria-hidden /> Selected commit</h3>
-        <dl className="grid gap-2 text-xs">
-          <div><dt className="text-muted-foreground">Revision</dt><dd className="wrap-anywhere font-mono">{selected.sha}</dd></div>
-          <div><dt className="text-muted-foreground">History ref</dt><dd className="wrap-anywhere font-mono">{branchRef?.reference ?? review.revision.branch ?? "Checkout HEAD"}</dd></div>
-        </dl>
-      </div>
-    </DeliveryDetailPanel>}
+    {selectedRequest && <CommitDetailPanel key={JSON.stringify(selectedRequest)} checkoutId={review.checkoutId} selection={selectedRequest}
+      historyRef={branchRef?.reference ?? review.revision.branch ?? "Checkout HEAD"} />}
   </div>;
+}
+
+function CommitDetailPanel({ checkoutId, selection, historyRef }: { checkoutId: string; selection: CommitRequest; historyRef: string }) {
+  const [parent, setParent] = useState<string | null>(null);
+  const [filePath, showFile] = useState<string>();
+  const clipboard = useContextActionFeedback();
+  const request = { ...selection, parent };
+  const details = useQuery({ ...commitDetailsQuery(checkoutId, request), placeholderData: keepPreviousData });
+  const commit = details.error ? undefined : details.data;
+  return <DeliveryDetailPanel label="Selected commit" resizeKey="git-commit">
+    <div className="delivery-detail-content grid content-start gap-3 p-3.5">
+      <h3 className="flex items-center gap-2 text-sm font-semibold"><GitCommitHorizontal size={17} aria-hidden /> Selected commit</h3>
+      <dl className="grid gap-2 text-xs">
+        <div><dt className="text-muted-foreground">Revision</dt><dd className="wrap-anywhere font-mono">{selection.sha}</dd></div>
+        <div><dt className="text-muted-foreground">History ref</dt><dd className="wrap-anywhere font-mono">{historyRef}</dd></div>
+      </dl>
+      {(details.isPending || details.isPlaceholderData) && <p role="status" className="text-xs">Loading commit details…</p>}
+      {details.error && <InlineIssue>{String(details.error)}</InlineIssue>}
+      {clipboard.feedback?.failed && <InlineIssue>{clipboard.feedback.text}</InlineIssue>}
+      {clipboard.feedback && !clipboard.feedback.failed && <p role="status" className="text-xs">{clipboard.feedback.text}</p>}
+      {commit && <>
+        <ContextActions label="Commit message" groups={[[
+          { label: "Copy full commit message", run: () => void clipboard.run(() => navigator.clipboard.writeText(commit.message), "Copied commit message") },
+        ]]}>
+          <pre aria-label="Commit message" className="min-w-0 whitespace-pre-wrap break-words font-mono text-xs">{commit.message}</pre>
+        </ContextActions>
+        <section aria-label="Files changed in this commit" className="grid gap-2">
+          <h4 className="text-sm font-semibold">Changed files</h4>
+          {commit.parents.length > 1 ? <label className="delivery-field">Compare with parent
+            <select className="delivery-filter max-w-full" value={parent ?? commit.parent ?? ""} onChange={(event) => { setParent(event.currentTarget.value); showFile(undefined); }}>
+              {commit.parents.map((sha, index) => <option key={sha} value={sha}>Parent {index + 1} · {sha.slice(0, 12)}</option>)}
+            </select>
+          </label> : <p className="break-words font-mono text-xs text-muted-foreground">{commit.parent ? `Parent ${commit.parent.slice(0, 12)}` : "Root commit · Empty tree"}</p>}
+          {!details.isPlaceholderData && (commit.comparisonUnavailable ? <InlineIssue>{commit.comparisonUnavailable}</InlineIssue>
+            : commit.files.length === 0 ? <p className="text-xs text-muted-foreground">No files changed against this base.</p> : <ul className="divide-y divide-border rounded border border-border">
+            {commit.files.map((file) => <li key={file.path}><ContextActions label={file.path} groups={[[
+              { label: commit.parent ? "Compare with parent" : "Compare with empty tree", run: () => showFile(file.path) },
+            ], [
+              { label: "Copy relative path", run: () => clipboard.copy(file.path) },
+              ...(file.previousPath ? [{ label: "Copy previous relative path", run: () => clipboard.copy(file.previousPath!) }] : []),
+            ]]}>
+              <button type="button" onClick={() => showFile(file.path)} className="flex min-w-0 flex-1 flex-wrap items-start justify-between gap-1 px-2 py-1.5 text-left text-xs hover:bg-muted">
+                <code className="min-w-0 wrap-anywhere">{file.previousPath && `${file.previousPath} → `}{file.path}</code>
+                <span className="text-muted-foreground">{commitChangeLabels[file.status] ?? file.status}</span>
+              </button>
+            </ContextActions></li>)}
+          </ul>)}
+        </section>
+        {filePath && <CommitFileDiff checkoutId={checkoutId} request={{ ...request, parent: commit.parent }} files={commit.files}
+          initialPath={filePath} close={() => showFile(undefined)} />}
+      </>}
+    </div>
+  </DeliveryDetailPanel>;
+}
+
+function CommitFileDiff({ checkoutId, request, files, initialPath, close }: {
+  checkoutId: string; request: CommitRequest; files: CommitFile[]; initialPath: string; close: () => void;
+}) {
+  const [path, select] = useState(initialPath);
+  const diff = useQuery({
+    queryKey: ["git-commit-diff", checkoutId, request, path],
+    queryFn: () => loadCommitFile(checkoutId, request, path),
+    enabled: Boolean(path), retry: false,
+  });
+  const snapshot = diff.error ? undefined : diff.data;
+  const previousPath = files.find((file) => file.path === path)?.previousPath ?? undefined;
+  const unavailable = snapshot && [snapshot.original, snapshot.modified].find((side) => side.status === "unavailable");
+  return <FileDialog title="Committed file comparison" description={request.sha} className="file-comparison-dialog" onClose={close}>
+    <div className="file-comparison-body">
+      <GitDiffReview source="commit" title="Commit changes"
+        ranges={{ base: request.parent ? `Parent ${request.parent.slice(0, 12)}` : "Empty tree", revised: `Commit ${request.sha.slice(0, 12)}` }}
+        files={files.map((file) => ({ path: file.path, previousPath: file.previousPath ?? undefined, kind: commitChangeLabels[file.status] ?? file.status }))}
+        selectedPath={path} select={select} comparison={comparisonFile(snapshot, previousPath)} empty={<p>No committed changes.</p>}
+        comparedFiles={{ selected: snapshot, load: (path) => loadCommitFile(checkoutId, request, path) }}
+        preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading committed file versions…</p>
+          : diff.error || unavailable ? <div className="p-3"><InlineIssue>{diff.error ? String(diff.error) : unavailable?.reason}</InlineIssue></div> : undefined)} />
+    </div>
+  </FileDialog>;
 }

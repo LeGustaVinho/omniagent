@@ -897,6 +897,204 @@ async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> 
 }
 
 #[tokio::test]
+async fn inspects_commit_messages_and_compares_exact_parent_files_in_the_selected_history()
+-> Result<()> {
+    use super::{GitHistoryCommitRequest, patch::GitReviewPatch};
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("history");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let old = "a file.md";
+    let moved = "renamed [1].md";
+    fs::write(root.join(old), b"before rename\n")?;
+    fs::write(root.join("removed.txt"), b"original\n")?;
+    let message = "Initial files\n\nThe complete message keeps the body.\n\nSigned-off-by: Fixture <fixture@example.invalid>";
+    let initial = commit_fixture(&root, message)?;
+    git(&root, &["switch", "--quiet", "-c", "topic"])?;
+    fs::write(root.join("topic.txt"), b"topic addition\n")?;
+    let topic = commit_fixture(&root, "Topic files")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::rename(root.join(old), root.join(moved))?;
+    fs::remove_file(root.join("removed.txt"))?;
+    let main = commit_fixture(&root, "Move the original file")?;
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "--no-edit",
+            "topic",
+        ],
+    )?;
+    let head = git(&root, &["rev-parse", "HEAD"])?;
+    fs::write(root.join(moved), b"uncommitted edit after merge\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let request = |sha: &str, parent: Option<&str>| GitHistoryCommitRequest {
+        branch: Some("refs/heads/main".into()),
+        expected_head: head.clone(),
+        sha: sha.into(),
+        parent: parent.map(str::to_owned),
+    };
+
+    let initial_details = store
+        .git_checkout_commit_details(checkout.clone(), request(&initial, None))
+        .await?;
+    assert_eq!(initial_details.message, format!("{message}\n"));
+    assert!(initial_details.parents.is_empty() && initial_details.parent.is_none());
+    assert_eq!(
+        initial_details
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.status))
+            .collect::<Vec<_>>(),
+        vec![(old, 'A'), ("removed.txt", 'A')]
+    );
+    let root_diff = store
+        .git_checkout_commit_diff(checkout.clone(), request(&initial, None), old.into())
+        .await?;
+    assert_eq!(root_diff.original, GitFileSide::Missing);
+    assert!(
+        matches!(root_diff.patch, GitReviewPatch::Text { content } if content.contains("new file mode") && content.contains("+before rename\n"))
+    );
+
+    let moved_details = store
+        .git_checkout_commit_details(checkout.clone(), request(&main, None))
+        .await?;
+    assert_eq!(moved_details.parent.as_deref(), Some(initial.as_str()));
+    assert!(moved_details.files.iter().any(|file| file.path == moved
+        && file.status == 'R'
+        && file.previous_path.as_deref() == Some(old)));
+    let renamed = store
+        .git_checkout_commit_diff(
+            checkout.clone(),
+            request(&main, Some(&initial)),
+            moved.into(),
+        )
+        .await?;
+    assert_eq!(
+        renamed.original,
+        GitFileSide::Text {
+            content: "before rename\n".into()
+        }
+    );
+    assert_eq!(renamed.modified, renamed.original);
+    assert!(
+        matches!(renamed.patch, GitReviewPatch::Text { content } if content.contains("rename from a file.md\n") && content.contains("rename to renamed [1].md\n"))
+    );
+    let removed = store
+        .git_checkout_commit_diff(checkout.clone(), request(&main, None), "removed.txt".into())
+        .await?;
+    assert_eq!(removed.modified, GitFileSide::Missing);
+    assert!(
+        matches!(removed.patch, GitReviewPatch::Text { content } if content.contains("deleted file mode") && content.contains("-original\n"))
+    );
+
+    let first = store
+        .git_checkout_commit_details(checkout.clone(), request(&head, None))
+        .await?;
+    assert_eq!(first.parents, vec![main.clone(), topic.clone()]);
+    assert_eq!(first.parent.as_deref(), Some(main.as_str()));
+    assert_eq!(
+        first
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["topic.txt"]
+    );
+    let second = store
+        .git_checkout_commit_details(checkout.clone(), request(&head, Some(&topic)))
+        .await?;
+    assert_eq!(second.parent.as_deref(), Some(topic.as_str()));
+    assert!(second.files.iter().any(|file| file.path == moved));
+    assert!(
+        store
+            .git_checkout_commit_diff(
+                checkout.clone(),
+                request(&head, Some(&topic)),
+                "topic.txt".into()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .git_checkout_commit_details(checkout.clone(), request(&head, Some(&initial)))
+            .await
+            .is_err()
+    );
+
+    let topic_request = GitHistoryCommitRequest {
+        branch: Some("refs/heads/topic".into()),
+        expected_head: topic.clone(),
+        sha: main,
+        parent: None,
+    };
+    let outside = store
+        .git_checkout_commit_details(checkout.clone(), topic_request)
+        .await
+        .unwrap_err();
+    assert!(
+        outside
+            .to_string()
+            .contains("outside the selected Git history")
+    );
+    git(&root, &["update-ref", "refs/heads/topic", &head, &topic])?;
+    let stale = GitHistoryCommitRequest {
+        branch: Some("refs/heads/topic".into()),
+        expected_head: topic.clone(),
+        sha: topic,
+        parent: None,
+    };
+    let changed = store
+        .git_checkout_commit_details(checkout, stale)
+        .await
+        .unwrap_err();
+    assert!(changed.to_string().contains("The selected history changed"));
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(
+        fs::read(root.join(moved))?,
+        b"uncommitted edit after merge\n"
+    );
+
+    git(
+        temp.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--quiet",
+            "--depth=1",
+            "--no-local",
+            root.to_str().context("fixture repository path")?,
+            "shallow",
+        ],
+    )?;
+    let shallow = register(&store, temp.path().join("shallow"))
+        .await?
+        .checkout_id;
+    let shallow_details = store
+        .git_checkout_commit_details(shallow, request(&head, None))
+        .await?;
+    assert!(shallow_details.message.contains("Merge branch 'topic'"));
+    assert_eq!(
+        shallow_details.parent.as_deref(),
+        Some(first.parents[0].as_str())
+    );
+    assert!(shallow_details.files.is_empty() && shallow_details.comparison_unavailable.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn copies_exact_git_patches_for_working_and_staged_files_without_writes() -> Result<()> {
     use super::patch::GitReviewPatch;
 

@@ -511,6 +511,8 @@ fn main() {
             manual_terminal::close_manual_terminal,
             git_review_runtime::git_checkout_review,
             git_review_runtime::git_checkout_history,
+            git_review_runtime::git_checkout_commit_details,
+            git_review_runtime::git_checkout_commit_diff,
             git_review_runtime::git_checkout_file_history,
             git_review_runtime::git_compare_file_versions,
             git_review_runtime::git_file_permalink,

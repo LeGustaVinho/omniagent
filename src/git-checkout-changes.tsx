@@ -362,9 +362,9 @@ function CommitIndex({ review }: { review: CheckoutReview }) {
   </form>;
 }
 
-function comparisonFile(diff?: TextDiff): GitTextComparison | null {
+export function comparisonFile(diff?: TextDiff, originalPath?: string): GitTextComparison | null {
   if (!diff || diff.original.status === "unavailable" || diff.modified.status === "unavailable") return null;
   const content = (side: GitComparedFile["original"]) => side.status === "text" ? side.content : "";
   const extension = diff.path.split(".").at(-1)?.toLowerCase() ?? "";
-  return { path: diff.path, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified), hunks: diff.hunks };
+  return { path: diff.path, originalPath, language: languages[extension] ?? "plaintext", original: content(diff.original), modified: content(diff.modified), hunks: diff.hunks };
 }
