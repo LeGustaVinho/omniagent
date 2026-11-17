@@ -357,12 +357,50 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     const directory = attachment.current?.directoryAt?.(reference.bufferLine);
     setReferenceMenu({ terminal, reference, point: { x, y }, directory });
   }
-  const failedCommandActions = onContextText && lastExecuted?.failed ? [{
-    label: "Add last command failure to conversation…", run: () => {
+  function addContext(text: string) {
+    restoringTerminalFocus.current = false;
+    onContextText?.(text);
+  }
+  const terminalActions: MenuGroups = [[
+    { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
+      const selection = terminal.getSelection();
+      return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
+    }) },
+    { label: "Copy selection as Markdown", disabled: !hasSelection, run: () => clipboard((terminal) =>
+      navigator.clipboard.writeText(markdownExcerpt({ text: terminal.getSelection() }))) },
+    { label: "Copy terminal output", disabled: !request, run: () => clipboard((terminal) => navigator.clipboard.writeText(terminalOutput(terminal))) },
+    { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
+      const text = await navigator.clipboard.readText();
+      if (attachment.current?.terminal === terminal) terminal.paste(text);
+    }) },
+    { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
+  ], [
+    { label: "Find in terminal", disabled: !request, run: () => {
       restoringTerminalFocus.current = false;
-      onContextText(failedCommandContext(lastExecuted));
-    },
-  }] : [];
+      setFindOpen(true);
+      requestAnimationFrame(() => findInput.current?.focus());
+    } },
+    { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
+    { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
+    { label: "Clear output", disabled: !request, run: () => attachment.current?.clear() },
+  ], lastExecuted ? [
+    { label: "Copy last PowerShell command", run: () => clipboard(() => navigator.clipboard.writeText(lastExecuted.command)) },
+    ...(lastOutput ? [{ label: "Copy last command output", run: () => clipboard(() => navigator.clipboard.writeText(lastOutput)) }] : []),
+    ...(onContextText && lastOutput?.trim() ? [{ label: "Add last command output to conversation…", run: () => addContext(lastOutput) }] : []),
+    ...(onContextText && lastExecuted.failed ? [{ label: "Add last command failure to conversation…", run: () => addContext(failedCommandContext(lastExecuted)) }] : []),
+  ] : [], onContextText ? [
+    { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
+      const text = attachment.current?.terminal.getSelection();
+      if (text) addContext(text);
+    } },
+    { label: "Add terminal output to conversation…", disabled: !request, run: () => {
+      const terminal = attachment.current?.terminal;
+      if (terminal) addContext(terminalOutput(terminal));
+    } },
+  ] : [], [
+    ...(canStart && reviewedInput === undefined ? [{ label: "Start PowerShell", run: () => start() }] : []),
+    ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
+  ], ...(sessionActions ?? [])];
   return <div className="flex h-full min-h-0 flex-col gap-2" onFocusCapture={onFocus} onPointerDownCapture={onFocus}>
     <div className="flex shrink-0 items-center gap-2">
       {canStart && reviewedInput === undefined && (
@@ -397,42 +435,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       <button type="button" className="fw-btn" onClick={dismissFind}>Close find</button>
       {found === false && <span role="status" className="file-help">No matching terminal output.</span>}
     </form>}
-    <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={[[
-      { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
-        const selection = terminal.getSelection();
-        return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
-      }) },
-      { label: "Copy selection as Markdown", disabled: !hasSelection, run: () => clipboard((terminal) =>
-        navigator.clipboard.writeText(markdownExcerpt({ text: terminal.getSelection() }))) },
-      { label: "Copy terminal output", disabled: !request, run: () => clipboard((terminal) => navigator.clipboard.writeText(terminalOutput(terminal))) },
-      { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
-        const text = await navigator.clipboard.readText();
-        if (attachment.current?.terminal === terminal) terminal.paste(text);
-      }) },
-      { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
-    ], [
-      { label: "Find in terminal", disabled: !request, run: () => { setFindOpen(true); findInput.current?.focus(); } },
-      { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
-      { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
-      { label: "Clear output", disabled: !request, run: () => attachment.current?.clear() },
-    ], lastExecuted ? [
-      { label: "Copy last PowerShell command", run: () => clipboard(() => navigator.clipboard.writeText(lastExecuted.command)) },
-      ...(lastOutput ? [{ label: "Copy last command output", run: () => clipboard(() => navigator.clipboard.writeText(lastOutput)) }] : []),
-      ...(onContextText && lastOutput?.trim() ? [{ label: "Add last command output to conversation…", run: () => onContextText(lastOutput) }] : []),
-      ...failedCommandActions,
-    ] : [], onContextText ? [
-      { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
-        const text = attachment.current?.terminal.getSelection();
-        if (text) onContextText(text);
-      } },
-      { label: "Add terminal output to conversation…", disabled: !request, run: () => {
-        const terminal = attachment.current?.terminal;
-        if (terminal) onContextText(terminalOutput(terminal));
-      } },
-    ] : [], [
-      ...(canStart && reviewedInput === undefined ? [{ label: "Start PowerShell", run: () => start() }] : []),
-      ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
-    ], ...(sessionActions ?? [])]}>
+    <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={terminalActions}>
       <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" onContextMenu={(event) => {
         const terminal = attachment.current?.terminal;
         if ((!onOpenFile && !onRevealFolder) || !terminal) return;
@@ -467,6 +470,6 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
           run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.text)),
         }] : []),
         { label: "Copy printed path", run: () => clipboard(() => navigator.clipboard.writeText(referenceMenu.reference.path)) },
-      ], failedCommandActions]} />}
+      ], ...terminalActions]} />}
   </div>;
 }

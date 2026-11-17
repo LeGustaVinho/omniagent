@@ -15,12 +15,14 @@ type FixtureTerminal = {
   focus: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   clear: ReturnType<typeof vi.fn>;
+  paste: ReturnType<typeof vi.fn>;
   linkProvider?: ILinkProvider;
   selected: string;
   onOsc?: (data: string) => boolean;
   onScreenClear?: () => boolean;
   onTerminalResize?: () => void;
   onTerminalLineFeed?: () => void;
+  onTerminalSelection?: () => void;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -47,6 +49,7 @@ vi.mock("@xterm/xterm", () => ({
     focus = vi.fn();
     dispose = vi.fn();
     clear = vi.fn();
+    paste = vi.fn();
     element?: HTMLElement;
     selected = "";
     linkProvider?: ILinkProvider;
@@ -61,12 +64,14 @@ vi.mock("@xterm/xterm", () => ({
       return { dispose: () => { this.linkProvider = undefined; } };
     }
     getSelection() { return this.selected; }
+    hasSelection() { return Boolean(this.selected); }
     getSelectionPosition() { return undefined; }
     private readonly oscHandlers: ((data: string) => boolean)[] = [];
     onOsc = (data: string) => this.oscHandlers.findLast((callback) => callback(data)) !== undefined;
     onScreenClear?: () => boolean;
     onTerminalResize?: () => void;
     onTerminalLineFeed?: () => void;
+    onTerminalSelection?: () => void;
     parser = { registerOscHandler: (_id: number, handler: (data: string) => boolean) => {
       this.oscHandlers.push(handler);
       return { dispose: () => { this.oscHandlers.splice(this.oscHandlers.indexOf(handler), 1); } };
@@ -79,7 +84,10 @@ vi.mock("@xterm/xterm", () => ({
       return { line: fixture.cursorRow, onDispose: (listener: () => void) => { onDispose = listener; }, dispose: () => onDispose?.() };
     }
     attachCustomKeyEventHandler = vi.fn();
-    onSelectionChange = () => ({ dispose: vi.fn() });
+    onSelectionChange = (handler: () => void) => {
+      this.onTerminalSelection = handler;
+      return { dispose: () => { this.onTerminalSelection = undefined; } };
+    };
     onResize = (handler: () => void) => {
       this.onTerminalResize = handler;
       return { dispose: () => { this.onTerminalResize = undefined; } };
@@ -405,8 +413,11 @@ it("opens wrapped local file references with their location and offers a menu on
   ];
   vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : { path: "docs/revisão #1.ts", kind: "file" });
   const onOpenFile = vi.fn();
+  const onContextText = vi.fn();
+  const split = vi.fn();
   const user = userEvent.setup();
-  const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile} />);
+  const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile}
+    onContextText={onContextText} sessionActions={[[{ label: "Split terminal", run: split }]]} />);
   await screen.findByRole("button", { name: "Close PowerShell" });
   const terminal = fixture.terminals[0]!;
   let links: ILink[] | undefined;
@@ -425,9 +436,31 @@ it("opens wrapped local file references with their location and offers a menu on
 
   const grid = container.querySelector(".xterm-screen")!;
   vi.spyOn(grid, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 260, 100));
-  fireEvent.contextMenu(grid, { clientX: 30, clientY: 11 });
+  const openPathMenu = () => fireEvent.contextMenu(grid, { clientX: 30, clientY: 11 });
+  openPathMenu();
   await user.click(await screen.findByRole("menuitem", { name: "Copy printed file reference" }));
   expect(await navigator.clipboard.readText()).toBe(original);
+
+  terminal.selected = `Selected diagnostic at ${original}`;
+  act(() => terminal.onTerminalSelection?.());
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy selection" }));
+  expect(await navigator.clipboard.readText()).toBe(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Paste" }));
+  expect(terminal.paste).toHaveBeenCalledExactlyOnceWith(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add selection to conversation…" }));
+  expect(onContextText).toHaveBeenCalledExactlyOnceWith(terminal.selected);
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Find in terminal" }));
+  const find = await screen.findByRole("searchbox", { name: "Find in terminal" });
+  await waitFor(() => expect(document.activeElement).toBe(find));
+  await user.click(screen.getByRole("button", { name: "Close find" }));
+  openPathMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Split terminal" }));
+  expect(split).toHaveBeenCalledTimes(1);
+
   terminal.selected = "../notes.md:8";
   fireEvent.keyDown(grid, { key: "F10", shiftKey: true });
   await user.click(await screen.findByRole("menuitem", { name: "Copy printed path" }));
