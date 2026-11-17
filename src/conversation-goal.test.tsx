@@ -144,7 +144,7 @@ it("opens bare goal controls, persists configured limits, and restores stopped g
   await user.click(await screen.findByRole("button", { name: "Open Goal Mode" }));
   const modal = within(screen.getByRole("dialog", { name: "Goal Mode" }));
   await user.type(modal.getByRole("textbox", { name: "Objective" }), "Prepare the release");
-  await user.type(modal.getByRole("textbox", { name: /Criteria/ }), "Check the Windows package\nReview changelog");
+  await user.type(modal.getByRole("textbox", { name: "Success criteria" }), "Check the Windows package\nReview changelog");
   await user.type(modal.getByRole("spinbutton", { name: "Turn limit" }), "3");
   await user.click(modal.getByRole("button", { name: "Selected model" }));
   await waitFor(() => expect((modal.getByRole("button", { name: "Start goal" }) as HTMLButtonElement).disabled).toBe(false));

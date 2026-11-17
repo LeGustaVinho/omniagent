@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { Target } from "lucide-react";
+import { ArrowRight, CircleHelp, Clock3, Coins, ListChecks, Repeat2, Target, X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker } from "@/components/model-picker";
+import { Button } from "@/components/ui/button";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 
 export type GoalDefinition = {
   objective: string;
@@ -196,9 +198,10 @@ export function ConversationGoalCard({ value, refresh, openRun }: {
   </section>;
 }
 
-export function GoalSettingsDialog({ objective, options, selected, onSelect, value, refresh, openRun, pending, error, canStart, onStart, onClose }: {
+export function GoalSettingsDialog({ objective, options, loadingModels, selected, onSelect, value, refresh, openRun, pending, error, canStart, onStart, onClose }: {
   objective: string;
   options: ModelOption[];
+  loadingModels?: boolean;
   selected: ModelSelection | null;
   onSelect: (model: ModelSelection | null) => void;
   value: ConversationGoalOverview | null | undefined;
@@ -211,6 +214,17 @@ export function GoalSettingsDialog({ objective, options, selected, onSelect, val
   onClose: () => void;
 }) {
   const [definition, setDefinition] = useState(() => goalDefinition(objective));
+  const formId = useId();
+  const opener = useRef<HTMLElement | null>(null);
+  const objectiveField = useRef<HTMLTextAreaElement>(null);
+  const activeGoal = value && hasCurrentGoal(value);
+  const modelAvailable = options.some(({ selectable, selection }) => selectable && selection.provider === selected?.provider
+    && selection.profileId === selected.profileId && selection.modelId === selected.modelId);
+  const limits = [
+    { field: "maxTurns", title: "Turn limit", icon: Repeat2, max: 4294967295 },
+    { field: "maxSeconds", title: "Time limit in seconds", icon: Clock3, max: 4294967295 },
+    { field: "tokenBudget", title: "Token budget", icon: Coins, max: Number.MAX_SAFE_INTEGER },
+  ] as const;
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!canStart || pending || !definition.objective.trim()) return;
@@ -218,22 +232,56 @@ export function GoalSettingsDialog({ objective, options, selected, onSelect, val
   }
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !pending) onClose(); }}>
     <Dialog.Portal><Dialog.Overlay className="conv-dialog-scrim" />
-      <Dialog.Content className="conv-dialog max-h-[90vh] overflow-auto">
-        <Dialog.Title>Goal Mode</Dialog.Title>
-        <Dialog.Description>Set the objective and any limits for this conversation.</Dialog.Description>
-        {value && hasCurrentGoal(value) ? <ConversationGoalCard value={value} refresh={refresh} openRun={openRun} />
-          : <form onSubmit={submit} className="grid gap-2">
-            <label>Objective<textarea required value={definition.objective} onChange={(event) => setDefinition({ ...definition, objective: event.target.value })} /></label>
-            <label>Criteria, one per line<textarea value={definition.criteria.join("\n")}
-              onChange={(event) => setDefinition({ ...definition, criteria: event.target.value.split("\n") })} /></label>
-            <ModelPicker label="Goal model" layout="inline" options={options} selection={{ mode: "single", selected, onChange: onSelect }} />
-            {([["maxTurns", "Turn limit", 4294967295], ["maxSeconds", "Time limit in seconds", 4294967295], ["tokenBudget", "Token budget", Number.MAX_SAFE_INTEGER]] as const)
-              .map(([field, title, max]) => <label key={field}>{title}<input type="number" min="1" max={max} step="1"
-                value={definition[field] ?? ""} onChange={(event) => setDefinition({ ...definition, [field]: event.target.value ? event.target.valueAsNumber : null })} /></label>)}
-            <button type="submit" className="conv-quiet-button" disabled={pending || !canStart || !definition.objective.trim()}>{pending ? "Starting…" : "Start goal"}</button>
-          </form>}
-        {error && <p role="alert" className="conv-alert">{error}</p>}
-        <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={pending}>Close</button></Dialog.Close>
+      <Dialog.Content className="conv-dialog conv-dialog-layout conv-goal-dialog" onOpenAutoFocus={(event) => {
+        opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        if (objectiveField.current) {
+          event.preventDefault();
+          objectiveField.current.focus({ preventScroll: true });
+        }
+      }} onCloseAutoFocus={(event) => {
+        if (opener.current?.getClientRects().length) {
+          event.preventDefault();
+          opener.current.focus({ preventScroll: true });
+        }
+      }}>
+        <header className="conv-dialog-header">
+          <span className="conv-dialog-mark"><Target size={20} aria-hidden /></span>
+          <div><Dialog.Title>Goal Mode</Dialog.Title>
+            <Dialog.Description>Set an objective the agent can work toward over multiple turns.</Dialog.Description></div>
+          <Dialog.Close asChild><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close goal settings" disabled={pending}><X size={17} aria-hidden /></Button></Dialog.Close>
+        </header>
+        <div className="conv-dialog-body">
+          {activeGoal ? <ConversationGoalCard value={value} refresh={refresh} openRun={openRun} />
+            : <form id={formId} onSubmit={submit} className="conv-dialog-form conv-goal-form">
+              <label htmlFor={`${formId}-objective`}><span className="conv-goal-label"><Target size={15} aria-hidden /> Objective</span>
+                <textarea id={`${formId}-objective`} ref={objectiveField} rows={3} required placeholder="Prepare the release and verify the Windows package."
+                  value={definition.objective} onChange={(event) => setDefinition({ ...definition, objective: event.target.value })} />
+              </label>
+              <div className="conv-goal-model"><ModelPicker label="Goal model" options={options} combinedCatalog loading={loadingModels}
+                selection={{ mode: "single", selected, onChange: onSelect }} /></div>
+              <div className="conv-goal-field"><label htmlFor={`${formId}-criteria`} className="conv-goal-label"><ListChecks size={15} aria-hidden /> Success criteria <small aria-hidden>Optional</small></label>
+                <textarea id={`${formId}-criteria`} aria-describedby={`${formId}-criteria-help`} rows={3} value={definition.criteria.join("\n")}
+                  placeholder={'Installer passes the smoke test\nRelease notes cover the changes'}
+                  onChange={(event) => setDefinition({ ...definition, criteria: event.target.value.split("\n") })} />
+                <small id={`${formId}-criteria-help`}>Enter one criterion per line.</small>
+              </div>
+              <fieldset className="conv-goal-limits">
+                <legend>Run limits <ControlTooltip label="Leave any field empty to omit that limit."><button type="button" className="ui-icon-button" aria-label="About run limits"><CircleHelp size={15} aria-hidden /></button></ControlTooltip></legend>
+                {limits.map(({ field, title, icon: Icon, max }) => <label key={field}><span className="conv-goal-label"><Icon size={15} aria-hidden /> {title}</span>
+                  <input type="number" min="1" max={max} step="1" placeholder="No limit" value={definition[field] ?? ""}
+                    onChange={(event) => setDefinition({ ...definition, [field]: event.target.value ? event.target.valueAsNumber : null })} /></label>)}
+              </fieldset>
+              {!pending && !canStart && definition.objective.trim() && <p role="status" className="conv-goal-start-note">{modelAvailable
+                ? "Wait for this conversation to be ready before starting the goal." : "Choose an available model to start this goal."}</p>}
+            </form>}
+          {error && <p role="alert" className="conv-alert">{error}</p>}
+        </div>
+        <footer className="conv-dialog-actions">
+          <Dialog.Close asChild><Button type="button" variant="outline" disabled={pending}>Close</Button></Dialog.Close>
+          {!activeGoal && <Button type="submit" form={formId} disabled={pending || !canStart || !definition.objective.trim()}>
+            {pending ? "Starting…" : "Start goal"}<ArrowRight size={16} aria-hidden />
+          </Button>}
+        </footer>
       </Dialog.Content>
     </Dialog.Portal>
   </Dialog.Root>;

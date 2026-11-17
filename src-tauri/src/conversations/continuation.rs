@@ -1,9 +1,12 @@
 use super::{
-    Conversation, MessageRevision, MessageRole, SessionScope, activate_context,
-    automatic_continuity, check_idle_base, consume_matching_draft, context_entries,
+    Conversation, ConversationPipeline, ConversationPipelineChoice, MessageRevision, MessageRole,
+    SessionScope, activate_context, automatic_continuity, check_idle_base, consume_matching_draft,
+    context_entries,
     draft_files::{consume_attachment_draft, verify_attachment_draft},
-    insert_conversation, insert_message, load_conversation, new_id, previous_attempt,
-    reference_delivery,
+    fork_checkout::ContinuationCheckout,
+    insert_conversation, insert_message, load_conversation, new_id,
+    pipeline::insert_conversation_with_pipeline,
+    previous_attempt, reference_delivery,
 };
 use crate::{
     attachments::{AttachmentDelivery, AttachmentSource, CapturedPayload, captured_for_revision},
@@ -13,7 +16,7 @@ use crate::{
         queue_conversation_continuation,
     },
     protection,
-    providers::SessionMode,
+    providers::{SessionMode, composer_customizations::contains_skill_token},
     store::Store,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -223,6 +226,7 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let conversation = load_conversation(&tx, &conversation_id)?;
+            conversation.require_direct_turn()?;
             let (project, root) = checkout(&tx, &conversation)?;
             validate_scope(&scope, &root)?;
             let inspected =
@@ -324,6 +328,7 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &conversation_id)?;
+                conversation.require_direct_turn()?;
                 let target = super::fork_checkout::resolve_continuation_checkout(&tx, &conversation, requested_checkout_id.as_deref())?;
                 let project = target.project_id;
                 validate_scope(&scope, &target.root)?;
@@ -411,61 +416,126 @@ impl Store {
                 attachment_preview_id,
             )
             .await?;
-        let continued = self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (context_id, preview) = load_continuation_review(&tx, &conversation_id, &preview_id)?;
-            let source = check_idle_base(&tx, &conversation_id, &context_id)?;
-            ensure!(!busy(&tx, &source)?, "The conversation has pending work. Review the continuation after it settles.");
-            let target = super::fork_checkout::resolve_continuation_checkout(&tx, &source, preview.target_checkout_id.as_deref())?;
-            let project = target.project_id;
-            let goal = conversation_goal_transition(&tx, &source.id)?;
-            ensure!(goal.as_ref().map(|goal| &goal.review_token) == preview.goal_review_token.as_ref(),
-                "The conversation goal changed. Review its checkpoint and scope again.");
-            ensure!(goal.is_none() || choice != ContinuationChoice::SameTab || target.checkout_id == source.checkout_id,
-                "The active goal has pending work in this checkout. Fork with context or start a fresh conversation for the selected checkout.");
-            validate_scope(&scope, &target.root)?;
-            ensure!(preview.scope == scope, "The selected profile changed. Review the continuation again.");
-            ensure!(preview.attachment_preview_id.as_deref() == attachments.as_ref().map(|draft| draft.preview_id.as_str()),
-                "The reviewed files changed. Review the continuation again.");
-            ensure!(attachments.as_ref().is_none_or(|draft| draft.checkout_id == target.checkout_id),
-                "Review the draft files in the destination checkout before continuing");
-            verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
-            reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &preview.reference_ids)?;
-            let entries = context_entries(&tx, &conversation_id, &context_id)?;
-            ensure!(
-                preview.seed_digest == protected_history_digest(&tx, &source)?,
-                "The reviewed history changed. Review the continuation again."
-            );
-            if target.checkout_id != source.checkout_id && choice != ContinuationChoice::Fresh {
-                require_destination_seed_references(&tx, &entries, &target.root)?;
-            }
-            consume_matching_draft(&tx, &source.id, &text)?;
-            reference_delivery::consume_draft_references(&tx, &source.id)?;
-            consume_attachment_draft(&tx, &source.id)?;
-            let conversation = match choice {
-                ContinuationChoice::SameTab => {
-                    let mut same = source;
-                    if target.checkout_id != same.checkout_id {
-                        tx.execute("UPDATE conversations SET checkout_id = ?2 WHERE id = ?1", params![same.id, target.checkout_id])?;
-                        same.checkout_id = target.checkout_id;
-                    }
-                    same
+        let continued = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let (source, target, preview) =
+                    reviewed_continuation(&tx, &conversation_id, &preview_id, choice, &scope)?;
+                let project = target.project_id;
+                ensure!(
+                    preview.attachment_preview_id.as_deref()
+                        == attachments.as_ref().map(|draft| draft.preview_id.as_str()),
+                    "The reviewed files changed. Review the continuation again."
+                );
+                ensure!(
+                    attachments
+                        .as_ref()
+                        .is_none_or(|draft| draft.checkout_id == target.checkout_id),
+                    "Review the draft files in the destination checkout before continuing"
+                );
+                verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
+                reference_delivery::verify_draft_references(
+                    &tx,
+                    &conversation_id,
+                    &project,
+                    &preview.reference_ids,
+                )?;
+                let entries = context_entries(&tx, &conversation_id, &source.context_id)?;
+                if target.checkout_id != source.checkout_id && choice != ContinuationChoice::Fresh {
+                    require_destination_seed_references(&tx, &entries, &target.root)?;
                 }
-                ContinuationChoice::ForkWithContext => fork_history_at_checkout(&tx, &source, &entries, target.checkout_id, format!("{} (fork)", source.title))?,
-                ContinuationChoice::Fresh => insert_conversation(&tx, target.checkout_id, "New conversation".into(), false)?,
-            };
-            let job = queue_conversation_continuation(
-                &tx, project, &conversation, &conversation.context_id, &scope, &text, &preview.reference_ids,
-                attachments.as_ref().map(|draft| &draft.files),
-            )?;
-            pin_continuation(&tx, &job.id, &conversation, None)?;
-            tx.execute("DELETE FROM conversation_continuation_previews WHERE id = ?1", [&preview_id])?;
-            tx.commit()?;
-            Ok(ContinuedConversation { conversation, job })
-        })
-        .await?;
+                consume_matching_draft(&tx, &source.id, &text)?;
+                reference_delivery::consume_draft_references(&tx, &source.id)?;
+                consume_attachment_draft(&tx, &source.id)?;
+                let conversation = match choice {
+                    ContinuationChoice::SameTab => {
+                        let mut same = source;
+                        if target.checkout_id != same.checkout_id {
+                            tx.execute(
+                                "UPDATE conversations SET checkout_id = ?2 WHERE id = ?1",
+                                params![same.id, target.checkout_id],
+                            )?;
+                            same.checkout_id = target.checkout_id;
+                        }
+                        same
+                    }
+                    ContinuationChoice::ForkWithContext => fork_history_at_checkout(
+                        &tx,
+                        &source,
+                        &entries,
+                        target.checkout_id,
+                        format!("{} (fork)", source.title),
+                    )?,
+                    ContinuationChoice::Fresh => insert_conversation_with_pipeline(
+                        &tx,
+                        target.checkout_id,
+                        &project,
+                        "New conversation".into(),
+                        ConversationPipeline::Direct,
+                    )?,
+                };
+                let job = queue_conversation_continuation(
+                    &tx,
+                    project,
+                    &conversation,
+                    &conversation.context_id,
+                    &scope,
+                    &text,
+                    &preview.reference_ids,
+                    attachments.as_ref().map(|draft| &draft.files),
+                )?;
+                pin_continuation(&tx, &job.id, &conversation, None)?;
+                tx.execute(
+                    "DELETE FROM conversation_continuation_previews WHERE id = ?1",
+                    [&preview_id],
+                )?;
+                tx.commit()?;
+                Ok(ContinuedConversation { conversation, job })
+            })
+            .await?;
         self.job_signal.send_replace(());
         Ok(continued)
+    }
+
+    pub async fn continue_conversation_into_pipeline(
+        &self,
+        conversation_id: String,
+        preview_id: String,
+        scope: SessionScope,
+        text: String,
+        choice: ConversationPipelineChoice,
+    ) -> Result<Conversation> {
+        ensure!(
+            choice != ConversationPipelineChoice::Direct,
+            "Choose a pipeline for this draft"
+        );
+        ensure!(
+            !contains_skill_token(&text),
+            "Remove the selected action and choose it again in the pipeline conversation"
+        );
+        let checkout = self
+            .conversation_continuation_review_checkout(conversation_id.clone(), preview_id.clone())
+            .await?;
+        let (project, pipeline) = self
+            .resolve_conversation_pipeline(&checkout, choice)
+            .await?;
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (source, target, preview) = reviewed_continuation(&tx, &conversation_id, &preview_id, ContinuationChoice::Fresh, &scope)?;
+            ensure!(target.checkout_id == checkout && target.project_id == project,
+                "The destination changed. Review the continuation again.");
+            ensure!(preview.attachment_preview_id.is_none(), "Remove the draft files before switching to a pipeline");
+            verify_attachment_draft(&tx, &source.id, None)?;
+            reference_delivery::verify_draft_references(&tx, &source.id, &project, &preview.reference_ids)?;
+            consume_matching_draft(&tx, &source.id, &text)?;
+            let conversation = insert_conversation_with_pipeline(&tx, checkout, &project, "New conversation".into(), pipeline)?;
+            tx.execute("INSERT INTO drafts(kind, owner_id, document, payload) VALUES ('conversation', ?1, '', ?2)",
+                params![conversation.id, protection::protect(text.as_bytes())?])?;
+            reference_delivery::move_draft_references(&tx, &source.id, &conversation.id, &project)?;
+            tx.execute("DELETE FROM conversation_continuation_previews WHERE id = ?1", [&preview_id])?;
+            tx.commit()?;
+            Ok(conversation)
+        }).await
     }
 
     pub async fn conversation_continuation_review_checkout(
@@ -485,6 +555,48 @@ impl Store {
         })
         .await
     }
+}
+
+fn reviewed_continuation(
+    db: &Connection,
+    conversation_id: &str,
+    preview_id: &str,
+    choice: ContinuationChoice,
+    scope: &SessionScope,
+) -> Result<(Conversation, ContinuationCheckout, SealedReview)> {
+    let (context_id, preview) = load_continuation_review(db, conversation_id, preview_id)?;
+    let source = check_idle_base(db, conversation_id, &context_id)?;
+    source.require_direct_turn()?;
+    ensure!(
+        !busy(db, &source)?,
+        "The conversation has pending work. Review the continuation after it settles."
+    );
+    let target = super::fork_checkout::resolve_continuation_checkout(
+        db,
+        &source,
+        preview.target_checkout_id.as_deref(),
+    )?;
+    let goal = conversation_goal_transition(db, &source.id)?;
+    ensure!(
+        goal.as_ref().map(|goal| &goal.review_token) == preview.goal_review_token.as_ref(),
+        "The conversation goal changed. Review its checkpoint and scope again."
+    );
+    ensure!(
+        goal.is_none()
+            || choice != ContinuationChoice::SameTab
+            || target.checkout_id == source.checkout_id,
+        "The active goal has pending work in this checkout. Fork with context or start a fresh conversation for the selected checkout."
+    );
+    validate_scope(scope, &target.root)?;
+    ensure!(
+        &preview.scope == scope,
+        "The selected profile changed. Review the continuation again."
+    );
+    ensure!(
+        preview.seed_digest == protected_history_digest(db, &source)?,
+        "The reviewed history changed. Review the continuation again."
+    );
+    Ok((source, target, preview))
 }
 
 fn require_destination_seed_references(
@@ -910,6 +1022,7 @@ pub(super) fn fork_history_at_checkout(
         _ => None,
     };
     let mut fork = insert_conversation(db, checkout_id, title, false)?;
+    super::pipeline::inherit_pipeline(db, source, &mut fork)?;
     let mut copied = Vec::with_capacity(entries.len());
     let mut read = db.prepare(
         "SELECT m.role, r.content FROM messages m JOIN message_revisions r ON r.message_id = m.id

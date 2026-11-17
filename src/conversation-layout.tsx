@@ -3,6 +3,7 @@ import { Dialog } from "radix-ui";
 import type { KeyboardEventHandler, ReactNode, Ref, UIEventHandler } from "react";
 import type { MessageRole } from "@/bindings/MessageRole";
 import { ResizablePanel } from "@/panel-resize";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import "./conversation.css";
 
 export function ConversationWorkspaceLayout({ navigation, controls, children }: {
@@ -56,7 +57,7 @@ export function ConversationSidePanel({ label, onKeyDown, children }: {
     resizeKey="conversation-side-panel" resizeLabel={label} onKeyDown={onKeyDown}>{children}</ResizablePanel>;
 }
 
-export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, filters, children }: {
+export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, searchAction, children }: {
   sectionRef?: Ref<HTMLElement>;
   className?: string;
   query: string;
@@ -64,20 +65,24 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
   onQuery: (query: string) => void;
   onCreate: () => void;
   creating?: boolean;
-  filters?: ReactNode;
+  searchAction?: ReactNode;
   children: ReactNode;
 }) {
   return <section ref={sectionRef} className={`conv-sessions conv-library-frame${className ? ` ${className}` : ""}`} aria-label="Conversation library">
     <header className="conv-session-heading">
       <h2>Conversations</h2>
-      <button type="button" className="conv-icon-button conv-library-create" aria-label="New conversation" title="New conversation"
-        disabled={creating} onClick={onCreate}><Plus aria-hidden /></button>
+      <ControlTooltip label="New conversation"><button type="button" className="conv-icon-button conv-library-create"
+        aria-label="New conversation" disabled={creating} onClick={onCreate}>
+        <Plus aria-hidden /><span>{creating ? "Creating…" : "New"}</span>
+      </button></ControlTooltip>
     </header>
-    <label className="conv-search"><Search aria-hidden />
-      <input type="search" aria-label={searchLabel} placeholder={searchLabel} value={query}
-        onChange={(event) => onQuery(event.currentTarget.value)} />
-    </label>
-    {filters && <div className="conv-library-options">{filters}</div>}
+    <div className="flex items-center gap-1">
+      <label className="conv-search min-w-0 flex-1"><Search aria-hidden />
+        <input type="search" aria-label={searchLabel} placeholder={searchLabel} value={query}
+          onChange={(event) => onQuery(event.currentTarget.value)} />
+      </label>
+      {searchAction && <div className="shrink-0">{searchAction}</div>}
+    </div>
     <div className="conv-library-entries">{children}</div>
   </section>;
 }

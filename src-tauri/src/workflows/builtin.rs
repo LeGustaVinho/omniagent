@@ -149,6 +149,17 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
 }
 
 impl Store {
+    pub(crate) async fn pin_builtin_repository_delivery(
+        &self,
+        project: String,
+    ) -> Result<super::WorkflowRevision> {
+        let graph = self
+            .builtin_delivery_for_project(project.clone(), DeliveryRoles::default())
+            .await?;
+        self.save_workflow_revision(project, BUILTIN_DELIVERY_ID.into(), graph)
+            .await
+    }
+
     pub(super) async fn builtin_delivery_for_project(
         &self,
         project: String,

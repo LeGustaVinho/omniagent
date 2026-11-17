@@ -41,7 +41,11 @@ use super::{
         CapabilityAssessment, CapabilityScope, CapabilitySubject, ReportedCapabilities,
         Verification,
     },
-    composer_customizations::{project_composer_messages, resolve_selected_skills},
+    composer_customizations::{
+        contains_command_token, markdown_skill_context, plugin_markdown_skills,
+        project_composer_messages, resolve_command, resolve_markdown_skills,
+        resolve_selected_skills,
+    },
     configuration,
     launch_scope::{CandidateReviewCheckout, ScopedLaunch, ScopedLaunchEvidence},
     planning::{PlanSource, STRUCTURED_PLANNING_PROMPT, StructuredPlan},
@@ -1025,6 +1029,10 @@ impl TurnExecution {
         let mut inventory_deadline = None;
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
+        let wait_for_commands = self.plan.scope.provider != Provider::Codex
+            && self.plan.input.last().is_some_and(|message| {
+                message.role == MessageRole::User && contains_command_token(&message.text)
+            });
         let mut question_deadline = None;
         let mut next_goal_authority_check = Instant::now();
         let mut native_context_deadline = None;
@@ -1241,7 +1249,8 @@ impl TurnExecution {
             }
             let inventory_complete = (!wait_for_configuration
                 || self.reported.configuration_reported)
-                && (!wait_for_skills || self.reported_skills.is_some());
+                && (!wait_for_skills || self.reported_skills.is_some())
+                && (!wait_for_commands || session.available_composer_commands().is_some());
             let bridge_ready = !self.plan.requires_bridge
                 || matches!(
                     registration,
@@ -1499,8 +1508,14 @@ impl TurnExecution {
                 _ => anyhow::bail!("inconsistent resume cursor"),
             }
         };
-        let (mut configuration, filesystem_skills, instructions) =
+        let (mut configuration, mut filesystem_skills, instructions) =
             configuration::inspect(&self.plan.scope, checkout, &self.reported)?;
+        if self.plan.scope.provider != Provider::Codex {
+            filesystem_skills.extend(plugin_markdown_skills(
+                &self.plan.scope,
+                self.plugin_inventory.as_ref(),
+            )?);
+        }
         configuration::resolve_effective_configuration(
             &mut configuration,
             checkout,
@@ -1662,6 +1677,47 @@ impl TurnExecution {
             input.text.push_str("\n\n");
             input.text.push_str(STRUCTURED_PLANNING_PROMPT);
         }
+        let latest_prompt = self
+            .plan
+            .input
+            .last()
+            .filter(|message| message.role == MessageRole::User)
+            .map_or("", |message| message.text.as_str());
+        let command = resolve_command(
+            &self.plan.scope,
+            latest_prompt,
+            session.available_composer_commands(),
+        )?;
+        let mut selections = if self.plan.scope.provider == Provider::Codex {
+            resolve_selected_skills(
+                &self.plan.scope,
+                latest_prompt,
+                self.reported_skills.as_ref(),
+            )?
+        } else {
+            resolve_markdown_skills(&self.plan.scope, latest_prompt, &filesystem_skills)?
+        };
+        for (skill, file) in required_stage_skills {
+            if !selections.iter().any(|(selected, _)| selected == &skill) {
+                selections.push((skill, file));
+            }
+        }
+        ensure!(
+            selections.len() <= 8,
+            "The turn has more than eight selected skills"
+        );
+        ensure!(
+            self.plan.native_goal_seed.is_none() || (selections.is_empty() && command.is_none()),
+            "The native goal route cannot carry selected skills or commands"
+        );
+        if self.plan.scope.provider != Provider::Codex {
+            input
+                .text
+                .push_str(&markdown_skill_context(&mut selections)?);
+        }
+        if let Some(command) = &command {
+            input.text = format!("/{command} {}", input.text).trim_end().into();
+        }
         let (mut assessment, attachments) =
             self.prepare_attachments(runner, session, checkout, &capabilities, &native_history)?;
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
@@ -1695,41 +1751,14 @@ impl TurnExecution {
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
             return self.record_attachment_assessment(blocked).map(|()| true);
         }
-        let (mut selected_skills, mut skill_files): (Vec<_>, Vec<_>) = self
-            .plan
-            .input
-            .last()
-            .filter(|message| message.role == MessageRole::User)
-            .map(|message| {
-                resolve_selected_skills(
-                    &self.plan.scope,
-                    &message.text,
-                    self.reported_skills.as_ref(),
-                )
-            })
-            .transpose()?
-            .unwrap_or_default()
-            .into_iter()
-            .unzip();
-        for (skill, file) in required_stage_skills {
-            if !selected_skills.contains(&skill) {
-                selected_skills.push(skill);
-                skill_files.push(file);
-            }
-        }
-        ensure!(
-            selected_skills.len() <= 8,
-            "The turn has more than eight selected skills"
-        );
-        ensure!(
-            self.plan.native_goal_seed.is_none() || selected_skills.is_empty(),
-            "The native goal route cannot carry selected skills"
-        );
+        let (selected_skills, skill_files): (Vec<_>, Vec<_>) = selections.into_iter().unzip();
         self.composer_skill_sources = skill_files;
         let update = if self.plan.native_goal_seed.is_some() {
             session.seed_native_goal_context(input)?
-        } else {
+        } else if self.plan.scope.provider == Provider::Codex {
             session.send_with_composer_skills(input, &selected_skills)?
+        } else {
+            session.send(input)?
         };
         if let Some(mut report) = assessment {
             report.check_encoded_request(

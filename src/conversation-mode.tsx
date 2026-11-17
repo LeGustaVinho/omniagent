@@ -1,4 +1,13 @@
+import { Map, ShieldCheck, Target } from "lucide-react";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
+
 export type ConversationMode = "read_only" | "plan" | "goal";
+
+const modeDescriptions: Record<ConversationMode, string> = {
+  read_only: "Inspect the repository and ask questions.",
+  plan: "Develop a plan and review decisions before implementation.",
+  goal: "Set an objective and review its progress over multiple turns.",
+};
 
 export function goalCommand(text: string): string | undefined {
   const command = /^\/goal(?:\s+([\s\S]*))?$/i.exec(text.trim());
@@ -20,12 +29,13 @@ export function ConversationModeSelect({ mode, onChange }: {
   mode: ConversationMode;
   onChange: (mode: ConversationMode) => void;
 }) {
+  const Icon = mode === "plan" ? Map : mode === "goal" ? Target : ShieldCheck;
   return (
-    <select aria-label="Conversation mode" className="conv-select" value={mode}
+    <span className="conv-option"><Icon size={15} aria-hidden /><ControlTooltip label={modeDescriptions[mode]} side="top"><select aria-label="Conversation mode" className="conv-select" value={mode}
       onChange={(event) => onChange(event.currentTarget.value as ConversationMode)}>
       <option value="read_only">Read-only</option>
       <option value="plan">Plan Mode</option>
       <option value="goal">Goal Mode</option>
-    </select>
+    </select></ControlTooltip></span>
   );
 }

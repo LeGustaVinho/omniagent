@@ -14,6 +14,7 @@ mod builtin;
 mod command;
 pub mod comparison;
 mod control;
+pub mod conversation_turns;
 mod execution;
 #[cfg(test)]
 mod git_integration;
@@ -33,6 +34,7 @@ mod registry;
 mod repetition;
 pub mod role_templates;
 mod runtime;
+pub(crate) use runtime::load_definition;
 pub mod settings_proposals;
 pub mod stage_goal;
 #[cfg(test)]

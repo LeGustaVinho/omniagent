@@ -209,7 +209,7 @@ impl Store {
     }
 }
 
-fn load_units(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionUnit>> {
+pub(super) fn load_units(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionUnit>> {
     db.prepare(
         "SELECT plan_revision, task_id, unit FROM workflow_delivery_units
          WHERE project_id = ?1 AND pipeline_run_id = ?2 ORDER BY plan_revision, ordinal",
@@ -228,7 +228,7 @@ fn load_units(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutio
     .collect()
 }
 
-fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionJob>> {
+pub(super) fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionJob>> {
     db.prepare("SELECT o.node_instance_id, j.id, i.payload FROM job_pipeline_origins o
         JOIN jobs j ON j.id = o.job_id JOIN workflow_node_pins n ON n.pipeline_run_id = o.pipeline_run_id AND n.node_instance_id = o.node_instance_id
         LEFT JOIN workflow_job_inputs i ON i.job_id = j.id
@@ -249,7 +249,7 @@ fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecution
         }).collect()
 }
 
-fn load_outputs(
+pub(super) fn load_outputs(
     db: &Connection,
     run: &WorkflowRun,
     jobs: &[WorkflowExecutionJob],

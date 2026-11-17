@@ -10,7 +10,7 @@ use crate::{
 };
 
 use super::{
-    ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs,
+    ArtifactKind, ArtifactValue, BuiltinNode, Executor, NodeInputs,
     approval::require_current_plan,
     artifacts::load_artifact,
     runtime::load_pinned_node,
@@ -51,6 +51,9 @@ pub(crate) fn stage_job_input_with_repair(
         &binding.node_instance_id,
     )?
     .context("the scheduled workflow node is unavailable")?;
+    if matches!(pinned.definition.executor, Executor::ReadOnlyAgent | Executor::PlanAgent) {
+        super::conversation_turns::require_no_active_stage_job(db, binding, input.unit_id.as_deref())?;
+    }
     let isolated_comparison = pinned.definition.kind == BuiltinNode::CompareModels;
     let unit_scoped = if isolated_comparison || pinned.definition.kind == BuiltinNode::Agent {
         let run = super::runtime::load_workflow_run(db, project, &binding.pipeline_run_id)?

@@ -1,12 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { Route } from "lucide-react";
 import { Dialog, Popover } from "radix-ui";
 import { useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
+import type { ConversationPipelineChoice } from "@/bindings/ConversationPipelineChoice";
+import type { ConversationPipelineOption } from "@/bindings/ConversationPipelineOption";
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { GoalCheckpointSummary, GoalExecutionScope, type GoalTransitionReview, type GoalTransitionScope } from "@/conversation-goal";
+import { ConversationPipelineOptions, conversationPipelineKey, directConversationChoice } from "@/conversation-pipeline-picker";
 
 type Choice = "same_tab" | "fork_with_context" | "fresh";
 type Settings = { projectDefault: Choice; conversationOverride: Choice | null; effective: Choice };
@@ -44,7 +48,7 @@ export type ConversationContinuationReview = {
   }[];
 };
 
-type Outcome = { conversation: Conversation; job: Job };
+type Outcome = { conversation: Conversation; job?: Job };
 
 export function submitConversationContinuation(request: ContinuationScope & {
   expectedContextId: string; text: string; referenceIds?: string[]; attachmentPreviewId?: string; targetCheckoutId?: string;
@@ -52,7 +56,9 @@ export function submitConversationContinuation(request: ContinuationScope & {
   return invoke<ConversationContinuationReview | { status: "queued"; job: Job }>("submit_conversation_continuation", request);
 }
 
-export function confirmConversationContinuation(request: ContinuationScope & { previewId: string; choice: Choice; text: string }) {
+export function confirmConversationContinuation(request: ContinuationScope & {
+  previewId: string; choice: Choice; text: string; pipeline?: ConversationPipelineChoice;
+}) {
   return invoke<Outcome>("confirm_conversation_continuation", request);
 }
 
@@ -69,17 +75,26 @@ const reasons: Record<ConversationContinuationReview["reason"], string> = {
   policy_changed: "The previous provider session uses a different subagent policy.",
 };
 
-export function ConversationContinuationDialog({ review, pending, error, onConfirm, onClose }: {
+export function ConversationContinuationDialog({ review, pipelines, pipelineRestriction, pending, error, onConfirm, onClose }: {
   review: ConversationContinuationReview;
+  pipelines?: { data?: ConversationPipelineOption[]; isPending: boolean; error: unknown; refetch: () => unknown };
+  pipelineRestriction?: string;
   pending: boolean;
   error?: unknown;
-  onConfirm: (choice: Choice) => void;
+  onConfirm: (choice: Choice, pipeline?: ConversationPipelineChoice) => void;
   onClose: () => void;
 }) {
   const goal = review.goalTransition;
   const sameTabAvailable = goal?.sameTabAvailable !== false;
   const [choice, setChoice] = useState(() => !sameTabAvailable && review.settings.effective === "same_tab"
     ? "fork_with_context" : review.settings.effective);
+  const [selected, setSelected] = useState<string>();
+  const options = pipelines?.data ?? [directConversationChoice];
+  const fresh = choice === "fresh";
+  const pipeline = fresh ? options.find((option) => conversationPipelineKey(option.pipeline) === selected)?.pipeline : undefined;
+  const draftOnly = pipeline !== undefined && pipeline.kind !== "direct";
+  const canConfirm = !pending && (sameTabAvailable || choice !== "same_tab") &&
+    (!fresh || (pipeline !== undefined && (!pipelineRestriction || !draftOnly)));
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !pending) onClose(); }}>
     <Dialog.Portal>
       <Dialog.Overlay className="conv-dialog-scrim" />
@@ -88,7 +103,9 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
         <Dialog.Description>{reasons[review.reason]}</Dialog.Description>
         <form className="conv-dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          if (!pending && (sameTabAvailable || choice !== "same_tab")) onConfirm(choice);
+          if (!canConfirm) return;
+          if (fresh) onConfirm(choice, pipeline);
+          else onConfirm(choice);
         }}>
           {!goal && review.targetCheckout && <p className="break-all">Continue in <code>{review.targetCheckout.checkoutRoot}</code></p>}
           {goal && <>
@@ -111,8 +128,19 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
               {choiceLabels[entry]}
             </label>)}
           </fieldset>
-          {choice === "fresh"
-            ? <p className="text-xs text-muted-foreground">The new conversation starts with this draft.</p>
+          {fresh
+            ? <section aria-label="Choose a conversation pipeline" className="grid gap-2">
+              <h3 className="text-sm font-medium">Conversation pipeline</h3>
+              <ConversationPipelineOptions options={options} selected={selected} onSelect={setSelected} disabled={pending}
+                directOnly={Boolean(pipelineRestriction)} />
+              {pipelines?.isPending && <p role="status" className="text-xs text-muted-foreground">Loading published pipelines…</p>}
+              {Boolean(pipelines?.error) && <div className="conversation-pipeline-feedback">
+                <p role="alert">{String(pipelines?.error)}</p>
+                <button type="button" className="conv-quiet-button" onClick={() => void pipelines?.refetch()}>Refresh pipelines</button>
+              </div>}
+              {pipelineRestriction && <p className="text-xs text-muted-foreground">{pipelineRestriction}</p>}
+              {draftOnly && <p className="text-xs text-muted-foreground">Review pipeline inputs in the new conversation before sending.</p>}
+            </section>
             : <section aria-label="History seed" className="grid gap-2">
               <h3 className="text-sm font-medium">History sent to the new session</h3>
               {review.seed.length === 0 ? <p className="text-xs text-muted-foreground">This conversation has no saved messages.</p>
@@ -136,7 +164,9 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
           {error != null && <p className="conv-alert" role="alert">{String(error)}</p>}
           <footer>
             <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={pending}>Cancel</button></Dialog.Close>
-            <button type="submit" className="conv-primary-button" disabled={pending || (!sameTabAvailable && choice === "same_tab")}>{pending ? "Queueing…" : "Continue and send"}</button>
+            <button type="submit" className="conv-primary-button" disabled={!canConfirm}>
+              {draftOnly ? pending ? "Opening…" : "Open draft" : pending ? "Queueing…" : "Continue and send"}
+            </button>
           </footer>
         </form>
       </Dialog.Content>
@@ -171,7 +201,9 @@ export function ConversationContinuationSettings({ conversationId, targetCheckou
   });
   const error = settings.error ?? save.error ?? checkouts.error;
   return <Popover.Root open={open} onOpenChange={setOpen}>
-    <Popover.Trigger asChild><button type="button" className="conv-quiet-button">Continuation</button></Popover.Trigger>
+    <Popover.Trigger asChild>
+      <button type="button" className="conv-quiet-button"><Route size={15} aria-hidden /> Continuation</button>
+    </Popover.Trigger>
     <Popover.Portal>
       <Popover.Content align="end" sideOffset={6} className="work-project-popover conv-dialog-form" aria-label="Continuation settings">
         {onCheckout && <label>Checkout for next send

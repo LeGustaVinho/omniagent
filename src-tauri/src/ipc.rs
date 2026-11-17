@@ -6,7 +6,10 @@ use std::{
 
 use omniagent::{
     attachments::AttachmentLimits,
-    conversations::{Conversation, ConversationHistory, MessageRevision},
+    conversations::{
+        Conversation, ConversationHistory, ConversationPipelineChoice, ConversationPipelineOption,
+        MessageRevision,
+    },
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     jobs::{
@@ -126,11 +129,28 @@ pub async fn create_conversation(
     store: State<'_, Store>,
     checkout_id: String,
     title: String,
+    pipeline: Option<ConversationPipelineChoice>,
 ) -> Result<Conversation, String> {
+    match pipeline {
+        Some(pipeline) => {
+            store
+                .create_conversation_with_pipeline(checkout_id, title, pipeline)
+                .await
+        }
+        None => store.create_conversation(checkout_id, title).await,
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_pipeline_options(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<Vec<ConversationPipelineOption>, String> {
     store
-        .create_conversation(checkout_id, title)
+        .conversation_pipeline_options(checkout_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
 #[tauri::command]

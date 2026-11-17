@@ -1,18 +1,26 @@
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{dispatch::ConversationArtifactRevision, protection, store::Store};
 
 use super::{
-    load_conversation,
+    load_conversation, new_id,
     references::{
         ConversationReferenceSnapshot, load_conversation_reference, recheck_conversation_reference,
+        save_reference_snapshot,
     },
 };
 
 const MAX_DRAFT_REFERENCES: usize = 8;
-const MAX_DRAFT_REFERENCE_BYTES: usize = 128 * 1024;
+pub(super) const MAX_DRAFT_REFERENCE_BYTES: usize = 128 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMentionDraftChange {
+    pub expected: String,
+    pub replacement: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +47,17 @@ impl Store {
         preview_id: String,
         attach: bool,
     ) -> Result<Vec<ConversationReferenceSnapshot>> {
+        self.edit_conversation_reference_and_draft(conversation_id, preview_id, attach, None)
+            .await
+    }
+
+    pub async fn edit_conversation_reference_and_draft(
+        &self,
+        conversation_id: String,
+        preview_id: String,
+        attach: bool,
+        draft_change: Option<ConversationMentionDraftChange>,
+    ) -> Result<Vec<ConversationReferenceSnapshot>> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let project = conversation_project(&tx, &conversation_id)?;
@@ -47,9 +66,7 @@ impl Store {
                 let current = draft_references(&tx, &conversation_id, &project)?;
                 if current.iter().all(|item| item.id != preview_id) {
                     ensure!(current.len() < MAX_DRAFT_REFERENCES, "The draft has too many conversation references");
-                    let bytes = current.iter().chain([&reference]).try_fold(0usize, |sum, item| {
-                        Ok::<_, anyhow::Error>(sum + serde_json::to_vec(&item.artifact)?.len())
-                    })?;
+                    let bytes = serialized_reference_artifacts(current.iter().chain([&reference]))?;
                     ensure!(bytes <= MAX_DRAFT_REFERENCE_BYTES, "The selected conversation references are too large. Select fewer messages.");
                     tx.execute(
                         "INSERT INTO conversation_reference_drafts(conversation_id, ordinal, preview_id)
@@ -62,6 +79,10 @@ impl Store {
                     "DELETE FROM conversation_reference_drafts WHERE conversation_id = ?1 AND preview_id = ?2",
                     params![conversation_id, preview_id],
                 )?;
+            }
+            if let Some(change) = draft_change {
+                ensure!(attach, "A mention draft change must attach a conversation reference");
+                replace_mention_draft(&tx, &conversation_id, change)?;
             }
             let result = draft_references(&tx, &conversation_id, &project)?;
             tx.commit()?;
@@ -77,6 +98,36 @@ impl Store {
         self.execute(move |db| submitted_references(db, &run_id, &message_revisions))
             .await
     }
+}
+
+fn replace_mention_draft(
+    db: &Connection,
+    conversation: &str,
+    change: ConversationMentionDraftChange,
+) -> Result<()> {
+    let saved: Option<Vec<u8>> = db.query_row(
+        "SELECT payload FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
+        [conversation], |row| row.get(0),
+    ).optional()?;
+    let draft = saved
+        .as_deref()
+        .map(protection::unprotect)
+        .transpose()?
+        .unwrap_or_default();
+    ensure!(
+        draft == change.expected.as_bytes(),
+        "The draft changed. Select the conversation again to attach it."
+    );
+    ensure!(
+        !change.replacement.trim().is_empty(),
+        "The mention draft cannot be empty"
+    );
+    db.execute(
+        "INSERT INTO drafts(kind, owner_id, document, payload) VALUES ('conversation', ?1, '', ?2)
+         ON CONFLICT(kind, owner_id, document) DO UPDATE SET payload = excluded.payload, updated_at = unixepoch()",
+        params![conversation, protection::protect(change.replacement.as_bytes())?],
+    )?;
+    Ok(())
 }
 
 fn conversation_project(db: &Connection, conversation: &str) -> Result<String> {
@@ -115,7 +166,23 @@ pub(super) fn draft_reference_bytes(
     Ok(serde_json::to_vec(&references)?.len() as u64)
 }
 
-pub(super) fn verify_draft_references(
+pub(super) fn draft_reference_artifact_bytes(
+    db: &Connection,
+    conversation: &str,
+    project: &str,
+) -> Result<usize> {
+    serialized_reference_artifacts(&draft_references(db, conversation, project)?)
+}
+
+fn serialized_reference_artifacts<'a>(
+    references: impl IntoIterator<Item = &'a ConversationReferenceSnapshot>,
+) -> Result<usize> {
+    references.into_iter().try_fold(0, |bytes, reference| {
+        Ok(bytes + serde_json::to_vec(&reference.artifact)?.len())
+    })
+}
+
+pub(crate) fn verify_draft_references(
     db: &Connection,
     conversation: &str,
     project: &str,
@@ -129,12 +196,34 @@ pub(super) fn verify_draft_references(
     Ok(())
 }
 
-pub(super) fn consume_draft_references(db: &Connection, conversation: &str) -> Result<()> {
+pub(crate) fn consume_draft_references(db: &Connection, conversation: &str) -> Result<()> {
     db.execute(
         "DELETE FROM conversation_reference_drafts WHERE conversation_id = ?1",
         [conversation],
     )?;
     Ok(())
+}
+
+pub(super) fn move_draft_references(
+    db: &Connection,
+    source: &str,
+    destination: &str,
+    project: &str,
+) -> Result<()> {
+    for (ordinal, mut snapshot) in draft_references(db, source, project)?
+        .into_iter()
+        .enumerate()
+    {
+        recheck_conversation_reference(db, destination, project, &snapshot)?;
+        snapshot.id = new_id();
+        snapshot.destination_conversation_id = destination.to_owned();
+        save_reference_snapshot(db, &snapshot)?;
+        db.execute(
+            "INSERT INTO conversation_reference_drafts (conversation_id, ordinal, preview_id) VALUES (?1, ?2, ?3)",
+            params![destination, i64::try_from(ordinal)? + 1, snapshot.id],
+        )?;
+    }
+    consume_draft_references(db, source)
 }
 
 pub(crate) fn bind_references(

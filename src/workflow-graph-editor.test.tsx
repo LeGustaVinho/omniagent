@@ -6,9 +6,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import { PipelineCatalog } from "@/pipeline-catalog";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
-import { connectionProblem, defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
+import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -48,7 +49,11 @@ const wire = (from: string, output: string, to: string, input: string) => ({ fro
 
 it("opens the real Library and searches the same definitions used by the Builder", async () => {
   const ipc = vi.mocked(invoke);
-  ipc.mockResolvedValue([start, context, plan]);
+  ipc.mockImplementation(async (command) => {
+    if (command === "workflow_graph_registry") return [start, context, plan];
+    if (command === "workflow_package_catalog") return [];
+    throw new Error(command);
+  });
   const openWorkspace = vi.fn();
   const user = userEvent.setup();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -60,11 +65,78 @@ it("opens the real Library and searches the same definitions used by the Builder
   const library = within(screen.getByRole("region", { name: "Workflow library" }));
   await library.findByRole("heading", { name: "Load context" });
   expect(ipc).toHaveBeenCalledWith("workflow_graph_registry");
-  await user.type(library.getByRole("searchbox", { name: "Search pipeline nodes" }), "planned");
+  const loadContext = library.getByRole("button", { name: "Load context" });
+  loadContext.focus();
+  await user.keyboard("{Enter}");
+  const dialog = within(screen.getByRole("dialog", { name: "Load context" }));
+  expect(dialog.getByRole("heading", { name: "How it works" })).toBeTruthy();
+  expect(dialog.getByText("Prepare a planning input")).toBeTruthy();
+  expect(dialog.getByText("No editable parameters for this definition.")).toBeTruthy();
+  const outputs = within(dialog.getByRole("region", { name: "Outputs" }));
+  expect(outputs.getByText("loaded")).toBeTruthy();
+  expect(outputs.getByText("markdown")).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(loadContext);
+
+  const category = library.getByRole("combobox", { name: "Category" });
+  const effect = library.getByRole("combobox", { name: "Effect" });
+  await user.selectOptions(category, "Entry and results");
+  expect(library.getByRole("status").textContent).toBe("2 of 3 nodes");
+  await user.selectOptions(effect, "Model calls");
+  expect(library.getByText("No nodes match your filters.")).toBeTruthy();
+  await user.click(library.getByRole("button", { name: "Clear filters" }));
+  expect(library.getByRole("status").textContent).toBe("3 nodes");
+  const search = library.getByRole("searchbox", { name: "Search pipeline nodes" });
+  expect(document.activeElement).toBe(search);
+
+  await user.type(search, "planned");
   expect(library.queryByRole("heading", { name: "Load context" })).toBeNull();
   expect(library.getByRole("heading", { name: "Plan" })).toBeTruthy();
   await user.click(tabs.getByRole("button", { name: "Maintenance" }));
   expect(openWorkspace).toHaveBeenCalledWith("pipelines", "maintenance");
+});
+
+it("reads a published preset's pinned ports and editable parameters only when opened", async () => {
+  const version = { id: "review-preset", revision: "pinned-review-revision", kind: "preset", destination: "library" };
+  const definition = { ...plan, inputs: [data("notes", "markdown")] };
+  const ipc = vi.mocked(invoke);
+  ipc.mockImplementation(async (command) => {
+    if (command === "workflow_graph_registry") return [plan];
+    if (command === "workflow_package_catalog") return [{ name: "Review with notes", version, blockers: [] }];
+    if (command === "describe_workflow_reusable_node") return {
+      artifact: { name: "Review with notes", version, blockers: [], body: { kind: "preset" } },
+      definition,
+      editableOverrides: ["role"],
+    };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={vi.fn()}
+      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const card = await screen.findByRole("button", { name: "Review with notes" });
+  expect(ipc).not.toHaveBeenCalledWith("describe_workflow_reusable_node", expect.anything());
+  await user.click(card);
+  const dialog = within(screen.getByRole("dialog", { name: "Review with notes" }));
+  expect(await dialog.findByText("Agent role")).toBeTruthy();
+  expect(dialog.queryByText("Stage model override")).toBeNull();
+  expect(dialog.getByText(/Editable fields: role/)).toBeTruthy();
+  expect(within(dialog.getByRole("region", { name: "Inputs" })).getByText("notes")).toBeTruthy();
+  expect(ipc).toHaveBeenCalledWith("describe_workflow_reusable_node", { projectId: exampleCheckout.projectId, version });
+});
+
+it("explains an example preset without treating its simulation contract as a live schema", async () => {
+  render(<PipelineCatalog library />);
+  const user = userEvent.setup();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Category" }), "Presets");
+  await user.click(screen.getByRole("button", { name: "Build" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Build" }));
+  expect(dialog.getByText("Presets · Simulation")).toBeTruthy();
+  expect(dialog.getByText("Compile a candidate")).toBeTruthy();
+  expect(dialog.getByText("Registered build command")).toBeTruthy();
+  expect(dialog.getByText(/no editable settings in the simulated Builder/)).toBeTruthy();
 });
 
 it("opens the graph from the exact saved workflow revision in Roles & templates", async () => {
@@ -316,6 +388,21 @@ it("edits typed launch fields and a branch condition without raw configuration",
   fireEvent.change(inspector.getByRole("textbox", { name: "Input 1 name" }), { target: { value: "approved" } });
   await user.selectOptions(inspector.getByRole("combobox", { name: "Input 1 type" }), "boolean");
   expect(edited.nodes[0]?.configuration).toEqual({ kind: "typed_start", fields: [{ name: "approved", valueType: "boolean", required: true }] });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Input 1 source" }), "history");
+  expect(inspector.getByRole<HTMLSelectElement>("combobox", { name: "Input 1 type" }).disabled).toBe(true);
+  expect(edited.nodes[0]?.configuration).toEqual({ kind: "typed_start", fields: [{
+    name: "approved", valueType: "array", required: true, conversationSource: "history",
+  }] });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Input 1 source" }), "message");
+  expect(edited.nodes[0]?.configuration).toEqual({ kind: "typed_start", fields: [{
+    name: "approved", valueType: "text", required: true, conversationSource: "message",
+  }] });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Input 1 source" }), "");
+  expect(inspector.getByRole<HTMLSelectElement>("combobox", { name: "Input 1 type" }).disabled).toBe(false);
+  expect(edited.nodes[0]?.configuration).toEqual({ kind: "typed_start", fields: [{ name: "approved", valueType: "text", required: true }] });
+  expect(configurationProblem({ kind: "typed_start", fields: [{
+    name: "approved", valueType: "text", required: true, conversationSource: "history",
+  }] }, entry)).toMatch(/Array for conversation history/);
 
   await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "condition");
   await user.selectOptions(inspector.getByRole("combobox", { name: "Test" }), "equals");

@@ -176,16 +176,22 @@ pub(super) fn require_admission(
             .map(Option::flatten)
     };
     let prompt_artifact = read("prompt", ArtifactKind::RenderedText)?;
-    let expected_prompt = prompt(prompt_artifact.as_ref())?;
+    let mut expected_prompt = prompt(prompt_artifact.as_ref())?.to_owned();
+    super::conversation_turns::append_prompt_context(
+        db,
+        workflow,
+        &binding.node_instance_id,
+        &mut expected_prompt,
+    )?;
     let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration else {
         anyhow::bail!("The Agent stage lost its pinned role");
     };
     let mut expected_instructions = if let Some(version) = &requirements.bound_role {
         let template = roles::load_role(db, project, version)?
             .context("The pinned Agent role is unavailable")?;
-        roles::role_instructions(&template, expected_prompt)
+        roles::role_instructions(&template, &expected_prompt)
     } else {
-        expected_prompt.to_owned()
+        expected_prompt
     };
     if let Some(unit) = &unit {
         append_pinned_unit(&mut expected_instructions, &unit.unit)?;

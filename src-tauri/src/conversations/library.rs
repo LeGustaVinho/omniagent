@@ -78,7 +78,7 @@ impl Store {
                         json_extract(session.scope, '$.provider'),
                         COALESCE(attempt.reported_model, json_extract(session.scope, '$.model')), run.status,
                         COALESCE(organization.pinned, 0), COALESCE(organization.unread, 0),
-                        section.id, section.name
+                        section.id, section.name, c.pipeline
                  FROM conversations c
                  JOIN checkouts checkout ON checkout.id = c.checkout_id
                  JOIN projects project ON project.id = checkout.project_id
@@ -111,7 +111,10 @@ impl Store {
                     None => None,
                 };
                 result.push(ConversationLibraryEntry {
-                    conversation: Conversation { id: row.get(0)?, checkout_id: checkout_id.clone(), title, context_id: row.get(3)? },
+                    conversation: Conversation {
+                        id: row.get(0)?, checkout_id: checkout_id.clone(), title, context_id: row.get(3)?,
+                        pipeline: super::pipeline::read_optional_pipeline(row, 15)?,
+                    },
                     checkout: ProjectCheckout { project_id, repository_root: root, checkout_id, checkout_root: row.get(6)? },
                     project_name, agent: row.get(8)?, model: row.get(9)?, status: row.get(10)?, last_activity_at: row.get(7)?,
                     organization: ConversationLibraryOrganization { pinned: row.get(11)?, unread: row.get(12)?, archived, section },

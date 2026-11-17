@@ -33,14 +33,14 @@ function mount() {
     const compaction = useConversationCompaction({
       conversationId, selection, effort: null, mode: "read_only", pendingText: draft, enabled: true,
     });
-    return <>
+    return <form aria-label="Prompt">
       <ConversationCompactionControl compaction={compaction} contextId={contextId} />
       <label>Message draft<textarea value={draft} onChange={(event) => setDraft(event.currentTarget.value)} /></label>
       <button type="button" disabled={compaction.checkingSend} onClick={async () => {
         const destination = await compaction.beforeSend(contextId, draft);
         if (destination) send(destination, draft);
       }}>Send</button>
-    </>;
+    </form>;
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><Composer /></QueryClientProvider>);
@@ -87,7 +87,8 @@ it("shows project settings and keeps an oversized draft when the summary fails",
     }
   });
   const { user, send } = mount();
-  await user.click(screen.getByText("Compact context"));
+  await user.click(screen.getByRole("button", { name: "Compact context" }));
+  await user.click(await screen.findByText("Settings and evidence"));
   expect(await screen.findByText(/Provider-managed compaction/)).toBeTruthy();
   expect(screen.getByText(/Estimated after compaction/)).toBeTruthy();
   const thresholdInput = screen.getByRole<HTMLInputElement>("spinbutton", { name: "Automatic threshold (%)" });
@@ -116,7 +117,7 @@ it("offers the native route independently and renders its provider boundary and 
     }
   });
   const { user, send } = mount();
-  await user.click(screen.getByText("Compact context"));
+  await user.click(screen.getByRole("button", { name: "Compact context" }));
   const native = await screen.findByRole<HTMLButtonElement>("button", { name: "Compact Codex session" });
   const managed = screen.getByRole<HTMLButtonElement>("button", { name: "Summarize with OmniAgent" });
   expect(native.disabled).toBe(false);
@@ -132,9 +133,29 @@ it("offers the native route independently and renders its provider boundary and 
     } },
   });
   expect(await screen.findByText("Codex confirmed session compaction.")).toBeTruthy();
+  await user.click(screen.getByText("Settings and evidence"));
   expect(screen.getByText("provider-turn")).toBeTruthy();
   expect(screen.getByText("provider-item")).toBeTruthy();
   expect(screen.getByText(/Provider usage.*123 input.*15 output/)).toBeTruthy();
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(pendingText);
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("opens beyond the prompt form and returns focus on Escape", async () => {
+  vi.mocked(invoke).mockResolvedValue(initial);
+  const { user, send } = mount();
+  const prompt = screen.getByRole("form", { name: "Prompt" });
+  const trigger = screen.getByRole("button", { name: "Compact context" });
+  await user.tab();
+  expect(document.activeElement).toBe(trigger);
+  await user.keyboard("{Enter}");
+  const popover = await screen.findByRole("dialog", { name: "Context compaction settings" });
+  expect(prompt.contains(popover)).toBe(false);
+  expect(document.activeElement).toBe(popover);
+  expect(screen.getByRole("spinbutton", { name: "Automatic threshold (%)" }).closest("details")?.open).toBe(false);
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
   expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(pendingText);
   expect(send).not.toHaveBeenCalled();
 });

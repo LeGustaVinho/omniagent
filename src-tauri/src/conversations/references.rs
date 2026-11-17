@@ -8,6 +8,7 @@ use crate::{
     dispatch::{
         ConversationArtifactRevision, ConversationSelection, SelectedMessageSpan,
         load_conversation_artifact, record_conversation_excerpt,
+        record_recent_conversation_excerpt,
     },
     protection,
     store::Store,
@@ -15,6 +16,7 @@ use crate::{
 
 use super::{
     Conversation, MessageRevision, context_entries, load_conversation, load_messages, new_id,
+    reference_delivery::{MAX_DRAFT_REFERENCE_BYTES, draft_reference_artifact_bytes},
 };
 
 #[derive(Debug, Serialize)]
@@ -44,6 +46,7 @@ pub struct ConversationReferenceSummary {
     rename_all_fields = "camelCase"
 )]
 pub enum ConversationReferenceSelection {
+    Automatic,
     Messages {
         context_id: String,
         spans: Vec<SelectedMessageSpan>,
@@ -113,16 +116,45 @@ impl Store {
     ) -> Result<ConversationReferenceSnapshot> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let scope = reference_scope(&tx, &destination_conversation_id, &source_conversation_id)?;
+            let scope =
+                reference_scope(&tx, &destination_conversation_id, &source_conversation_id)?;
             let artifact = match selection {
+                ConversationReferenceSelection::Automatic => {
+                    let used = draft_reference_artifact_bytes(
+                        &tx,
+                        &destination_conversation_id,
+                        &scope.project_id,
+                    )?;
+                    automatic_reference(
+                        &tx,
+                        &scope,
+                        MAX_DRAFT_REFERENCE_BYTES.saturating_sub(used),
+                    )?
+                }
                 ConversationReferenceSelection::Messages { context_id, spans } => {
-                    ensure!(retained_contexts(&tx, &scope.source)?.contains(&context_id), "the selected context is outside the retained source conversation");
-                    record_conversation_excerpt(&tx, ConversationSelection { conversation_id: source_conversation_id.clone(), context_id, spans })?
+                    ensure!(
+                        retained_contexts(&tx, &scope.source)?.contains(&context_id),
+                        "the selected context is outside the retained source conversation"
+                    );
+                    record_conversation_excerpt(
+                        &tx,
+                        ConversationSelection {
+                            conversation_id: source_conversation_id.clone(),
+                            context_id,
+                            spans,
+                        },
+                    )?
                 }
                 ConversationReferenceSelection::Summary { artifact_id } => {
-                    let artifact = load_conversation_artifact(&tx, &source_conversation_id, &artifact_id)?
-                        .context("the selected summary is not saved in the source conversation")?;
-                    ensure!(matches!(artifact, ConversationArtifactRevision::Summary { .. }), "the selected revision is not a summary");
+                    let artifact =
+                        load_conversation_artifact(&tx, &source_conversation_id, &artifact_id)?
+                            .context(
+                                "the selected summary is not saved in the source conversation",
+                            )?;
+                    ensure!(
+                        matches!(artifact, ConversationArtifactRevision::Summary { .. }),
+                        "the selected revision is not a summary"
+                    );
                     artifact
                 }
             };
@@ -136,13 +168,52 @@ impl Store {
                 source_title: scope.source.title,
                 artifact,
             };
-            tx.execute("INSERT INTO conversation_reference_previews (id, destination_conversation_id, source_conversation_id, project_id, artifact_id, payload)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![snapshot.id, snapshot.destination_conversation_id, snapshot.source_conversation_id,
-                snapshot.project_id, snapshot.artifact.id(), protection::protect(&serde_json::to_vec(&snapshot)?)?])?;
+            save_reference_snapshot(&tx, &snapshot)?;
             tx.commit()?;
             Ok(snapshot)
-        }).await
+        })
+        .await
     }
+}
+
+pub(super) fn save_reference_snapshot(
+    db: &Connection,
+    snapshot: &ConversationReferenceSnapshot,
+) -> Result<()> {
+    db.execute("INSERT INTO conversation_reference_previews (id, destination_conversation_id, source_conversation_id, project_id, artifact_id, payload)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![snapshot.id, snapshot.destination_conversation_id, snapshot.source_conversation_id,
+        snapshot.project_id, snapshot.artifact.id(), protection::protect(&serde_json::to_vec(snapshot)?)?])?;
+    Ok(())
+}
+
+fn automatic_reference(
+    db: &Connection,
+    scope: &ReferenceScope,
+    max_bytes: usize,
+) -> Result<ConversationArtifactRevision> {
+    ensure!(
+        max_bytes > 0,
+        "The draft conversation references are already at the size limit"
+    );
+    let mut statement = db.prepare(
+        "SELECT a.id FROM conversation_artifact_revisions a
+         JOIN runs ON runs.id = a.summary_run_id
+         WHERE a.source_conversation_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_artifacts WHERE artifact_id = a.id)
+         ORDER BY runs.created_at DESC, a.id",
+    )?;
+    for id in statement.query_map([&scope.source.id], |row| row.get::<_, String>(0))? {
+        let Some(artifact) = load_conversation_artifact(db, &scope.source.id, &id?)? else {
+            continue;
+        };
+        if matches!(&artifact, ConversationArtifactRevision::Summary { source_context_id, .. }
+            if source_context_id == &scope.source.context_id)
+            && serde_json::to_vec(&artifact)?.len() <= max_bytes
+        {
+            return Ok(artifact);
+        }
+    }
+    record_recent_conversation_excerpt(db, &scope.source.id, &scope.source.context_id, max_bytes)
 }
 
 pub(crate) fn load_conversation_reference(

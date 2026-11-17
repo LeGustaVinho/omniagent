@@ -453,6 +453,20 @@ impl Store {
         else {
             anyhow::bail!("the pinned node has no agent role");
         };
+        let workflow_run = dispatch.pipeline_run_id.clone();
+        let node_id = dispatch.node_instance_id.clone();
+        let mut instructions = request.instructions;
+        request.instructions = self
+            .execute(move |db| {
+                super::conversation_turns::append_prompt_context(
+                    db,
+                    &workflow_run,
+                    &node_id,
+                    &mut instructions,
+                )?;
+                Ok(instructions)
+            })
+            .await?;
         if !requirements.is_empty() {
             super::stage_requirements::validate_stage_requirements(
                 self,

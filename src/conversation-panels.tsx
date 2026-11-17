@@ -1,22 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { Activity, ArrowDown, ArrowUp, MessageSquare, Pencil, Plus, RotateCcw, Search, Target } from "lucide-react";
-import { Dialog } from "radix-ui";
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import { Activity, ArrowDown, ArrowUp, Blocks, Gauge, MessageSquare, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Target } from "lucide-react";
+import { Dialog, DropdownMenu } from "radix-ui";
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
+import type { ConversationPipelineChoice } from "@/bindings/ConversationPipelineChoice";
+import type { ConversationPipelineOption } from "@/bindings/ConversationPipelineOption";
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
 import type { ModelSelection } from "@/bindings/ModelSelection";
-import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { ModelPicker } from "@/components/model-picker";
 import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect } from "@/components/effort-select";
-import { availableModelSelection, liveModelsQuery, sameModelSelection } from "@/live-models";
+import { availableModelSelection, liveModelsQuery, sameModelSelection, useLiveModelOptions } from "@/live-models";
 import { useCheckoutModelDefaults, useExecutionProfileDefault } from "@/model-defaults";
 import { ConversationModeSelect, completesSideQuestion, goalCommand, sideQuestionCommand,
   sideQuestionCommandPrefix, type ConversationMode } from "@/conversation-mode";
@@ -24,8 +25,9 @@ import { ConversationGoalCard, GoalSettingsDialog, goalDefinition, hasCurrentGoa
 import { ConversationContinuationDialog, ConversationContinuationSettings, confirmConversationContinuation, submitConversationContinuation,
   type ConversationContinuationReview } from "@/conversation-continuation";
 import { Button } from "@/components/ui/button";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
-import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
+import { ConversationInstructionHistory, ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
 import { ConversationHistoryControls, ConversationMessageHistoryActions, type ConversationMessageHistoryAction } from "@/conversation-history-controls";
 import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission } from "@/conversation-side-requests";
@@ -35,17 +37,24 @@ import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
 import { ConversationAttachments, useConversationAttachmentReview, useConversationAttachments } from "@/conversation-attachments";
-import { ComposerCustomizationPicker, conversationSkillMessage, hasComposerSkills, useComposerCustomizations,
+import { ComposerCustomizationPicker, composerActionDetail, composerActionLabel, conversationSkillMessage, hasComposerSkills, pipelineActionMarker, useComposerCustomizations,
   type ComposerCustomization } from "@/conversation-customization-picker";
+import { composerCompletion, replaceComposerCompletion, type ComposerCompletion } from "@/composer-completion";
+import { ComposerCompletionMenu, type ComposerMenuOption } from "@/composer-completion-menu";
+import { PipelineComposerActionChips, usePipelineComposerCustomizations } from "@/pipeline-composer-customizations";
 import {
   ConversationLibraryNavigation, ConversationReferencePicker, ConversationTitleEditor,
-  conversationLibraryKey, useConversationRename, useConversationTitle,
+  conversationLibraryKey, useConversationLibrary, useConversationRename, useConversationTitle,
 } from "@/conversation-library";
 import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import type { ConversationPipeline as ChatPipeline } from "@/bindings/ConversationPipeline";
+import { ConversationPipelineLabel, directConversationPipeline, useNewConversation } from "@/conversation-pipeline-picker";
+import { ConversationPipelineInputsDialog, ConversationPipelineTurnStatus, useConversationPipelineTurns, type ConversationPipelineInputs, type PipelineTurn } from "@/conversation-pipeline-turns";
+import { workflowRunTarget } from "@/workflow-execution-model";
 
 const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
@@ -83,44 +92,26 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
   }
 }
 
-function saveDraft(conversationId: string, text: string) {
+function queueDraftWrite<T>(conversationId: string, operation: () => Promise<T>) {
   const pending = draftWrites.get(conversationId);
-  const write = (pending?.catch(() => undefined) ?? Promise.resolve()).then(() =>
-    invoke<void>("save_conversation_draft", { conversationId, text }),
-  );
-  draftWrites.set(conversationId, write);
+  const write = (pending?.catch(() => undefined) ?? Promise.resolve()).then(operation);
+  const current = write.then(() => undefined);
+  draftWrites.set(conversationId, current);
   const release = () => {
-    if (draftWrites.get(conversationId) === write) draftWrites.delete(conversationId);
+    if (draftWrites.get(conversationId) === current) draftWrites.delete(conversationId);
   };
-  void write.then(release, release);
+  void current.then(release, release);
   return write;
+}
+
+function saveDraft(conversationId: string, text: string) {
+  return queueDraftWrite(conversationId, () => invoke<void>("save_conversation_draft", { conversationId, text }));
 }
 
 export function ConversationListPanel({ containerApi }: IDockviewPanelProps) {
   const checkoutId = useWorkspace((state) => state.checkout?.checkoutId);
   if (!checkoutId) return null;
   return <ConversationSidebar checkoutId={checkoutId} onOpen={(conversation) => openConversation(containerApi, conversation)} />;
-}
-
-export function useNewConversation(checkoutId: string, onOpen: (conversation: Conversation) => void) {
-  const queryClient = useQueryClient();
-  const key = ["conversations", checkoutId];
-  return useMutation({
-    mutationKey: ["new-conversation", checkoutId],
-    scope: { id: "new-conversation:" + checkoutId },
-    mutationFn: async () => {
-      const list = await queryClient.fetchQuery({
-        queryKey: key,
-        queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-      });
-      return invoke<Conversation>("create_conversation", { checkoutId, title: `Conversation ${list.length + 1}` });
-    },
-    onSuccess: (conversation) => {
-      void queryClient.invalidateQueries({ queryKey: key });
-      void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
-      onOpen(conversation);
-    },
-  });
 }
 
 export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }: {
@@ -145,14 +136,14 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
     onRenamed?.(updated);
     setRenaming(undefined);
   });
-  const error = start.error ?? conversations.error;
+  const error = conversations.error;
   const matching = conversations.data?.filter(({ title }) => title.toLowerCase().includes(filter.trim().toLowerCase()));
   return (
     <section ref={sidebar} className="conv-sessions" aria-label="Conversation list">
       <header className="conv-session-heading">
         <h2>Conversations</h2>
         <button className="conv-icon-button" type="button" title="New conversation" aria-label="New conversation"
-          onClick={() => start.mutate()} disabled={conversations.isPending || start.isPending}>
+          onClick={start.choose} disabled={conversations.isPending || start.isPending}>
           <Plus aria-hidden /><span className="sr-only">New conversation</span>
         </button>
       </header>
@@ -188,6 +179,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
         ))}
       </ul>
       {notice && <p role="status" className="conv-sidebar-note">{notice}</p>}
+      {start.dialog}
       {renaming && <Dialog.Root open onOpenChange={(open) => { if (!open && !rename.isPending) setRenaming(undefined); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="conv-dialog-scrim" />
@@ -220,15 +212,19 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
   );
 }
 
-type PanelParams = { conversationId: string; title: string };
+type PanelParams = { conversationId: string; title: string; pipeline?: ChatPipeline };
 const selectorClass = "conv-select";
 
 export function ConversationPanel({ params, api, containerApi }: IDockviewPanelProps<PanelParams>) {
   const library = useContext(ConversationLibraryNavigation);
   const selectedCheckout = useWorkspace((state) => state.checkout?.checkoutId);
+  const selectedProject = useWorkspace((state) => state.checkout?.projectId);
   const checkoutId = library?.checkoutId ?? selectedCheckout;
+  const projectId = library?.projectId ?? selectedProject;
   const savedTitle = useConversationTitle(checkoutId, params.conversationId);
   const title = savedTitle.data?.title ?? params.title;
+  const pipeline = savedTitle.data?.pipeline ?? params.pipeline ?? directConversationPipeline;
+  const pipelineKnown = !checkoutId || savedTitle.isSuccess || params.pipeline !== undefined;
   const subscribe = useCallback((update: () => void) => {
     const listener = api.onDidVisibilityChange(update);
     return () => listener.dispose();
@@ -243,7 +239,8 @@ export function ConversationPanel({ params, api, containerApi }: IDockviewPanelP
     api.updateParameters({ title });
   }, [api, params.title, title]);
   return <ConversationContent key={params.conversationId} conversationId={params.conversationId}
-    title={title} checkoutId={checkoutId} visible={visible}
+    title={title} checkoutId={checkoutId} projectId={projectId} pipeline={pipeline} pipelineKnown={pipelineKnown} visible={visible}
+    retryPipeline={savedTitle.error ? () => void savedTitle.refetch() : undefined}
     openFork={(conversation) => { if (containerApi) openConversation(containerApi, conversation); }} />;
 }
 
@@ -253,10 +250,12 @@ type ReviewedContinuation = {
   effort: string | null;
   mode: "read_only" | "plan";
   text: string;
+  pipelineRestriction?: string;
 };
 
-function ConversationContent({ conversationId, title, checkoutId, visible, openFork }: PanelParams & {
-  checkoutId?: string; visible: boolean; openFork: (conversation: Conversation) => void;
+function ConversationContent({ conversationId, title, checkoutId, projectId, pipeline = directConversationPipeline, pipelineKnown, retryPipeline, visible, openFork }: PanelParams & {
+  checkoutId?: string; projectId?: string; pipelineKnown: boolean; retryPipeline?: () => void;
+  visible: boolean; openFork: (conversation: Conversation) => void;
 }) {
   const queryClient = useQueryClient();
   const library = useContext(ConversationLibraryNavigation);
@@ -312,38 +311,55 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const activeEdit = useRef(0);
   const [draftError, setDraftError] = useState("");
   const [draftStatus, setDraftStatus] = useState("");
-  const [providerOverride, setProvider] = useState<Provider>();
   const [explicitSelection, setSelection] = useState<ModelSelection | null>(null);
-  const [effort, setEffort] = useState("");
+  const [chosenEffort, setEffort] = useState<string>();
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const [continuation, setContinuation] = useState<ReviewedContinuation>();
   const [continuationCheckoutId, setContinuationCheckoutId] = useState<string>();
+  const reviewCheckoutId = continuation?.review.targetCheckout?.checkoutId ?? checkoutId;
+  const continuationPipelines = useQuery({ queryKey: ["conversation-pipeline-options", reviewCheckoutId],
+    queryFn: () => invoke<ConversationPipelineOption[]>("conversation_pipeline_options", { checkoutId: reviewCheckoutId }),
+    enabled: Boolean(continuation && reviewCheckoutId),
+  });
   const [historyAction, setHistoryAction] = useState<ConversationMessageHistoryAction>();
   const dismissHistoryAction = useCallback(() => setHistoryAction(undefined), []);
   const text = draft.data ?? "";
+  const pipelineIsDirect = pipeline.kind === "direct";
+  const pipelineTurns = useConversationPipelineTurns(conversationId, visible && pipelineKnown && !pipelineIsDirect,
+    (submitted) => saveDraft(conversationId, submitted));
+  const rememberedModel = pipelineTurns.defaultModel;
+  const effort = chosenEffort ?? (explicitSelection ? "" : rememberedModel?.effort ?? "");
+  const [pipelineSetup, setPipelineSetup] = useState<"edit" | "send">();
+  const pipelineSetupOpener = useRef<HTMLElement | null>(null);
   const sideQuestion = sideQuestionCommand(text);
-  const isSideQuestion = sideQuestion !== undefined;
-  const sideCompletion = completesSideQuestion(text);
+  const isSideQuestion = pipelineIsDirect && sideQuestion !== undefined;
+  const sideCompletion = pipelineIsDirect && completesSideQuestion(text);
   const composer = useRef<HTMLTextAreaElement>(null);
   const composerForm = useRef<HTMLFormElement>(null);
-  const attachments = useConversationAttachments(conversationId, Boolean(library), visible, composerForm);
+  const attachments = useConversationAttachments(conversationId, pipelineIsDirect && Boolean(library), visible, composerForm);
   const hasAttachments = attachments.draft.files.length > 0;
   const [composerCursor, setComposerCursor] = useState(0);
+  const autocompleteId = useId();
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [manualActions, setManualActions] = useState(false);
+  const [dismissedCompletion, setDismissedCompletion] = useState<string>();
+  const [highlightedCompletion, setHighlightedCompletion] = useState<{ key: string; id: string }>();
   const hasSkills = hasComposerSkills(text);
   const [showSideQuestions, setShowSideQuestions] = useState(false);
-  const goalInput = goalCommand(text);
-  const composingGoal = !isSideQuestion && (mode === "goal" || goalInput !== undefined);
+  const goalInput = pipelineIsDirect ? goalCommand(text) : undefined;
+  const composingGoal = pipelineIsDirect && !isSideQuestion && (mode === "goal" || goalInput !== undefined);
   const { overview: goal, refresh: refreshGoal } = useConversationGoal(conversationId, visible);
   const [goalSettings, setGoalSettings] = useState<{ objective: string; submittedDraft?: string }>();
   const checkoutDefaults = useCheckoutModelDefaults(checkoutId, visible);
   const projectModel = mode === "plan" ? checkoutDefaults.data?.planning : checkoutDefaults.data?.conversation;
-  const provider = explicitSelection?.provider ?? providerOverride ?? projectModel?.provider ?? "codex";
-  const models = useQuery(liveModelsQuery(provider));
-  const modelOptions = models.data?.map(({ option }) => option) ?? [];
-  const profileId = modelOptions.find(({ selectable }) => selectable)?.selection.profileId;
-  const profileDefault = useExecutionProfileDefault(provider, profileId, visible && !explicitSelection);
-  const selection = explicitSelection ?? availableModelSelection(modelOptions, projectModel, profileDefault.data);
-  const selected = models.data?.find(({ option }) => sameModelSelection(option.selection, selection));
+  const chosenSelection = explicitSelection ?? rememberedModel?.selection;
+  const provider = chosenSelection?.provider ?? projectModel?.provider ?? "codex";
+  const models = useLiveModelOptions(undefined, visible);
+  const modelOptions = models.options;
+  const profileId = modelOptions.find(({ selectable, selection: model }) => selectable && model.provider === provider)?.selection.profileId;
+  const profileDefault = useExecutionProfileDefault(provider, profileId, visible && !chosenSelection);
+  const selection = chosenSelection ?? availableModelSelection(modelOptions, projectModel, profileDefault.data);
+  const selected = models.models.find(({ option }) => sameModelSelection(option.selection, selection));
   const antigravityModel = provider === "antigravity" ? selected?.option.selection.modelId : undefined;
   const modelEfforts = useQuery({
     ...liveModelsQuery(provider, antigravityModel),
@@ -402,7 +418,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   }
   const effectiveEffort = efforts?.efforts.includes(effort) ? effort : null;
   const movingCheckout = continuationCheckoutId && continuationCheckoutId !== checkoutId;
-  const compactionEnabled = Boolean(library && visible && selected?.option.selectable && mode !== "goal" && !movingCheckout);
+  const compactionEnabled = Boolean(pipelineIsDirect && library && visible && selected?.option.selectable && mode !== "goal" && !movingCheckout);
   const compaction = useConversationCompaction({ conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
     pendingText: text, enabled: compactionEnabled });
   const attachmentReview = useConversationAttachmentReview({
@@ -412,7 +428,40 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   });
   const customizationPicker = useComposerCustomizations({
     conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
-    draft: text, cursor: composerCursor, enabled: visible && !composingGoal && !isSideQuestion,
+    draft: text, cursor: composerFocused ? composerCursor : -1, enabled: pipelineIsDirect && visible && !composingGoal && !isSideQuestion,
+  });
+  const candidate = composerFocused && visible ? composerCompletion(text, composerCursor) : undefined;
+  const manual = customizationPicker.manual || manualActions;
+  const completionTrigger = manual ? "/" : candidate?.trigger;
+  const completionQuery = manual ? "" : candidate?.query ?? "";
+  const completionKey = `${activeEdit.current}:${completionTrigger}:${candidate?.start}:${composerCursor}`;
+  const completionActive = Boolean(visible && completionTrigger && (manual || (composerFocused && dismissedCompletion !== completionKey)));
+  const mentionActive = completionActive && completionTrigger === "@" && Boolean(library);
+  const slashActive = completionActive && completionTrigger === "/";
+  const mentionSources = useConversationLibrary(completionQuery, library?.projectId ?? "", mentionActive);
+  const pipelineCustomization = usePipelineComposerCustomizations({ conversationId,
+    agents: pipelineTurns.schema.data?.agents, selection, effort: effectiveEffort, text, query: completionQuery, active: slashActive,
+    enabled: visible && pipelineKnown && !pipelineIsDirect,
+  });
+  const mention = useMutation({
+    mutationFn: async ({ sourceConversationId, range, submitted }: { sourceConversationId: string; range: ComposerCompletion; submitted: string }) => {
+      const preview = await invoke<ConversationReferencePreview>("preview_conversation_reference", {
+        destinationConversationId: conversationId, sourceConversationId, selection: { kind: "automatic" },
+      });
+      const next = replaceComposerCompletion(submitted, range, `@${preview.sourceTitle.replace(/\s+/g, " ").trim()}`);
+      const saved = await queueDraftWrite(conversationId, () => invoke<ConversationReferencePreview[]>("edit_conversation_reference_draft", {
+        conversationId, previewId: preview.id, attach: true, draftChange: { expected: submitted, replacement: next.text },
+      }));
+      return { next, saved };
+    },
+    onSuccess: ({ next, saved }, { submitted }) => {
+      queryClient.setQueryData(referenceDraftKey, saved);
+      if (queryClient.getQueryData(draftKey) !== submitted) return;
+      activeEdit.current++;
+      queryClient.setQueryData(draftKey, next.text);
+      setDraftStatus("Draft saved");
+      restoreComposerCaret(next.cursor);
+    },
   });
   const steeringPreview = useQuery({
     queryKey: ["conversation", conversationId, "steering-route", run?.id, history.data?.contextId, selection, effectiveEffort, mode],
@@ -449,7 +498,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted,
         ...(referenceIds && { referenceIds }), ...(attachmentPreviewId && { attachmentPreviewId }),
         ...(continuationCheckoutId && { targetCheckoutId: continuationCheckoutId }) });
-      if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
+      if (review.status === "review_required") return { review, ...effective, text: submitted,
+        pipelineRestriction: attachmentPreviewId ? "Remove the draft files to switch to a pipeline."
+          : hasComposerSkills(submitted) ? "Remove the selected action to choose it again in the pipeline conversation." : undefined,
+      } satisfies ReviewedContinuation;
       return { instructionId: review.job.id };
     },
     onSuccess: async (outcome, { text: submitted, toRun }) => {
@@ -466,14 +518,16 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     },
   });
   const continueSend = useMutation({
-    mutationFn: ({ choice, intent }: { choice: Parameters<typeof confirmConversationContinuation>[0]["choice"]; intent: ReviewedContinuation }) =>
+    mutationFn: ({ choice, pipeline, intent }: { choice: Parameters<typeof confirmConversationContinuation>[0]["choice"];
+      pipeline?: ConversationPipelineChoice; intent: ReviewedContinuation }) =>
       confirmConversationContinuation({ conversationId, previewId: intent.review.previewId, choice,
-        selection: intent.selection, effort: intent.effort, mode: intent.mode, text: intent.text }),
+        selection: intent.selection, effort: intent.effort, mode: intent.mode, text: intent.text, ...(pipeline && { pipeline }) }),
     onSuccess: async ({ conversation }, { intent }) => {
       clearSubmittedDraft(intent.text);
       setContinuation(undefined);
       void instructions.refresh();
       void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
+      void queryClient.invalidateQueries({ queryKey: ["conversations", conversation.checkoutId] });
       if (library && intent.review.targetCheckout) {
         setContinuationCheckoutId(undefined);
         await library.open(intent.review.targetCheckout, conversation.id);
@@ -532,7 +586,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const suggestion = useConversationSuggestion({
     conversationId, contextId: history.data?.contextId, run, selection, effort: sideEffort, mode,
     draft: text, draftVersion: activeEdit.current, visible, liveFresh: latest.isFetchedAfterMount,
-    eligible: !busy && draft.isSuccess && !send.isPending && !continueSend.isPending && !startGoal.isPending
+    eligible: pipelineIsDirect && !busy && draft.isSuccess && !send.isPending && !continueSend.isPending && !startGoal.isPending
       && !hasReferences && !hasAttachments && !hasSkills && !isSideQuestion && !composingGoal && Boolean(selected?.option.selectable),
   });
   const recover = useMutation({
@@ -545,6 +599,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   });
 
   function editDraft(text: string) {
+    if (pipelineTurns.request.isPending) return;
     const edit = ++activeEdit.current;
     setDraftError("");
     setDraftStatus("Saving draft…");
@@ -562,31 +617,237 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   function pickCustomization(option: ComposerCustomization) {
     const next = customizationPicker.pick(option);
     editDraft(next.text);
-    setComposerCursor(next.cursor);
+    dismissCompletion();
+    restoreComposerCaret(next.cursor);
+  }
+
+  function restoreComposerCaret(cursor: number) {
+    const position = Math.max(0, cursor);
+    setComposerCursor(position);
     requestAnimationFrame(() => {
       composer.current?.focus();
-      composer.current?.setSelectionRange(next.cursor, next.cursor);
+      composer.current?.setSelectionRange(position, position);
     });
   }
 
+  function dismissCompletion() {
+    customizationPicker.dismiss();
+    setManualActions(false);
+    setDismissedCompletion(completionKey);
+  }
+
+  function openComposerActions() {
+    if (pipelineIsDirect) customizationPicker.open();
+    else setManualActions(true);
+    restoreComposerCaret(composerCursor < 0 ? text.length : composerCursor);
+  }
+
+  const range = candidate?.trigger === completionTrigger ? candidate : undefined;
+  const composerOptions: ComposerMenuOption[] = [];
+  if (mentionActive && range) {
+    for (const { conversation, checkout, projectName } of (mentionSources.data ?? []).slice(0, 24)) {
+      if (conversation.id === conversationId) continue;
+      const worktree = checkout.checkoutRoot.split(/[\\/]/).filter(Boolean).at(-1);
+      composerOptions.push({ id: conversation.id, kind: "conversation", title: conversation.title,
+        detail: checkout.checkoutRoot === checkout.repositoryRoot ? projectName : `${projectName} · ${worktree}`,
+        unavailable: composingGoal || isSideQuestion ? "Conversation references are available for standard turns."
+          : references.some((saved) => saved.sourceConversationId === conversation.id) ? "Already attached to this draft."
+          : !referenceDraft.isSuccess || editReferenceDraft.isPending || mention.isPending ? "Waiting for draft references…" : undefined,
+        select: () => {
+          dismissCompletion();
+          mention.mutate({ sourceConversationId: conversation.id, range, submitted: text });
+        },
+      });
+    }
+  }
+
+  function openPromptControl(selector: string, menu = false) {
+    const button = composerForm.current?.querySelector<HTMLButtonElement>(selector);
+    if (!button) return;
+    button.focus();
+    if (menu) button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    else button.click();
+  }
+
+  if (slashActive) {
+    const controls = [
+      { name: "model", detail: "Choose a conversation model", run: () => openPromptControl(".model-picker-trigger", true) },
+      { name: "plan", detail: "Switch to Plan Mode", run: () => { setMode("plan"); }, requiresDirect: true },
+      { name: "compact", detail: "Open context compaction", run: () => openPromptControl(".conv-compaction-trigger"), requiresDirect: true },
+      { name: "goal", detail: "Set a persistent objective", run: openGoalSettings, requiresDirect: true },
+      { name: "btw", detail: "Ask a separate read-only question", run: () => setShowSideQuestions(true), requiresDirect: true },
+    ];
+    if (!manual) for (const control of controls) {
+      if (!control.name.startsWith(completionQuery.toLowerCase())) continue;
+      const unavailable = control.requiresDirect && !pipelineIsDirect ? "Available in direct conversations."
+        : control.name === "compact" && !compactionEnabled ? "Choose a compatible model to compact this context." : undefined;
+      composerOptions.push({ id: control.name, kind: "command", title: `/${control.name}`, detail: control.detail, unavailable,
+        select: () => {
+          dismissCompletion();
+          if (range && control.name === "btw" && !text.slice(0, range.start).trim()) {
+            const next = replaceComposerCompletion(text, range, "/btw");
+            editDraft(next.text);
+            restoreComposerCaret(next.cursor);
+          } else {
+            const next = range && replaceComposerCompletion(text, range, "");
+            if (next) editDraft(next.text);
+            if (control.name === "plan" && next) restoreComposerCaret(next.cursor);
+            control.run();
+          }
+        },
+      });
+    }
+    if (pipelineIsDirect) {
+      for (const option of customizationPicker.options) {
+        composerOptions.push({ id: option.marker, kind: "customization", title: composerActionLabel(option),
+          detail: composerActionDetail(option), unavailable: option.unavailableReason ?? undefined, select: () => pickCustomization(option) });
+      }
+    } else {
+      for (const { agent, option } of pipelineCustomization.options) {
+        const marker = pipelineActionMarker(agent.nodeId, option.marker);
+        composerOptions.push({ id: marker, kind: "customization", title: composerActionLabel(option),
+          detail: `${agent.label} · ${composerActionDetail(option)}`,
+          unavailable: option.unavailableReason ?? (pipelineCustomization.pinned.length ? "Remove the selected action to choose another stage." : undefined),
+          select: () => {
+            const cursor = composerCursor < 0 ? text.length : composerCursor;
+            const next = replaceComposerCompletion(text, range ?? { start: cursor, end: cursor }, marker);
+            dismissCompletion();
+            editDraft(next.text);
+            restoreComposerCaret(next.cursor);
+          },
+        });
+      }
+    }
+  }
+  const eligibleCompletion = composerOptions.flatMap((option, index) => option.unavailable ? [] : [index]);
+  const selectedCompletion = highlightedCompletion?.key === completionKey
+    ? composerOptions.findIndex(({ id, unavailable }) => id === highlightedCompletion.id && !unavailable) : -1;
+  const activeCompletion = selectedCompletion >= 0 ? selectedCompletion : eligibleCompletion[0] ?? -1;
+  function highlightCompletion(index: number) {
+    const option = composerOptions[index];
+    if (option) setHighlightedCompletion({ key: completionKey, id: option.id });
+  }
+
+  const completionLoading = mentionActive ? mentionSources.isPending : slashActive
+    && (pipelineIsDirect ? customizationPicker.active && customizationPicker.loading : pipelineCustomization.loading);
+  const completionError = mentionActive ? mentionSources.error?.message : slashActive
+    ? pipelineIsDirect ? customizationPicker.error?.message : pipelineCustomization.error : undefined;
+  const completionStatus = completionLoading ? "Searching…" : !composerOptions.length && !completionError
+    ? mentionActive ? "No matching conversations in this project."
+      : pipelineIsDirect ? !selection ? "Choose a model to find its skills and commands." : "No actions match this profile."
+        : pipelineCustomization.status ?? "No actions match the agent stages in this revision." : undefined;
+  const showCompletion = Boolean(mentionActive || slashActive);
+
   const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
-  const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending);
-  const canSend = referencesReady && attachments.ready && !attachments.busy
+  const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending && !mention.isPending);
+  const canSendDirect = referencesReady && attachments.ready && !attachments.busy
     && (!hasAttachments || (!composingGoal && !isSideQuestion && Boolean(attachmentReview.review?.previewId)))
     && !customizationPicker.pinned.some(({ option }) => !option)
     && (composingGoal ? Boolean(!hasReferences && !hasSkills && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
     ? !hasReferences && !hasSkills && Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending)));
+  let sendBlocker: { text: string; action?: string; resolve?: () => void } | undefined;
+  if (!pipelineKnown) {
+    sendBlocker = retryPipeline ? { text: "Could not load the conversation pipeline.", action: "Retry", resolve: retryPipeline }
+      : { text: "Loading the conversation pipeline…" };
+  } else if (!pipelineIsDirect && text.trim() && !pipelineTurns.request.isPending) {
+    if (!referencesReady) sendBlocker = { text: referenceDraft.error ? "Could not load conversation references." : "Loading conversation references…" };
+    else if (pipelineTurns.schema.error || pipelineTurns.turns.error) {
+      sendBlocker = { text: "Could not load the conversation pipeline.", action: "Retry",
+        resolve: () => { void pipelineTurns.schema.refetch(); void pipelineTurns.turns.refetch(); } };
+    } else if (!pipelineTurns.schema.data || !pipelineTurns.turns.data) sendBlocker = { text: "Loading pipeline inputs…" };
+    else if (pipelineTurns.schema.data.requiresModel && !selected?.option.selectable) {
+      sendBlocker = { text: "Choose a default model for this pipeline.", action: "Choose model",
+        resolve: () => composerForm.current?.querySelector<HTMLButtonElement>(".model-picker-trigger")?.focus() };
+    } else if (pipelineCustomization.submission.blocker) {
+      sendBlocker = { text: pipelineCustomization.submission.blocker };
+    }
+  }
+  const canSend = pipelineKnown && (pipelineIsDirect ? canSendDirect
+    : Boolean(text.trim() && !sendBlocker && !pipelineTurns.request.isPending && draft.isSuccess));
+  if (pipelineKnown && pipelineIsDirect && text.trim() && !canSend && !send.isPending && !startGoal.isPending && !askSide.isPending) {
+    if (!referencesReady) {
+      sendBlocker = { text: referenceDraft.error ? "The conversation references could not be loaded." : "Preparing conversation references…",
+        ...(referenceDraft.error && { action: "Retry references", resolve: () => void referenceDraft.refetch() }) };
+    } else if ((composingGoal || isSideQuestion) && (hasReferences || hasAttachments || hasSkills)) {
+      const items = [hasAttachments && "attached files", hasReferences && "conversation references", hasSkills && "skills"].filter(Boolean);
+      sendBlocker = { text: `Remove the ${items.join(", ")} used in this draft to continue.` };
+    } else if (!selected?.option.selectable && !(composingGoal && goalInput === "")) {
+      if (modelOptions.some(({ selectable }) => selectable)) sendBlocker = { text: "Choose an available model.",
+        action: "Choose model", resolve: () => composerForm.current?.querySelector<HTMLButtonElement>(".model-picker-trigger")?.focus() };
+      else if (models.loading) sendBlocker = { text: "Loading available models…" };
+      else sendBlocker = { text: "No configured service has an available model.",
+        ...(inspector?.openProviders && { action: "Open Providers", resolve: inspector.openProviders }) };
+    } else if (!attachments.ready || attachments.busy) {
+      sendBlocker = { text: attachments.error ? "Open the attachment details to resolve the file error." : "Preparing attached files…" };
+    } else if (hasAttachments && !attachmentReview.review?.previewId) {
+      sendBlocker = { text: attachmentReview.pending ? "Reviewing attachment delivery…" : "Review attachment delivery before sending.",
+        ...(attachmentReview.eligible && !attachmentReview.pending && { action: "Review attachments", resolve: attachmentReview.refresh }) };
+    } else if (customizationPicker.pinned.some(({ option }) => !option)) {
+      sendBlocker = { text: "Remove the unavailable skill or choose an available revision." };
+    } else if (isSideQuestion && !sideQuestion) {
+      sendBlocker = { text: "Enter a question after /btw." };
+    } else if (!history.data?.contextId || latest.isPending || latestJob.isPending) {
+      sendBlocker = { text: history.error ? "The conversation context could not be loaded." : "Loading conversation context…",
+        ...(history.error && { action: "Retry context", resolve: () => void history.refetch() }) };
+    } else if (recover.isPending) {
+      sendBlocker = { text: "Recovering the previous attempt…" };
+    } else if (composingGoal) {
+      sendBlocker = { text: hasCurrentGoal(goal.data) ? "Finish or clear the current goal before starting another." :
+        busy ? "Wait for the active turn to finish before starting a goal." : "Checking whether Goal Mode can start…" };
+    }
+  }
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
-  const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
-  const steerRun = canSend && !hasReferences && !hasAttachments && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
+  const historyBusy = pipelineTurns.active || pipelineTurns.request.isPending || live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
+  const steerRun = pipelineIsDirect && canSend && !hasReferences && !hasAttachments && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
     && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
+
+  function sendPipeline(inputs = pipelineTurns.inputs) {
+    if (!canSend) return;
+    const submitted = text;
+    const action = pipelineCustomization.submission;
+    pipelineTurns.request.mutate({
+      text: action.text, inputs, ...(action.action && { action: action.action, submittedDraft: submitted }),
+      ...(selection && selected?.option.selectable && { selection }),
+      effort: effectiveEffort, ...(references.length > 0 && { referenceIds: references.map(({ id }) => id) }),
+    }, { onSuccess: () => {
+      if (queryClient.getQueryData(draftKey) === submitted) clearSubmittedDraft(submitted);
+      void queryClient.invalidateQueries({ queryKey: referenceDraftKey });
+      stickToEnd.current = true;
+      setShowJump(false);
+    } });
+  }
+
+  function openPipelineTurn(turn: PipelineTurn, artifact?: NonNullable<PipelineTurn["artifacts"]>[number]) {
+    if (!artifact && turn.waiting?.kind === "question" && turn.waiting.runId && inspector) {
+      inspector.openActivity(turn.waiting.runId, conversationId);
+    } else if (turn.runId) {
+      const focus = artifact ? { nodeId: artifact.nodeId, artifactId: artifact.id } : turn.waiting ?? undefined;
+      inspector?.openWorkspace?.("pipelines", workflowRunTarget(turn.runId, focus));
+    }
+  }
+
+  function openPipelineSetup(mode: "edit" | "send") {
+    pipelineSetupOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPipelineSetup(mode);
+    void pipelineTurns.schema.refetch();
+  }
+
+  const openPipelineRun = inspector?.openWorkspace ? openPipelineTurn : undefined;
+  const recordedTurns = new Map((pipelineTurns.turns.data ?? []).flatMap((turn) =>
+    turn.messageRevisionId ? [[turn.messageRevisionId, turn] as const] : []));
+  const detachedTurns = pipelineTurns.turns.data?.filter((turn) => !turn.messageRevisionId) ?? [];
 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!canSend) return;
+    if (!pipelineIsDirect) {
+      if (pipelineTurns.setupNeeded) openPipelineSetup("send");
+      else sendPipeline();
+      return;
+    }
     if (isSideQuestion) {
       setShowSideQuestions(true);
       askSide.mutate(text);
@@ -613,20 +874,37 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     composer.current?.focus();
   }
 
+  function openGoalSettings() {
+    startGoal.reset();
+    setGoalSettings({ objective: "" });
+  }
+
   return (
     <section className="conv-pane" aria-label={title}>
       <ConversationTitleBar title={title}
+        details={pipelineKnown && <ConversationPipelineLabel pipeline={pipeline} />}
         editor={renamingTitle && checkoutId ? <ConversationTitleEditor conversation={{ id: conversationId, checkoutId, title }}
           onClose={() => { setRenamingTitle(false); requestAnimationFrame(() => renameTrigger.current?.focus()); }} /> : undefined}
-        rename={checkoutId && <button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
-          title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}>
-        <ConversationContinuationSettings conversationId={conversationId} targetCheckoutId={continuationCheckoutId}
+        rename={checkoutId && <ControlTooltip label="Rename conversation"><button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
+          onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button></ControlTooltip>}>
+        {pipelineIsDirect && <><ConversationContinuationSettings conversationId={conversationId} targetCheckoutId={continuationCheckoutId}
           onCheckout={library ? setContinuationCheckoutId : undefined} />
-        <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>
+        <button type="button" className="conv-quiet-button conv-secondary-wide" onClick={openGoalSettings}>
           <Target size={14} aria-hidden /> Goal
         </button>
-        <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
+        <button type="button" className="conv-quiet-button conv-secondary-wide" aria-expanded={showSideQuestions}
           onClick={() => setShowSideQuestions(!showSideQuestions)}><MessageSquare aria-hidden /> Side questions</button>
+        <DropdownMenu.Root>
+          <ControlTooltip label="More actions"><DropdownMenu.Trigger className="conv-icon-button conv-heading-more" aria-label="More actions">
+            <MoreHorizontal size={16} aria-hidden="true" />
+          </DropdownMenu.Trigger></ControlTooltip>
+          <DropdownMenu.Portal><DropdownMenu.Content sideOffset={6} align="end" className="ui-action-menu">
+            <DropdownMenu.Item onSelect={openGoalSettings}><Target size={16} aria-hidden="true" /> Goal</DropdownMenu.Item>
+            <DropdownMenu.Item onSelect={() => setShowSideQuestions(!showSideQuestions)}>
+              <MessageSquare size={16} aria-hidden="true" /> {showSideQuestions ? "Hide side questions" : "Side questions"}
+            </DropdownMenu.Item>
+          </DropdownMenu.Content></DropdownMenu.Portal>
+        </DropdownMenu.Root></>}
         {run && <button ref={activityButton} type="button" className="conv-quiet-button"
           aria-expanded={inspector ? inspector.activeRunId === run.id : Boolean(showingActivity)}
           onClick={() => {
@@ -639,6 +917,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         <ConversationHistoryControls conversationId={conversationId} title={title} history={history.data}
           disabled={historyBusy} openFork={openFork} mode={mode} selection={selection ?? undefined}
           effort={sideEffort ?? undefined} requestedAction={historyAction} onRequestedActionClose={dismissHistoryAction} />
+        {visible && <ConversationInstructionHistory conversationId={conversationId} instructions={instructions}
+          messages={history.data?.messages ?? []} openRun={openRunEvidence} />}
         <ConversationSubagentControls conversationId={conversationId} runId={attempt?.runId} />
       </ConversationTitleBar>
       <div className="conv-layout">
@@ -653,16 +933,22 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         }}>
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
         {history.error && <p role="alert" className="conv-alert">{String(history.error)}</p>}
-        {history.data?.messages.length === 0 && !live && !queued && <ConversationEmptyState title="Start a conversation"
-          description="Choose a model and ask about this repository." />}
+        {history.data?.messages.length === 0 && !live && !queued && detachedTurns.length === 0 && <ConversationEmptyState title="Start a conversation"
+          description={pipelineIsDirect ? "Choose a model and ask about this repository." : "Each message runs the pipeline revision selected for this conversation."} />}
         <ol className="conv-messages">
           {history.data?.messages.map((message) => (
             <ConversationMessage key={message.revisionId} role={message.role}
               actions={<ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />}>
               {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
+              {recordedTurns.has(message.revisionId) && <ConversationPipelineTurnStatus turn={recordedTurns.get(message.revisionId)!}
+                attached onRun={openPipelineRun} onRestore={!text.trim() ? editDraft : undefined} />}
             </ConversationMessage>
           ))}
         </ol>
+        {detachedTurns.length > 0 && <section className="conversation-pipeline-turns" aria-label="Pipeline turns">
+          {detachedTurns.map((turn) => <ConversationPipelineTurnStatus key={turn.requestId} turn={turn} onRun={openPipelineRun}
+            onRestore={!text.trim() ? editDraft : undefined} />)}
+        </section>}
         {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="conv-alert">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
         {latest.error && <p role="alert" className="conv-alert">{String(latest.error)}</p>}
         {activity.error && <p role="alert" className="conv-alert">{String(activity.error)}</p>}
@@ -700,7 +986,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           request?.scrollIntoView({ block: "nearest" });
           (request?.querySelector<HTMLElement>("button, input, select") ?? request)?.focus({ preventScroll: true });
         }}>{job?.queuedQuestion ? "View answer" : "Waiting for input"} <ArrowUp aria-hidden /></button>}
-        <ConversationInstructions conversationId={conversationId} instructions={instructions} openRun={openRunEvidence} />
+        <ConversationInstructions conversationId={conversationId} instructions={instructions} />
         {queued && job && (job.job.downstreamWait || job.queuedQuestion || (job.job.queuedRecovery && !instructions.data.some(({ id }) => id === job.job.id))) && <div className="conv-queued">
           <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : job.queuedQuestion ? "Queued answer" : "Queued message"}</strong>
           <div>
@@ -712,12 +998,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form ref={composerForm} onSubmit={submit} className={`conv-composer ${attachments.hover ? "ring-2 ring-primary" : ""}`}>
-          <ConversationAttachments attachments={attachments} preview={attachmentReview} disabled={send.isPending || continueSend.isPending} />
-          <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
-            onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           <ConversationReferenceChips references={references}
-            disabled={editReferenceDraft.isPending || send.isPending || continueSend.isPending}
+            disabled={editReferenceDraft.isPending || mention.isPending || send.isPending || continueSend.isPending || pipelineTurns.request.isPending}
             onRemove={(previewId) => editReferenceDraft.mutate({ previewId, attach: false })} />
+          <PipelineComposerActionChips actions={pipelineCustomization.pinned} onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           {sideCompletion && <button type="button" className="conv-quiet-button" onClick={completeSideQuestion}>
             <code>/btw</code> Ask a side question
           </button>}
@@ -725,29 +1009,35 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea ref={composer} id={`draft-${conversationId}`} placeholder="Ask about this repository…"
             aria-autocomplete="list"
-            aria-controls={customizationPicker.options.length ? customizationPicker.listId : undefined}
-            aria-activedescendant={customizationPicker.options.length ? `${customizationPicker.listId}-${customizationPicker.highlighted}` : undefined}
+            aria-controls={showCompletion && composerOptions.length ? autocompleteId : undefined}
+            aria-activedescendant={showCompletion && activeCompletion >= 0 ? `${autocompleteId}-${activeCompletion}` : undefined}
+            aria-busy={mention.isPending || undefined}
+            readOnly={mention.isPending}
             value={text} onChange={(event) => {
               setComposerCursor(event.currentTarget.selectionStart);
               editDraft(event.currentTarget.value);
-            }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)}
-            disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending}
+            }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart === event.currentTarget.selectionEnd
+              ? event.currentTarget.selectionStart : -1)}
+            onFocus={(event) => { setComposerFocused(true); setComposerCursor(event.currentTarget.selectionStart); }}
+            onBlur={() => { setComposerFocused(false); if (manual) dismissCompletion(); }}
+            disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending || pipelineTurns.request.isPending}
             onKeyDown={(event) => {
-              if (customizationPicker.active && !event.nativeEvent.isComposing) {
-                const option = customizationPicker.options[customizationPicker.highlighted];
+              if (showCompletion && !event.nativeEvent.isComposing) {
+                const option = composerOptions[activeCompletion];
                 if (event.key === "Escape") {
                   event.preventDefault();
-                  customizationPicker.dismiss();
+                  dismissCompletion();
                   return;
                 }
                 if (option && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
                   event.preventDefault();
-                  customizationPicker.move(event.key === "ArrowDown" ? 1 : -1);
+                  const next = eligibleCompletion.indexOf(activeCompletion) + (event.key === "ArrowDown" ? 1 : -1);
+                  highlightCompletion(eligibleCompletion[(next + eligibleCompletion.length) % eligibleCompletion.length]!);
                   return;
                 }
-                if (option && !event.shiftKey && !event.ctrlKey && !event.metaKey && (event.key === "Enter" || event.key === "Tab")) {
+                if (option && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && (event.key === "Enter" || event.key === "Tab")) {
                   event.preventDefault();
-                  pickCustomization(option);
+                  option.select();
                   return;
                 }
               }
@@ -766,30 +1056,34 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                 event.currentTarget.form?.requestSubmit();
               }
             }} />
+          {showCompletion && <ComposerCompletionMenu field={composer} cursor={composerCursor < 0 ? text.length : composerCursor}
+            id={autocompleteId} active={activeCompletion} options={composerOptions} label={mentionActive ? "Conversation mentions" : "Composer actions"}
+            status={completionStatus} error={completionError} onHighlight={highlightCompletion} onDismiss={dismissCompletion} />}
+          <div className="conv-composer-tools">
+            <ConversationAttachments attachments={attachments} preview={attachmentReview} disabled={send.isPending || continueSend.isPending} />
+            {pipelineIsDirect ? <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
+              showOptions={false} onOpen={openComposerActions} onRemove={(token) => editDraft(customizationPicker.remove(token))} />
+              : <button type="button" className="conv-quiet-button conv-composer-tool" disabled={pipelineTurns.request.isPending} onClick={openComposerActions}>
+                <Blocks size={15} aria-hidden /> Stage actions
+              </button>}
+            {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open}
+              onAttach={referencesReady && !send.isPending && !continueSend.isPending && !pipelineTurns.request.isPending
+                ? ({ id }) => editReferenceDraft.mutate({ previewId: id, attach: true }) : undefined} />}
+          </div>
           <ConversationComposerToolbar actions={<>
             {live && <StopConversation {...activity} />}
             {steerRun && <Button type="button" variant="outline" onClick={() => { steer.reset(); send.mutate({ text, toRun: steerRun }); }}>
               Send to active turn
             </Button>}
-            <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
-              {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
+            <ControlTooltip label="Submit this draft" shortcut="Ctrl+Enter" side="top"><button type="submit" className="conv-primary-button conv-send"
+              aria-keyshortcuts="Control+Enter" aria-describedby={sendBlocker ? `send-feedback-${conversationId}` : undefined} disabled={!canSend}>
+              {!pipelineIsDirect ? pipelineTurns.request.isPending ? "Queueing…" : pipelineTurns.setupNeeded ? "Choose inputs" : "Run pipeline"
+                : isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
                 : startGoal.isPending ? "Starting goal…" : goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal"
                   : send.isPending ? "Queueing…" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
-            </button>
+            </button></ControlTooltip>
           </>}>
-              {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open}
-                onAttach={referencesReady && !send.isPending && !continueSend.isPending
-                  ? ({ id }) => editReferenceDraft.mutate({ previewId: id, attach: true }) : undefined} />}
-              <select aria-label="Provider" className={selectorClass} value={provider} onChange={(event) => {
-                setProvider(event.target.value as Provider);
-                setSelection(null);
-                setEffort("");
-              }}>
-                <option value="codex">Codex</option>
-                <option value="claude">Claude Code</option>
-                <option value="antigravity">Antigravity</option>
-              </select>
-              <ModelPicker label="Model" layout="inline" options={modelOptions} loading={models.isPending}
+              <ModelPicker label={pipelineIsDirect ? "Model" : "Default model"} layout="inline" combinedCatalog options={modelOptions} loading={models.loading}
                 previewDetails={(option) => <ModelCapabilityPreview option={option}
                   scope={run ? { projectId: run.projectId, conversationId, runId: run.id, live } : undefined}
                   openEvidence={run ? () => {
@@ -797,17 +1091,23 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                     else setInspectedRun(run.id);
                   } : undefined} />}
                 selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
-              <ConversationModeSelect mode={mode} onChange={setMode} />
+              {pipelineIsDirect ? <ConversationModeSelect mode={mode} onChange={setMode} />
+                : <Button type="button" variant="ghost" disabled={pipelineTurns.request.isPending || !pipelineTurns.schema.data}
+                  onClick={() => openPipelineSetup("edit")}>Pipeline inputs</Button>}
               {compactionEnabled && <ConversationCompactionControl compaction={compaction} contextId={history.data?.contextId}
                 disabled={busy || send.isPending || continueSend.isPending} />}
-              <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
-                className={selectorClass} value={effort} onChange={setEffort} />
+              <span className="conv-option"><Gauge size={15} aria-hidden /><EffortSelect capabilities={efforts}
+                loading={Boolean(antigravityModel && modelEfforts.isPending)} className={selectorClass} value={effort} onChange={setEffort} /></span>
           </ConversationComposerToolbar>
+          {sendBlocker && <div className="conv-send-feedback">
+            <p id={`send-feedback-${conversationId}`} role="status">{sendBlocker.text}</p>
+            {sendBlocker.resolve && <button type="button" className="conv-quiet-button" onClick={sendBlocker.resolve}>{sendBlocker.action}</button>}
+          </div>}
           {goal.error && composingGoal && <p role="alert" className="conv-alert">{String(goal.error)}</p>}
           {startGoal.error && !goalSettings && <p role="alert" className="conv-alert">{String(startGoal.error)}</p>}
-          {models.error && <div className="flex flex-wrap items-center gap-2">
-            <p role="alert" className="conv-alert">{String(models.error)}</p>
-            <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>
+          {models.errors.length > 0 && <div className="conv-send-feedback">
+            <p role="status" title={models.errors.map(String).join("\n")}>Some services could not report their models.</p>
+            <Button type="button" variant="outline" onClick={() => void models.retryFailed()}>Retry model lookup</Button>
           </div>}
           {antigravityModel && modelEfforts.error && <div className="flex flex-wrap items-center gap-2">
             <p role="alert" className="conv-alert">Could not load effort levels for this model.</p>
@@ -815,19 +1115,14 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>}
           {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
           {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}
-          {(referenceDraft.error || editReferenceDraft.error) && <p role="alert" className="conv-alert">
-            {String(referenceDraft.error || editReferenceDraft.error)}
-          </p>}
-          {hasReferences && (isSideQuestion || composingGoal) && <p className="conv-alert">
-            Remove the conversation references to send a side question or start a goal.
-          </p>}
-          {hasAttachments && (isSideQuestion || composingGoal) && <p className="conv-alert">
-            Remove the attached files to send a side question or start a goal.
-          </p>}
-          {hasSkills && (isSideQuestion || composingGoal) && <p className="conv-alert">
-            Remove the selected skills to send a side question or start a goal.
+          {(referenceDraft.error || editReferenceDraft.error || mention.error) && <p role="alert" className="conv-alert">
+            {String(referenceDraft.error || editReferenceDraft.error || mention.error)}
           </p>}
           {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
+          {pipelineTurns.request.error && <div className="conv-send-feedback">
+            <p role="alert">{String(pipelineTurns.request.error)}</p>
+            <Button type="button" variant="outline" onClick={() => openPipelineSetup("edit")}>Review inputs</Button>
+          </div>}
           {askSide.error && <p role="alert" className="conv-alert">{String(askSide.error)}</p>}
           {steer.data === false && <p role="status" className="text-xs text-muted-foreground">Instruction queued for the next turn.</p>}
           {steer.isError && <p role="alert" className="conv-alert">{String(steer.error)}</p>}
@@ -842,14 +1137,25 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           : undefined}
         onClose={() => { validateSide.reset(); setShowSideQuestions(false); }} />}
       </div>
-      {visible && goalSettings && <GoalSettingsDialog objective={goalSettings.objective} options={models.data?.map(({ option }) => option) ?? []}
+      {visible && goalSettings && <GoalSettingsDialog objective={goalSettings.objective} options={modelOptions} loadingModels={models.loading}
         selected={selection} onSelect={(model) => { setSelection(model); setEffort(""); }} value={goal.data} refresh={refreshGoal} openRun={openRunEvidence}
         pending={startGoal.isPending} error={startGoal.error ? String(startGoal.error) : undefined} canStart={canStartGoal}
         onStart={(definition) => startGoal.mutate({ definition, submittedDraft: goalSettings.submittedDraft })}
         onClose={() => { setGoalSettings(undefined); startGoal.reset(); }} />}
       {visible && continuation && <ConversationContinuationDialog key={continuation.review.previewId} review={continuation.review}
-        pending={continueSend.isPending} error={continueSend.error} onConfirm={(choice) => continueSend.mutate({ choice, intent: continuation })}
+        pipelines={reviewCheckoutId ? continuationPipelines : undefined} pipelineRestriction={continuation.pipelineRestriction}
+        pending={continueSend.isPending} error={continueSend.error} onConfirm={(choice, pipeline) => continueSend.mutate({ choice, pipeline, intent: continuation })}
         onClose={() => { setContinuation(undefined); continueSend.reset(); }} />}
+      {visible && !pipelineIsDirect && pipelineSetup && pipelineTurns.schema.data && checkoutId && projectId &&
+        <ConversationPipelineInputsDialog schema={pipelineTurns.schema.data} previous={pipelineTurns.inputs}
+          checkoutId={checkoutId} projectId={projectId} pending={pipelineTurns.request.isPending} sendAfterSave={pipelineSetup === "send"}
+          opener={pipelineSetupOpener.current}
+          onSave={(inputs) => {
+            pipelineTurns.setConfigured(inputs);
+            setPipelineSetup(undefined);
+            if (pipelineSetup === "send") sendPipeline(inputs);
+          }}
+          onClose={() => setPipelineSetup(undefined)} />}
     </section>
   );
 }

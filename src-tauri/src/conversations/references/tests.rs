@@ -1,12 +1,160 @@
 use std::{fs, path::Path};
 
 use crate::{
-    conversations::{MessageRole, activate_context, insert_message, write_context},
-    dispatch::ByteRange,
+    conversations::{
+        ConversationMentionDraftChange, MessageRole, activate_context, insert_message,
+        write_context,
+    },
+    dispatch::{ByteRange, HistoryDeletionMode, HistoryDeletionTarget},
     repository::{self, ProjectCheckout},
+    store::DraftKey,
 };
 
 use super::*;
+
+#[tokio::test]
+async fn automatic_reference_pins_a_budgeted_unicode_suffix_and_updates_the_draft_atomically()
+-> Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let database = scratch.path().join("mention.sqlite");
+    let store = Store::open(database.clone())?;
+    let checkout = init(&store, &scratch.path().join("checkout")).await?;
+    let source = store
+        .create_conversation(checkout.checkout_id.clone(), "Release".into())
+        .await?;
+    let destination = store
+        .create_conversation(checkout.checkout_id, "Destination".into())
+        .await?;
+    let message = format!("{}complete 🦀", "é\n".repeat(MAX_DRAFT_REFERENCE_BYTES));
+    let (context, latest) = store
+        .execute({
+            let source = source.id.clone();
+            let message = message.clone();
+            move |db| {
+                let older = insert_message(
+                    db,
+                    &source,
+                    MessageRole::User,
+                    protection::protect(b"older")?,
+                )?;
+                let latest = insert_message(
+                    db,
+                    &source,
+                    MessageRole::Assistant,
+                    protection::protect(message.as_bytes())?,
+                )?;
+                Ok((
+                    activate_context(db, &source, &[older, latest.clone()])?,
+                    latest,
+                ))
+            }
+        })
+        .await?;
+    let preview = store
+        .preview_conversation_reference(
+            destination.id.clone(),
+            source.id.clone(),
+            ConversationReferenceSelection::Automatic,
+        )
+        .await?;
+    assert!(serde_json::to_vec(&preview.artifact)?.len() <= MAX_DRAFT_REFERENCE_BYTES);
+    match &preview.artifact {
+        ConversationArtifactRevision::Excerpt {
+            source_context_id,
+            excerpts,
+            ..
+        } => {
+            assert_eq!(source_context_id, &context);
+            let [excerpt] = excerpts.as_slice() else {
+                panic!("expected one clipped excerpt")
+            };
+            assert_eq!(excerpt.source.origin.revision_id, latest);
+            let ByteRange { start, end } = excerpt.source.byte_range;
+            assert!(start > 0 && message.is_char_boundary(start));
+            assert_eq!(end, message.len());
+            assert_eq!(excerpt.text, message[start..]);
+        }
+        _ => panic!("expected an excerpt"),
+    }
+    let original = "Read @Rel before approving";
+    let replacement = "Read @Release before approving";
+    let destination_id = destination.id;
+    let draft = || DraftKey::Conversation(destination_id.clone());
+    store
+        .save_draft(draft(), original.as_bytes().to_vec())
+        .await?;
+    let attach = |expected: &str| ConversationMentionDraftChange {
+        expected: expected.into(),
+        replacement: replacement.into(),
+    };
+    assert!(
+        store
+            .edit_conversation_reference_and_draft(
+                destination_id.clone(),
+                preview.id.clone(),
+                true,
+                Some(attach("stale"))
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .conversation_reference_draft(destination_id.clone())
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        store.load_draft(draft()).await?.as_deref(),
+        Some(original.as_bytes())
+    );
+    store
+        .edit_conversation_reference_and_draft(
+            destination_id.clone(),
+            preview.id.clone(),
+            true,
+            Some(attach(original)),
+        )
+        .await?;
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    assert_eq!(
+        reopened.load_draft(draft()).await?.as_deref(),
+        Some(replacement.as_bytes())
+    );
+    assert_eq!(
+        reopened
+            .conversation_reference_draft(destination_id.clone())
+            .await?,
+        [preview.clone()]
+    );
+    let target = HistoryDeletionTarget::Message {
+        conversation_id: source.id,
+        message_revision_id: latest,
+    };
+    let mode = HistoryDeletionMode::WithDerivedCopies;
+    let deletion = reopened
+        .preview_conversation_history_deletion(target.clone(), mode)
+        .await?;
+    assert!(deletion.reference_ids.contains(&preview.id));
+    reopened
+        .confirm_conversation_history_deletion(target, mode, deletion.revision)
+        .await?;
+    assert!(
+        reopened
+            .conversation_reference_draft(destination_id.clone())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .edit_conversation_reference_draft(destination_id, preview.id, true)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn scopes_reference_preview_to_project_and_destination_and_replays_exact_bytes_after_restart()

@@ -264,11 +264,7 @@ pub(super) fn find_work(
     let pinned_item = launch
         .as_ref()
         .and_then(|receipt| receipt.checklist_item.as_ref());
-    let pinned_task = launch.as_ref().and_then(|receipt| match &receipt.origin {
-        super::WorkflowLaunchOrigin::Agile { work_id, .. }
-        | super::WorkflowLaunchOrigin::Rule { work_id, .. } => Some(work_id.as_str()),
-        super::WorkflowLaunchOrigin::Editor { .. } => None,
-    });
+    let pinned_task = launch.as_ref().and_then(|receipt| receipt.origin.work_id());
     let query = config
         .query
         .as_deref()

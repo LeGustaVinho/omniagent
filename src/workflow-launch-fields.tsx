@@ -5,10 +5,11 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import type { Hierarchy } from "@/project-agile-model";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
+import type { WorkflowStartField } from "@/workflow-graph-model";
 import { StructuredListField, StructuredObjectField } from "@/workflow-structured-fields";
 
-type ValueType = "text" | "number" | "boolean" | "null" | "object" | "array";
-export type WorkflowStartField = { name: string; valueType: ValueType; required: boolean };
+export type { WorkflowStartField } from "@/workflow-graph-model";
+type ValueType = WorkflowStartField["valueType"];
 
 export type WorkflowStartSchema = {
   fields: WorkflowStartField[];

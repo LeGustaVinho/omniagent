@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { ConversationPanel } from "@/conversation-panels";
 import type { InstructionDeliveryEvidence } from "@/conversation-instructions";
+import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { PendingInstruction } from "@/bindings/PendingInstruction";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
@@ -28,23 +29,25 @@ const models = {
   claude: { provider: "claude", profileId: "queue-profile", modelId: "queue-model" },
 } as const;
 
-function mount() {
+function mount({ recorded = [], messages = [] }: { recorded?: InstructionDeliveryEvidence[]; messages?: MessageRevision[] } = {}) {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   const openActivity = vi.fn();
   let draft = initial;
   let instruction: PendingInstruction | undefined;
-  let deliveries: InstructionDeliveryEvidence[] = [];
+  let deliveries = recorded;
   vi.mocked(invoke).mockImplementation(async (command, raw) => {
-    const params = raw as { provider?: keyof typeof models; selection?: typeof models[keyof typeof models]; text?: string };
+    const params = raw as { provider?: keyof typeof models; selection?: typeof models[keyof typeof models]; text?: string;
+      instructionId?: string; revisionId?: string; runId?: string; confirmedUndelivered?: boolean };
     switch (command) {
       case "conversation_draft": return draft;
       case "save_conversation_draft": draft = params.text ?? ""; return;
       case "latest_conversation_run": return { id: runId, status: "running", projectId: "project", checkoutId: "checkout" };
       case "latest_conversation_job":
       case "conversation_goal_overview": return null;
-      case "conversation_history": return { contextId, messages: [] };
+      case "conversation_history": return { contextId, messages };
       case "conversation_models": {
         const provider = params.provider ?? "codex";
+        if (!models[provider]) return [];
         return [{ option: { name: provider === "codex" ? "Qualified model" : "Queue model", selection: models[provider], selectable: true }, efforts: [] }];
       }
       case "composer_suggestion_mode": return "off";
@@ -74,6 +77,11 @@ function mount() {
         instruction = { ...instruction, text: params.text, revisionId: "revised-instruction" };
         return instruction;
       case "remove_pending_instruction": instruction = undefined; return;
+      case "resolve_uncertain_steering":
+        deliveries = deliveries.map((delivery) => delivery.instructionId === params.instructionId
+          && delivery.revisionId === params.revisionId && delivery.runId === params.runId
+          ? { ...delivery, state: params.confirmedUndelivered ? "undelivered" : "discarded", canResolve: false } : delivery);
+        return;
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
@@ -87,7 +95,6 @@ function mount() {
   </RunInspectorNavigation.Provider></QueryClientProvider>);
   const user = userEvent.setup();
   async function choose(provider: keyof typeof models) {
-    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), provider);
     await user.click(await screen.findByRole("button", { name: "Model · Choose model" }));
     await user.click(await screen.findByRole("menuitemradio", { name: provider === "codex" ? "Qualified model" : "Queue model" }));
   }
@@ -105,10 +112,39 @@ it("offers an active route beside the queue and links acknowledgement to the rec
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("steer_queued_conversation_instruction", {
     conversationId, runId, instructionId: "queued-instruction",
   }));
-  await user.click(await screen.findByText("Instruction delivery history"));
-  expect(screen.getByText("Delivered · Active turn")).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Open receiving turn" }));
-  expect(openActivity).toHaveBeenCalledWith(runId, conversationId);
+  expect(screen.queryByRole("list", { name: "Recorded instruction deliveries" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Instruction delivery history" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Instruction delivery history" }));
+  expect(await dialog.findByText("Delivered")).toBeTruthy();
+  expect(dialog.getByText("Active turn")).toBeTruthy();
+  await user.click(dialog.getByRole("button", { name: "Open receiving turn" }));
+  await waitFor(() => expect(openActivity).toHaveBeenCalledWith(runId, conversationId));
+  expect(screen.queryByRole("dialog", { name: "Instruction delivery history" })).toBeNull();
+});
+
+it("identifies exact revisions and resolves an uncertain delivery from the history dialog", async () => {
+  const unresolved = { instructionId: "uncertain", revisionId: "saved-revision", runId: "attempt-a", route: "steering",
+    state: "unconfirmed", canResolve: true } as const;
+  const { user } = mount({
+    recorded: [unresolved, { instructionId: "delivered", revisionId: "unloaded-revision", runId: "attempt-b", route: "standalone",
+      state: "accepted", canResolve: false }],
+    messages: [{ messageId: "message", revisionId: unresolved.revisionId, role: "user", text: "Check the queued instruction" }],
+  });
+  const entry = screen.getByRole("button", { name: "Instruction delivery history" });
+  await waitFor(() => expect(entry.getAttribute("aria-description")).toBe("1 awaiting review"));
+  await user.click(entry);
+  const dialog = within(await screen.findByRole("dialog", { name: "Instruction delivery history" }));
+  expect(await dialog.findByText("Check the queued instruction")).toBeTruthy();
+  expect(dialog.getByText("Separate run")).toBeTruthy();
+  expect(dialog.getByTitle("unloaded-revision").textContent).toBe("Instruction unloaded");
+  await user.click(dialog.getByRole("button", { name: "Confirm undelivered and queue" }));
+  expect(invoke).toHaveBeenCalledWith("resolve_uncertain_steering", {
+    conversationId, instructionId: unresolved.instructionId, revisionId: unresolved.revisionId,
+    runId: unresolved.runId, confirmedUndelivered: true,
+  });
+  expect(await dialog.findByText("Confirmed undelivered")).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Instruction delivery history" })));
 });
 
 it("keeps an incompatible selection queued and edits or removes its exact unclaimed revision", async () => {

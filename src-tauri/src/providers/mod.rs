@@ -658,6 +658,9 @@ pub trait CliSession: Send {
     fn query_skill_inventory(&mut self) -> anyhow::Result<Option<WireMessage>> {
         Ok(None)
     }
+    fn available_composer_commands(&self) -> Option<&[composer_customizations::ComposerCommand]> {
+        None
+    }
     fn send_with_composer_skills(
         &mut self,
         input: TurnInput,

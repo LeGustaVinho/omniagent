@@ -283,6 +283,7 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection> {
     }
     db.execute_batch("DROP TABLE temp.fts_check")?;
     migrate(&mut db, MIGRATIONS.len())?;
+    crate::conversations::initialize_pipeline_schema(&mut db)?;
     Ok(db)
 }
 

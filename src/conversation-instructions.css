@@ -1,0 +1,78 @@
+.instruction-history-trigger svg { flex: none; }
+.instruction-history-count {
+  min-width: 1.1rem;
+  padding-inline: .24rem;
+  border: 1px solid currentColor;
+  border-radius: 1rem;
+  color: var(--warning);
+  font-size: .65rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.instruction-history-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
+.instruction-history-body { display: grid; gap: .7rem; }
+.instruction-history-error { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.instruction-history-error p { flex: 1 1 15rem; min-width: 0; overflow-wrap: anywhere; }
+.instruction-history-empty {
+  display: grid;
+  justify-items: center;
+  gap: .4rem;
+  padding: 1.75rem .8rem;
+  border: 1px dashed var(--border);
+  border-radius: .65rem;
+  text-align: center;
+}
+.instruction-history-empty svg { color: var(--primary); }
+.instruction-history-empty p { color: var(--muted-foreground); }
+.instruction-delivery-list { display: grid; gap: .55rem; }
+.instruction-delivery-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: .55rem .75rem;
+  padding: .65rem .75rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: var(--background);
+}
+.instruction-delivery-details { flex: 1 1 15rem; min-width: 0; display: grid; gap: .35rem; }
+.instruction-delivery-prompt {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-weight: 550;
+}
+.instruction-delivery-reference { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.instruction-delivery-reference code { color: var(--foreground); }
+.instruction-delivery-facts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .3rem .55rem;
+  color: var(--muted-foreground);
+  font-size: .73rem;
+}
+.instruction-delivery-facts span { display: inline-flex; align-items: center; gap: .28rem; }
+.instruction-delivery-facts svg { flex: none; }
+.instruction-delivery-status {
+  padding: .2rem .45rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--card);
+  font-weight: 600;
+}
+.instruction-delivery-status[data-tone="success"] { color: var(--success); }
+.instruction-delivery-status[data-tone="warning"] { color: var(--warning); }
+.instruction-delivery-link { margin-inline-start: auto; }
+.instruction-delivery-review {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: .45rem;
+  padding-top: .65rem;
+  border-top: 1px solid var(--border);
+}
+.instruction-delivery-row > .conv-alert { flex: 1 1 100%; }

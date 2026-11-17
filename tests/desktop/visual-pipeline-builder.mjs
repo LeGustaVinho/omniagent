@@ -24,6 +24,10 @@ const wires = [control, documentWire, conditionControl, conditionValue];
 const wireLabel = ({ from, to }) => `${from.node}.${from.port} to ${to.node}.${to.port}`;
 const viewports = [[1440, 900], [1120, 760], [640, 440]];
 
+function makeWire(node, port, target, input) {
+  return { from: { node, port }, to: { node: target, port: input } };
+}
+
 async function click(element) {
   await element.waitForDisplayed({ timeout });
   await element.waitForEnabled({ timeout });
@@ -154,13 +158,14 @@ async function setWindow(browser, invoke, width, height) {
 }
 
 async function fitGraph(browser, surface) {
-  await browser.$(surface).scrollIntoView({ block: "end" });
+  await browser.execute((selector) => document.querySelector(selector)?.scrollIntoView({ block: "center", inline: "nearest" }), surface);
   await click(browser.$(`${surface} .react-flow__controls-fitview`));
   let cards;
   try {
     await browser.waitUntil(async () => {
       cards = await browser.execute((selector, ids) => {
         const graph = document.querySelector(selector);
+        const graphRect = graph.getBoundingClientRect();
         return ids.map((id) => {
           const header = graph.querySelector(`.react-flow__node[data-id="${id}"] header`);
           if (!header) return { id, visible: false };
@@ -168,7 +173,8 @@ async function fitGraph(browser, surface) {
           const x = Math.round(rect.left + rect.width / 2);
           const y = Math.round(rect.top + rect.height / 2);
           const hit = document.elementFromPoint(x, y);
-          return { id, visible: header.contains(hit), x, y, topElement: hit?.className?.toString() };
+          return { id, visible: header.contains(hit), x, y, graphTop: graphRect.top, graphHeight: graphRect.height,
+            topElement: hit?.className?.toString() };
         });
       }, surface, [start, load, condition]);
       return cards.every(({ visible }) => visible);
@@ -191,7 +197,7 @@ async function verifyResponsiveView(browser, invoke, capture, emulateDisplay, { 
         await pressEnter(browser, compactToggle);
       }
       await select(panel, nodeLabel, load);
-      await textIsVisible(browser, panel.$("h2"), "Load context");
+      await textIsVisible(browser, panel.$(".pipeline-inspector-scroll > header:first-child h2"), "Load context");
       if (width === 640) await capture?.(browser, `${name}-${theme}-${width}x${height}-inspector`);
 
       const geometry = await browser.execute((graphSelector, inspectorSelector) => {
@@ -218,7 +224,7 @@ async function verifyResponsiveView(browser, invoke, capture, emulateDisplay, { 
         `Canvas or inspector became unusably small in ${summary}: ${JSON.stringify(geometry)}`);
       if (theme === "high-contrast") assert.equal(geometry.selectedOutline, "solid", `Selected node outline in ${summary}`);
       if (width === 640) {
-        await pressEnter(browser, compactToggle);
+        await browser.keys("Escape");
         await panel.waitForDisplayed({ timeout, reverse: true });
       }
       await fitGraph(browser, graph);
@@ -336,15 +342,51 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const library = browser.$('[aria-label="Workflow library"]');
   await library.$("h4=Find work").waitForDisplayed({ timeout });
   await library.$("summary=Import or export workflow packages").waitForDisplayed({ timeout });
+  const nodeLink = library.$('button[data-pipeline-node="build_text"]');
+  await click(nodeLink);
+  const documentation = browser.$('[role="dialog"][data-pipeline-node-details="build_text"]');
+  await documentation.$("h3=How it works").waitForDisplayed({ timeout });
+  await documentation.$("h3=Parameters").waitForDisplayed({ timeout });
+  await documentation.$('section[aria-label="Inputs"]').waitForDisplayed({ timeout });
+  await documentation.$('section[aria-label="Outputs"]').waitForDisplayed({ timeout });
+  await textIsVisible(browser, documentation, "Format a release note");
+  await capture?.(browser, "real-pipeline-node-details");
+  await setWindow(browser, invoke, 640, 440);
+  assert.equal(await browser.execute(() => {
+    const panel = document.querySelector('[data-pipeline-node-details="build_text"]');
+    const rect = panel.getBoundingClientRect();
+    const body = panel.querySelector(".pipeline-node-dialog-body");
+    return rect.top >= 0 && rect.bottom <= innerHeight && body.scrollHeight > body.clientHeight;
+  }), true);
+  await capture?.(browser, "real-pipeline-node-details-640x440");
+  await browser.keys("Escape");
+  await documentation.waitForDisplayed({ timeout, reverse: true });
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.dataset.pipelineNode === "build_text"), { timeout });
+  await setWindow(browser, invoke, 1120, 760);
   await click(views.$("button=Maintenance"));
   const maintenance = browser.$('[aria-label="Workflow maintenance"]');
-  await maintenance.$("h3=Settings and template proposals").waitForDisplayed({ timeout });
-  await maintenance.$("summary=Maintenance workflow").waitForDisplayed({ timeout });
+  await maintenance.$("h3=Proposed changes").waitForDisplayed({ timeout });
+  await maintenance.$("summary=Configure maintenance workflow").waitForDisplayed({ timeout });
+  await maintenance.$("h3=CLI plugins").waitForDisplayed({ timeout });
+  assert.equal(await maintenance.$("details.pipeline-maintenance-rules").getAttribute("open"), null);
+  await capture?.(browser, "real-pipeline-maintenance");
   await click(views.$("button=Compare models"));
   const comparison = browser.$('[aria-label="Model comparisons"]');
   await comparison.$("h3=Request and context").waitForDisplayed({ timeout });
   await comparison.$("h3=Candidates").waitForDisplayed({ timeout });
   await click(views.$("button=Builder"));
+  const landing = browser.$('[aria-label="Pipeline builder"]');
+  await landing.$("h2=Build a pipeline").waitForDisplayed({ timeout });
+  await capture?.(browser, "real-pipeline-builder-home");
+  await click(landing.$("button=Create or edit with AI"));
+  const authoring = browser.$('[role="dialog"]');
+  await authoring.$("h2=Create or edit with AI").waitForDisplayed({ timeout });
+  await select(authoring, "Output", "pipeline");
+  await authoring.$("option=Choose a conversation").waitForExist({ timeout });
+  assert.equal(await authoring.$("button=Start authoring request").isEnabled(), false);
+  await capture?.(browser, "real-pipeline-builder-ai");
+  await browser.keys("Escape");
+  await authoring.waitForDisplayed({ timeout, reverse: true });
   await click(browser.$("button=New pipeline"));
   const dialog = browser.$('[role="dialog"]');
   const name = dialog.$(".//input[@aria-label='Pipeline name'] | .//label[normalize-space(.)='Pipeline name']/input");
@@ -360,10 +402,11 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const draftScope = { projectId, draftId: draft.id };
   async function addNode(title) {
     await click(editor.$("button=Add node"));
-    const search = editor.$(".//input[@aria-label='Search node catalog' or @placeholder='Search node catalog'] | .//label[normalize-space(.)='Search node catalog']/input");
+    const catalog = browser.$(".pipeline-palette:not([hidden])");
+    const search = catalog.$(".//input[@aria-label='Search node catalog' or @placeholder='Search node catalog'] | .//label[normalize-space(.)='Search node catalog']/input");
     await search.waitForDisplayed({ timeout });
     await search.setValue(title);
-    await click(editor.$(`button[aria-label="Add ${title}"]`));
+    await click(catalog.$(`button[aria-label="Add ${title}"]`));
   }
   await addNode("Load context");
   await browser.$(`${canvas} ${loadNode}`).waitForDisplayed({ timeout });
@@ -535,5 +578,124 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const based = await invoke(browser, "inspect_workflow_package", { projectId, draftId: revisionDraft.id });
   assert.deepEqual(based.package.members[0].base, { ...version, kind: "pipeline", destination: "project" });
   closePosition(based.layouts.pipeline[load], saved.layouts.pipeline[load]);
+
+  await click(browser.$('button[aria-label="Conversations"]'));
+  await click(browser.$('button[aria-label="New conversation"]'));
+  const picker = browser.$('.conversation-pipeline-dialog[role="dialog"]');
+  await click(picker.$(`.//label[.//strong[normalize-space(.)='${title}']]`));
+  await click(picker.$("button=Create conversation"));
+  let conversation;
+  await browser.waitUntil(async () => {
+    conversation = (await invoke(browser, "list_conversations", { checkoutId }))
+      .find(({ pipeline }) => pipeline?.kind === "published" && pipeline.workflow.id === id);
+    return Boolean(conversation);
+  }, { timeout, timeoutMsg: "The selected published conversation was not persisted" });
+  assert.deepEqual(conversation.pipeline.workflow, version);
+  const chat = browser.$(`section[aria-label=${JSON.stringify(conversation.title)}]`);
+  const composer = chat.$('textarea[id^="draft-"]');
+  const turns = () => invoke(browser, "conversation_pipeline_turns", { conversationId: conversation.id });
+  await replaceText(browser, composer, "Read this saved revision once.");
+  await click(chat.$("button=Choose inputs"));
+  const chatInputs = browser.$('.conversation-pipeline-dialog[role="dialog"]');
+  await select(chatInputs, "Saved Markdown revision", sourceRevision.id);
+  await click(chatInputs.$("button=Send with these inputs"));
+  await browser.waitUntil(async () => (await turns()).length === 1 && Boolean((await turns())[0].runId), { timeout });
+  await replaceText(browser, composer, "Use the same revision again.");
+  await click(chat.$("button=Run pipeline"));
+  await browser.waitUntil(async () => (await turns()).length === 2 && (await turns()).every(({ runId }) => Boolean(runId)), { timeout });
+  const attempts = await turns();
+  assert.deepEqual(attempts.map(({ inputs }) => inputs.documentRevisionId), [sourceRevision.id, sourceRevision.id]);
+  assert.notEqual(attempts[0].runId, attempts[1].runId);
+  for (const { runId } of attempts) {
+    const attempt = await invoke(browser, "inspect_workflow_execution", { projectId, runId });
+    assert.deepEqual(attempt.run.version, version);
+  }
+  await capture?.(browser, "real-conversation-pipeline-turns");
+
+  const configured = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+  assert.ok(configured);
+  await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+  try {
+    const model = (await invoke(browser, "conversation_models", { provider: "codex" }))
+      .find(({ option }) => option.selectable && option.selection.modelId === "desktop-fixture");
+    assert.ok(model);
+    const title = "Continue into a pipeline";
+    const direct = await invoke(browser, "create_conversation", { checkoutId, title });
+    const directScope = { conversationId: direct.id };
+    const previous = "Complete desktop slot probe";
+    await invoke(browser, "save_conversation_draft", { ...directScope, text: previous });
+    await invoke(browser, "start_conversation_turn", { ...directScope, selection: model.option.selection, mode: "read_only", text: previous });
+    await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", directScope))?.status === "succeeded", { timeout });
+    await browser.refresh();
+    await click(browser.$('button[aria-label="Conversations"]'));
+    await click(browser.$(`section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(title)}]`));
+    const panel = browser.$(`section[aria-label=${JSON.stringify(title)}]`);
+    await click(panel.$(".model-picker-trigger"));
+    await click(browser.$(`.model-picker-menu [role="menuitemradio"][aria-label=${JSON.stringify(model.option.name)}]`));
+    const mode = panel.$('select[aria-label="Conversation mode"]');
+    await mode.selectByAttribute("value", "plan");
+    const draft = "Keep this as the first pipeline draft";
+    await replaceText(browser, panel.$('textarea[id^="draft-"]'), draft);
+    await click(panel.$("button=Send"));
+    const continuationDialog = browser.$('.conv-dialog[role="dialog"]');
+    await textIsVisible(browser, continuationDialog, "Choose how to continue");
+    await click(continuationDialog.$('.//label[contains(normalize-space(.), "Start a fresh conversation")]'));
+    assert.equal(await continuationDialog.$("button=Continue and send").isEnabled(), false);
+    await click(continuationDialog.$(`.//label[.//code[@title='${version.revision}']]`));
+    await capture?.(browser, "real-continuation-pipeline-picker");
+    await click(continuationDialog.$("button=Open draft"));
+    const fresh = browser.$('section[aria-label="New conversation"] textarea[id^="draft-"]');
+    await browser.waitUntil(async () => await fresh.isDisplayed() && (await fresh.getValue()) === draft, { timeout });
+    const target = (await invoke(browser, "list_conversations", { checkoutId })).find((item) => item.title === "New conversation");
+    assert.deepEqual(target?.pipeline.workflow, version);
+    assert.equal(await invoke(browser, "conversation_draft", directScope), "");
+    assert.deepEqual(await invoke(browser, "conversation_pipeline_turns", { conversationId: target.id }), []);
+
+    const agentTitle = "Pinned agent chat";
+    const agentDraft = await invoke(browser, "create_workflow_package", {
+      projectId, package: { name: agentTitle, members: [{ key: "pipeline", name: agentTitle, body: {
+        kind: "pipeline", graph: { name: agentTitle, nodes: [
+          { id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+          { id: "prompt", kind: "build_text", configuration: { kind: "build_text", template: "Run the revised queued instruction" } },
+          { id: "reader", kind: "agent", configuration: { kind: "agent_role", role: "Reader", model: model.option.selection } },
+        ], wires: [
+          makeWire("start", "start", "prompt", "ready"),
+          makeWire("prompt", "completed", "reader", "ready"),
+          makeWire("prompt", "text", "reader", "prompt"),
+        ] },
+      } }] },
+    });
+    const publishedAgent = await invoke(browser, "publish_reviewed_workflow_package", {
+      projectId, draftId: agentDraft.id, reviewedRevision: agentDraft.revision,
+    });
+    const pin = publishedAgent.publication.members[0].artifact.version;
+    const agentChat = await invoke(browser, "create_conversation", {
+      checkoutId, title: agentTitle, pipeline: { kind: "published", workflow: { id: pin.id, revision: pin.revision } },
+    });
+    await click(browser.$(`section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(agentTitle)}]`));
+    const agentPanel = browser.$(`section[aria-label=${JSON.stringify(agentTitle)}]`);
+    const agentMessage = "Use this exact additional conversation context.";
+    await replaceText(browser, agentPanel.$('textarea[id^="draft-"]'), agentMessage);
+    await click(agentPanel.$("button=Run pipeline"));
+    let agentTurn;
+    await browser.waitUntil(async () => {
+      [agentTurn] = await invoke(browser, "conversation_pipeline_turns", { conversationId: agentChat.id });
+      return agentTurn?.state === "succeeded";
+    }, { timeout, timeoutMsg: "The pinned workflow Agent did not complete the conversation turn" });
+    await textIsVisible(browser, agentPanel, "The revised instruction ran.");
+    const agentRun = await invoke(browser, "inspect_workflow_execution", { projectId, runId: agentTurn.runId });
+    assert.deepEqual(agentRun.run.version, { id: pin.id, revision: pin.revision });
+    const attempt = agentRun.jobs.find(({ nodeId }) => nodeId === "reader").attempts[0];
+    const input = await invoke(browser, "conversation_input", { conversationId: attempt.conversationId, runId: attempt.runId });
+    assert.ok(input.frames.some((frame) => frame.includes(agentMessage)));
+    const response = agentTurn.artifacts.find(({ kind }) => kind === "agent_response");
+    assert.equal(response.nodeId, "reader");
+    await click(agentPanel.$(`.//button[contains(normalize-space(.),'${response.port} · agent response')]`));
+    const agentEvidence = browser.$('[aria-label="Execution node evidence"]');
+    await textIsVisible(browser, agentEvidence, "Read recorded agent response");
+    await capture?.(browser, "real-pipeline-agent-chat-evidence");
+  } finally {
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: configured.executable });
+  }
   return browser;
 }

@@ -23,6 +23,7 @@ use crate::{
     runner::Runner,
     store::Store,
     workflows::comparison::stage::PendingWorkflowComparison,
+    workflows::conversation_turns::prepare_next_conversation_stage,
 };
 
 use super::{
@@ -71,7 +72,7 @@ impl LaunchGate {
         (!self.is_closed()).then_some(guard)
     }
 
-    async fn enter_admission(&self) -> Option<MutexGuard<'_, ()>> {
+    pub(crate) async fn enter_admission(&self) -> Option<MutexGuard<'_, ()>> {
         let guard = self.enter().await?;
         (!self.maintenance.draining.load(Ordering::Acquire)).then_some(guard)
     }
@@ -410,11 +411,14 @@ async fn drive(
     let mut stopping = admission.stopping.clone();
     let mut workers = JoinSet::new();
     let mut comparison_worker = JoinSet::new();
+    let mut conversation_worker = JoinSet::new();
+    let mut next_conversation_scan = tokio::time::Instant::now();
     loop {
         stopping.borrow_and_update();
         let stop = admission.is_closed();
         if stop {
-            if workers.is_empty() && comparison_worker.is_empty() {
+            if workers.is_empty() && comparison_worker.is_empty() && conversation_worker.is_empty()
+            {
                 break;
             }
         } else {
@@ -438,8 +442,35 @@ async fn drive(
             }
             if let Some(_boundary) = admission.enter_admission().await {
                 let mut agile_progress = false;
+                match store.advance_conversation_pipeline_turns().await {
+                    Ok(progressed) => agile_progress |= progressed,
+                    Err(error) => report(&error),
+                }
+                if conversation_worker.is_empty()
+                    && tokio::time::Instant::now() >= next_conversation_scan
+                {
+                    next_conversation_scan =
+                        tokio::time::Instant::now() + Duration::from_millis(500);
+                    let store = store.clone();
+                    let identity = runner.identity().to_owned();
+                    let gate = admission.clone();
+                    gate.maintenance
+                        .external_work
+                        .fetch_add(1, Ordering::AcqRel);
+                    let external = ExternalWork(gate.maintenance.clone());
+                    conversation_worker.spawn(async move {
+                        let _external = external;
+                        if !gate.is_closed() {
+                            if let Err(error) =
+                                prepare_next_conversation_stage(store, identity, gate).await
+                            {
+                                report(&error);
+                            }
+                        }
+                    });
+                }
                 match store.settle_ready_agile_stages().await {
-                    Ok(count) => agile_progress = count > 0,
+                    Ok(count) => agile_progress |= count > 0,
                     Err(error) => report(&error),
                 }
                 if comparison_worker.is_empty()
@@ -552,6 +583,9 @@ async fn drive(
                 if let Some(Err(error)) = result {
                     report(&error.into());
                 }
+            }
+            result = conversation_worker.join_next(), if !conversation_worker.is_empty() => {
+                if let Some(Err(error)) = result { report(&error.into()); }
             }
             // Recheck local executable and runner readiness after external changes.
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},

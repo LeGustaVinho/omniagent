@@ -3,8 +3,8 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { LIVE_MODEL_PROVIDERS, sameModelSelection, useLiveModelOptions } from "@/live-models";
-import { defaultConfiguration, MAX_ITERATION_ITEMS, portType, START_VALUE_TYPES,
-  type SetFieldOperation, type WorkflowDefinition, type WorkflowNodeConfiguration, type WorkflowPort,
+import { CONVERSATION_START_INPUT_TYPES, defaultConfiguration, MAX_ITERATION_ITEMS, portType, START_VALUE_TYPES,
+  type ConversationStartSource, type SetFieldOperation, type WorkflowDefinition, type WorkflowNodeConfiguration, type WorkflowPort,
   type WorkflowPredicate, type WorkflowScalar, type WorkflowStartField } from "@/workflow-graph-model";
 import { StructuredListField, StructuredValueField, structuredObject } from "@/workflow-structured-fields";
 
@@ -29,13 +29,25 @@ export function StartInputFields({ configuration, disabled, onChange }: Fields) 
   return <fieldset className="pipeline-stack" disabled={disabled}>
     <legend>Launch inputs</legend>
     {fields.map((field, index) => {
-      const edit = (patch: Partial<WorkflowStartField>) => update(fields.map((entry, position) => position === index ? { ...entry, ...patch } : entry));
+      const replace = (next: WorkflowStartField) => update(fields.map((entry, position) => position === index ? next : entry));
+      const edit = (patch: Partial<WorkflowStartField>) => replace({ ...field, ...patch });
       return <div className="workflow-inspector-item" key={index}>
         <label>Input {index + 1} name<input value={field.name} onChange={(event) => edit({ name: event.currentTarget.value })} /></label>
-        <label>Input {index + 1} type<select value={field.valueType}
+        <label>Input {index + 1} source<select value={field.conversationSource ?? ""} onChange={(event) => {
+          const source = event.currentTarget.value as ConversationStartSource | "";
+          if (source) edit({ conversationSource: source, valueType: CONVERSATION_START_INPUT_TYPES[source] });
+          else replace({ name: field.name, valueType: field.valueType, required: field.required });
+        }}>
+          <option value="">At launch</option>
+          <option value="message">Conversation message</option>
+          <option value="history">Conversation history</option>
+        </select></label>
+        <label>Input {index + 1} type<select value={field.valueType} disabled={Boolean(field.conversationSource)}
           onChange={(event) => edit({ valueType: event.currentTarget.value as WorkflowStartField["valueType"] })}>
           {START_VALUE_TYPES.map((type) => <option value={type} key={type}>{type[0]!.toUpperCase()}{type.slice(1)}</option>)}
         </select></label>
+        {field.conversationSource && <small className="pipeline-meta">{field.conversationSource === "message"
+          ? "Uses the message that starts this run." : "Uses earlier messages in order, with each message’s role and text."} Manual runs supply this input at launch.</small>}
         <label className="workflow-check"><input type="checkbox" checked={field.required}
           onChange={(event) => edit({ required: event.currentTarget.checked })} />Required at launch</label>
         <Button type="button" variant="ghost" aria-label={`Remove input ${index + 1}`}

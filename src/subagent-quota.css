@@ -1,0 +1,199 @@
+.conv-dialog.subagent-quota-dialog {
+  width: min(32rem, calc(100vw - 1.5rem));
+}
+
+.subagent-quota-dialog .conv-dialog-header {
+  align-items: center;
+}
+
+.subagent-quota-modal-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.subagent-quota-body {
+  gap: .85rem;
+}
+
+.subagent-quota-totals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .5rem;
+}
+
+.subagent-quota-totals > div {
+  display: grid;
+  gap: .13rem;
+  padding: .65rem .8rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: var(--background);
+}
+
+.subagent-quota-totals > div:first-child {
+  background: color-mix(in srgb, var(--primary) 10%, var(--background));
+}
+
+.subagent-quota-totals dt {
+  font-size: .75rem;
+  font-weight: 570;
+}
+
+.subagent-quota-totals dd {
+  font-size: 1.45rem;
+  font-weight: 640;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-quota-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: .65rem;
+}
+
+.subagent-quota-body label {
+  min-width: 0;
+  font-weight: 550;
+}
+
+.conv-dialog-form.subagent-quota-body :is(input[type="number"], select) {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.15rem;
+  padding-inline: .55rem;
+  font-weight: 400;
+}
+
+.subagent-quota-body label > span {
+  font-size: .75rem;
+  font-weight: 400;
+}
+
+.subagent-quota-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: .4rem;
+  padding: .45rem .55rem;
+  border: 1px solid var(--border);
+  border-radius: .45rem;
+  background: var(--muted);
+  font-size: .75rem;
+}
+
+.subagent-quota-notice svg {
+  flex: none;
+  color: var(--primary);
+}
+
+.subagent-quota-disclosures {
+  display: grid;
+  gap: .35rem;
+}
+
+.subagent-quota-disclosure {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: .55rem;
+}
+
+.subagent-quota-disclosure > summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: .5rem;
+  min-height: 2.2rem;
+  padding: .36rem .6rem;
+  border-radius: inherit;
+  font-weight: 550;
+  cursor: pointer;
+  list-style: none;
+}
+
+.subagent-quota-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.subagent-quota-disclosure > summary:has(small) {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.subagent-quota-disclosure > summary:hover {
+  background: var(--muted);
+}
+
+.subagent-quota-disclosure > summary svg:first-child {
+  color: var(--primary);
+}
+
+.subagent-quota-chevron {
+  color: var(--muted-foreground);
+}
+
+.subagent-quota-disclosure[open] .subagent-quota-chevron {
+  transform: rotate(180deg);
+}
+
+.subagent-quota-disclosure > summary small {
+  font-size: .67rem;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+
+.subagent-quota-detail {
+  display: grid;
+  gap: .65rem;
+  padding: .65rem;
+  border-top: 1px solid var(--border);
+  font-size: .75rem;
+}
+
+.subagent-quota-detail h3 {
+  margin-bottom: .15rem;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.subagent-quota-detail section p {
+  color: var(--muted-foreground);
+}
+
+.subagent-quota-facts {
+  display: grid;
+  gap: .2rem;
+}
+
+.subagent-quota-facts > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: .1rem .55rem;
+}
+
+.subagent-quota-facts dd {
+  color: var(--muted-foreground);
+}
+
+.subagent-quota-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: .5rem;
+  margin-top: .65rem;
+}
+
+.subagent-quota-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  margin-inline-end: auto;
+  color: var(--success);
+  font-size: .75rem;
+}
+
+@media (forced-colors: active) {
+  .subagent-quota-disclosure > summary:hover {
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+  }
+}

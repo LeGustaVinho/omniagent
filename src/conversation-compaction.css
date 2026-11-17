@@ -1,0 +1,144 @@
+.conv-compaction-trigger {
+  flex: none;
+  gap: 5px;
+  padding-inline: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.conv-compaction-trigger[data-state="open"] {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.conv-compaction-popover {
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100vw - 24px), var(--radix-popover-content-available-width, 360px));
+  max-height: min(420px, var(--radix-popover-content-available-height, calc(100dvh - 24px)));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--elevated, var(--card));
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
+}
+
+.conv-compaction-popover:focus { outline: none; }
+
+.conv-compaction-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  flex: none;
+  gap: 9px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.conv-compaction-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--muted);
+  color: var(--primary);
+}
+
+.conv-compaction-header h2 { font-weight: 650; }
+.conv-compaction-header p,
+.conv-compaction-muted {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.conv-compaction-body {
+  display: grid;
+  gap: 9px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+}
+
+.conv-compaction-auto,
+.conv-compaction-threshold {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.conv-compaction-auto { font-weight: 550; }
+.conv-compaction-auto input { width: 16px; height: 16px; flex: none; cursor: pointer; }
+
+.conv-compaction-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--muted);
+}
+
+.conv-compaction-metrics dt { color: var(--muted-foreground); font-size: 11px; }
+.conv-compaction-metrics dd { font-weight: 650; font-variant-numeric: tabular-nums; }
+.conv-compaction-alert { display: flex; align-items: start; gap: 5px; color: var(--danger); overflow-wrap: anywhere; }
+.conv-compaction-alert svg { flex: none; margin-top: 1px; }
+
+.conv-compaction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.conv-compaction-actions button,
+.conv-compaction-evidence button {
+  flex: 1 1 135px;
+  min-width: 0;
+  padding-inline: 8px;
+  font-size: 12px;
+}
+
+.conv-compaction-actions button svg, .conv-compaction-evidence button svg { flex: none; }
+
+.conv-compaction-details {
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.conv-compaction-details summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.conv-compaction-details summary::-webkit-details-marker { display: none; }
+.conv-compaction-details summary:hover { color: var(--foreground); }
+.conv-compaction-details summary svg:last-child { margin-inline-start: auto; }
+.conv-compaction-details[open] summary svg:last-child { rotate: 180deg; }
+
+.conv-compaction-evidence {
+  display: grid;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.conv-compaction-threshold input {
+  width: 64px;
+  min-height: 32px;
+  padding-inline: 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+}

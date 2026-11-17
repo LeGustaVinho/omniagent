@@ -120,7 +120,7 @@ export async function runInstalledProtectedInspector({ application, checkout, re
       await draft.setValue(prompt);
       await browser.keys("End");
       await click(panel, "button=Skills & plugin exports");
-      await click(panel, `.//*[@role="option"][.//strong[normalize-space(.)="${skillName}"]]`);
+      await click(browser.$('[aria-label="Composer actions"]'), `.//*[@role="option"][.//strong[normalize-space(.)="${skillName}"]]`);
       await panel.$(`[aria-label="Selected skills and plugin exports"] code[title="${digest(skillText)}"]`).waitForDisplayed();
       await click(panel, "button=Send");
       let finished;

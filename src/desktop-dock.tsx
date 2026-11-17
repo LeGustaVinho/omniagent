@@ -12,7 +12,8 @@ import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation, useConversationLibraryRead } from "@/conversation-library";
 import { ConversationEmptyState, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
-import { ConversationListPanel, ConversationPanel, useNewConversation } from "@/conversation-panels";
+import { ConversationListPanel, ConversationPanel } from "@/conversation-panels";
+import { useNewConversation } from "@/conversation-pipeline-picker";
 import { DesktopDiagnostics, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
 import { CustomizationsPanel } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
@@ -183,6 +184,7 @@ export function RealConversations({
   const start = useNewConversation(checkout.checkoutId, open);
 
   async function openLibraryConversation(source: ProjectCheckout, conversationId: string) {
+    if (source.projectId !== checkout.projectId) throw new Error("This conversation belongs to another project.");
     if (!dock.api) return;
     if (source.checkoutId !== checkout.checkoutId) {
       if (!onOpenOtherCheckout) throw new Error("Switch to the source worktree to open this conversation.");
@@ -201,7 +203,7 @@ export function RealConversations({
 
   const contents = dock.ready
     ? <ConversationLibrary checkout={checkout} onOpen={openLibraryConversation} activeId={dock.activeId}
-      onStart={() => start.mutate()} startPending={start.isPending} startError={start.error} />
+      onStart={start.choose} startPending={start.isPending} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (
     <ConversationLibraryNavigation.Provider value={{
@@ -212,14 +214,14 @@ export function RealConversations({
       </ConversationNavigation>}>
         <Dock dock={dock} error={targetError}>
           <ConversationEmptyState title="Start a conversation" description="Ask an agent about this checkout or open an existing conversation.">
-            <Button onClick={() => start.mutate()} disabled={start.isPending} aria-label="Start a new conversation">
+            <Button onClick={start.choose} disabled={start.isPending} aria-label="Start a new conversation">
               {start.isPending ? "Creating…" : "New conversation"}
             </Button>
             {!sidebar && <Button variant="outline" onClick={() => onSidebarChange(true)}>Show conversations</Button>}
           </ConversationEmptyState>
-          {start.error && <p className="conv-alert" role="alert">{String(start.error)}</p>}
         </Dock>
       </ConversationWorkspaceLayout>
+      {start.dialog}
     </ConversationLibraryNavigation.Provider>
   );
 }

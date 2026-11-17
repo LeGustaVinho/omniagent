@@ -1,7 +1,8 @@
 use omniagent::{
     conversations::{
         ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
-        ContinuedConversation,
+        ContinuedConversation, Conversation, ConversationMentionDraftChange,
+        ConversationPipelineChoice,
         references::{
             ConversationReferenceSelection, ConversationReferenceSnapshot,
             ConversationReferenceSource,
@@ -14,6 +15,13 @@ use omniagent::{
     store::Store,
 };
 use tauri::State;
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub enum ContinuationResult {
+    Queued(ContinuedConversation),
+    Draft { conversation: Conversation },
+}
 
 fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
@@ -149,9 +157,10 @@ pub async fn edit_conversation_reference_draft(
     conversation_id: String,
     preview_id: String,
     attach: bool,
+    draft_change: Option<ConversationMentionDraftChange>,
 ) -> Result<Vec<ConversationReferenceSnapshot>, String> {
     store
-        .edit_conversation_reference_draft(conversation_id, preview_id, attach)
+        .edit_conversation_reference_and_draft(conversation_id, preview_id, attach, draft_change)
         .await
         .map_err(ui_error)
 }
@@ -166,7 +175,8 @@ pub async fn confirm_conversation_continuation(
     effort: Option<String>,
     mode: SessionMode,
     text: String,
-) -> Result<ContinuedConversation, String> {
+    pipeline: Option<ConversationPipelineChoice>,
+) -> Result<ContinuationResult, String> {
     async {
         let checkout_id = store
             .conversation_continuation_review_checkout(conversation_id.clone(), preview_id.clone())
@@ -179,9 +189,28 @@ pub async fn confirm_conversation_continuation(
             mode,
         )
         .await?;
+        if let Some(pipeline) = pipeline {
+            anyhow::ensure!(
+                choice == ContinuationChoice::Fresh,
+                "Only a fresh conversation can choose a different pipeline"
+            );
+            if pipeline != ConversationPipelineChoice::Direct {
+                let conversation = store
+                    .continue_conversation_into_pipeline(
+                        conversation_id,
+                        preview_id,
+                        scope,
+                        text,
+                        pipeline,
+                    )
+                    .await?;
+                return Ok(ContinuationResult::Draft { conversation });
+            }
+        }
         store
             .confirm_conversation_continuation(conversation_id, preview_id, choice, scope, text)
             .await
+            .map(ContinuationResult::Queued)
     }
     .await
     .map_err(ui_error)

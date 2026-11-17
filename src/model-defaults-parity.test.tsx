@@ -115,8 +115,6 @@ it("uses identical rating meters in live conversation, project settings and Agil
   await chooseAndMeasure(user, /^Assignment model · /, claude, "$0.90");
   expect(invoke).toHaveBeenCalledWith("set_project_task_assignment", { projectId: checkout.projectId, taskId: "task", role: "implementer", selection: claude.selection });
   expect(await screen.findByRole("button", { name: `Model · ${codex.name}` })).toBeTruthy();
-  await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "claude");
-  expect(await screen.findByRole("button", { name: `Model · ${claude.name}` })).toBeTruthy();
   await chooseAndMeasure(user, /^Model · /, claude, "$0.90");
   expect(await screen.findByRole("button", { name: `Model · ${claude.name}` })).toBeTruthy();
 });
@@ -139,7 +137,6 @@ it("keeps the explicit conversation selection when the project model arrives lat
   const defaults = { conversation: claude.selection, planning: null, implementation: null };
   await act(async () => { resolveDefaults(defaults); });
   await waitFor(() => expect(client.getQueryData([...CHECKOUT_MODEL_DEFAULTS, checkout.checkoutId])).toEqual(defaults));
-  expect((screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement).value).toBe("codex");
   expect(screen.getByRole("button", { name: `Model · ${codex.name}` })).toBeTruthy();
 });
 

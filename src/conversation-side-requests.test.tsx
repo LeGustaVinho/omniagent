@@ -52,8 +52,6 @@ it("keeps the selected profile and the saved draft when a side question has no q
   });
   renderConversation(conversationId);
   const user = userEvent.setup();
-  const provider = screen.getByRole<HTMLSelectElement>("combobox", { name: "Provider" });
-  await user.selectOptions(provider, selection.provider);
   await user.click(await screen.findByRole("button", { name: "Model · Choose model" }));
   await user.click(await screen.findByRole("menuitemradio", { name: "Selected side model" }));
   await user.click(screen.getByRole("button", { name: "Ask side question" }));
@@ -66,7 +64,6 @@ it("keeps the selected profile and the saved draft when a side question has no q
   });
   expect(invoke).not.toHaveBeenCalledWith("submit_conversation_continuation", expect.anything());
   expect(invoke).not.toHaveBeenCalledWith("save_conversation_draft", expect.anything());
-  expect(provider.value).toBe(selection.provider);
   expect(screen.getByRole("button", { name: "Model · Selected side model" })).toBeTruthy();
   expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(submitted);
 });

@@ -156,8 +156,8 @@ export function ConversationAttachments({ attachments, disabled, preview }: {
 }) {
   if (!attachments.enabled) return null;
   const unavailable = disabled || attachments.busy;
-  return <div className="grid gap-1">
-    <button type="button" className="conv-quiet-button w-fit" onClick={attachments.pick} disabled={unavailable}>
+  return <div className="conv-attachment-tool grid gap-1">
+    <button type="button" className="conv-quiet-button conv-composer-tool w-fit" onClick={attachments.pick} disabled={unavailable}>
       <Paperclip className="size-3.5" aria-hidden /> Attach files
     </button>
     {attachments.draft.files.length > 0 && <ul aria-label="Draft files" className="grid gap-1">

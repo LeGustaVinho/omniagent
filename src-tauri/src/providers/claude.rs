@@ -14,7 +14,7 @@ use super::{
     AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, Capability, CliAdapter, CliSession,
     Interrupt, ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation,
     ReportedModel, RequestId, SessionIntent, SessionMode, SessionPlugin, SessionRequest, Transport,
-    TurnInput, TurnOutcome, WireMessage,
+    TurnInput, TurnOutcome, WireMessage, composer_customizations::ComposerCommand,
 };
 
 const INITIALIZE: &str = "omniagent-initialize";
@@ -77,6 +77,7 @@ impl CliAdapter for ClaudeAdapter {
             suggestion_turn_started: false,
             suggestion: None,
             goal_command: None,
+            composer_commands: None,
             question_route: Default::default(),
         }))
     }
@@ -94,6 +95,7 @@ struct ClaudeSession {
     suggestion_turn_started: bool,
     suggestion: Option<super::suggestions::SuggestionSource>,
     goal_command: Option<bool>,
+    composer_commands: Option<Vec<ComposerCommand>>,
     question_route: super::questions::QuestionRoute,
 }
 
@@ -315,6 +317,22 @@ impl ClaudeSession {
             let available = commands
                 .iter()
                 .any(|command| command["name"] == "goal" && command["builtin"] == true);
+            let commands: Vec<_> = commands
+                .iter()
+                .filter_map(ComposerCommand::from_advertisement)
+                .collect();
+            announced.push(
+                self.event(
+                    frame,
+                    ProviderEventData::AvailableCommands {
+                        names: commands
+                            .iter()
+                            .map(|command| command.name.clone())
+                            .collect(),
+                    },
+                ),
+            );
+            self.composer_commands = Some(commands);
             self.goal_command = Some(available);
             announced.push(self.event(
                 frame,
@@ -769,6 +787,10 @@ impl CliSession for ClaudeSession {
         })
     }
 
+    fn available_composer_commands(&self) -> Option<&[ComposerCommand]> {
+        self.composer_commands.as_deref()
+    }
+
     fn receive(&mut self, frame: OutputFrame) -> Result<AdapterUpdate> {
         if frame.stream == Stream::Stderr {
             return Ok(self.diagnostic(&frame.data));
@@ -1104,6 +1126,45 @@ mod tests {
             }),
         )?;
         Ok(adapter)
+    }
+
+    #[test]
+    fn composer_command_uses_the_advertised_streaming_prompt_route() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut adapter = ClaudeAdapter.create_session(SessionRequest {
+            checkout: checkout.path().into(),
+            intent: SessionIntent::Start,
+            mode: SessionMode::Plan,
+            model: Some("claude-haiku-5-5".into()),
+            effort: None,
+        })?;
+        adapter.start()?;
+        assert!(adapter.available_composer_commands().is_none());
+        receive(
+            &mut *adapter,
+            json!({
+                "type":"control_response", "response":{
+                    "request_id":INITIALIZE, "subtype":"success", "response":{
+                        "current_permission_mode":"plan",
+                        "models":[{"value":"claude-haiku-5-5","displayName":"Haiku"}],
+                        "commands":[{"name":"review","description":"Review the changes","argumentHint":"scope"}]
+                    }
+                }
+            }),
+        )?;
+        let commands = adapter
+            .available_composer_commands()
+            .context("missing commands")?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "review");
+        let frame = adapter.send(TurnInput {
+            attachments: Vec::new(),
+            message_id: "turn".into(),
+            text: "/review src".into(),
+        })?;
+        let message: Value = serde_json::from_slice(frame.outbound[0].as_bytes())?;
+        assert_eq!(message["message"]["content"], "/review src");
+        Ok(())
     }
 
     #[test]

@@ -94,6 +94,8 @@ it("rewinds inclusively, clears a new context, and inspects or forks the preserv
   await user.click(turn.getByRole("button", { name: "Rewind here" }));
   const rewind = within(screen.getByRole("dialog", { name: "Conversation history" }));
   expect((rewind.getByRole("combobox", { name: "Keep messages through" }) as HTMLSelectElement).value).toBe(answer.revisionId);
+  expect(rewind.queryByRole("region", { name: "Next prompt scope" })).toBeNull();
+  await user.click(rewind.getByText("Options"));
   expect(await rewind.findByText(/AGENTS\.md/)).toBeTruthy();
   expect(rewind.getByText("Planning assistant · Plan Mode")).toBeTruthy();
   expect(await rewind.findByText(/Pinned workflow questions retained.*1/)).toBeTruthy();

@@ -61,6 +61,7 @@ pub use lineage::{
 pub(crate) use lineage::{
     enqueue_summary, load_conversation_artifact, read_background_dispatch_result,
     reconcile_summary, record_conversation_excerpt, record_message_copy,
+    record_recent_conversation_excerpt,
 };
 pub use profile::DispatchProfileEvidence;
 pub use qualification::{QualificationCursor, QualificationPage};

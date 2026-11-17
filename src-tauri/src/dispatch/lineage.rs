@@ -26,7 +26,9 @@ pub use conversation_artifacts::{
 pub(crate) use conversation_artifacts::{
     enqueue_summary, read_background_dispatch_result, reconcile_summary,
 };
-pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
+pub(crate) use conversation_artifacts::{
+    load_conversation_artifact, record_conversation_excerpt, record_recent_conversation_excerpt,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

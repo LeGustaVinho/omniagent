@@ -1,5 +1,6 @@
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { Provider } from "@/bindings/Provider";
+import type { ConversationPipeline as ChatPipeline } from "@/bindings/ConversationPipeline";
 import catalog from "../src-tauri/model-catalog/v1.json";
 
 export type PreviewMessage = { id: string; author: "user" | "assistant"; text: string };
@@ -31,6 +32,7 @@ export type PreviewConversation = {
   forkOf?: string;
   goal?: PreviewGoal;
   sideQuestion?: string;
+  pipeline?: ChatPipeline;
 };
 
 export type PreviewLibrary = {
@@ -43,6 +45,7 @@ export type PreviewLibrary = {
 
 export const primaryProject = "Acme Docs";
 export const deliveryConversation = "plan";
+export const previewDeliveryPipeline = { kind: "repository_delivery", workflow: { id: "example-delivery", revision: "example-v1" } } as const;
 export const previewPlan = "### Update the release checklist\n\n"
   + "1. Add a **Recovery** section to `docs/release.md`.\n"
   + "2. Verify the links and Markdown rendering.\n"
@@ -76,6 +79,7 @@ export function createLibrary(): PreviewLibrary {
     conversations: [
       {
         ...createPreviewConversation(deliveryConversation, "Plan the release checklist"),
+        pipeline: previewDeliveryPipeline,
         pinned: true,
         messages: [
           { id: "initial-1", author: "user", text: "Read the release checklist and plan a recovery section." },

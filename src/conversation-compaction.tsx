@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ChevronDown, CircleAlert, FileText, ScanLine, SlidersHorizontal, Terminal, X } from "lucide-react";
+import { Popover } from "radix-ui";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { Button } from "@/components/ui/button";
+import "./conversation-compaction.css";
 
 type CompactionSettings = { automatic: boolean; thresholdPercent: number };
 type CompactionEstimate = {
@@ -149,68 +152,102 @@ export function ConversationCompactionControl({ compaction, contextId, disabled 
   disabled?: boolean;
 }) {
   const { status, start, startNative, save, pendingText } = compaction;
+  const panel = useRef<HTMLDivElement>(null);
   const value = status.data;
   const managedBusy = start.isPending || value?.request?.status === "queued";
   const native = value?.native;
   const nativeBusy = startNative.isPending || nativeRunning(native?.request);
   const busy = managedBusy || nativeBusy;
   const error = start.error ?? startNative.error ?? status.error ?? save.error;
+  const nativeAction = native && <Button type="button" variant="outline" disabled={disabled || busy || !contextId || !native.eligible}
+    onClick={() => { if (contextId) startNative.mutate({ contextId, text: pendingText }); }}>
+    <Terminal size={15} aria-hidden /> Compact Codex session
+  </Button>;
+
   return <>
-    <details className="relative">
-      <summary className="conv-quiet-button cursor-pointer">Compact context</summary>
-      <section aria-label="Context compaction settings" className="absolute right-0 z-30 grid w-72 max-w-[90vw] gap-2 rounded border border-border bg-card p-3 text-xs shadow">
-        <p className="font-medium">OmniAgent compaction</p>
-        {value?.providerCompactionObserved && <p>Provider-managed compaction has also been observed for this profile.</p>}
-        {status.isPending && <p role="status">Loading context…</p>}
-        {error && <p role="alert">{String(error)}</p>}
-        {value && <>
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={value.settings.automatic} disabled={save.isPending}
-              onChange={(event) => save.mutate({ ...value.settings, automatic: event.currentTarget.checked })} />
-            Compact automatically before sending
-          </label>
-          <Threshold value={value.settings.thresholdPercent} disabled={save.isPending}
-            onSave={(thresholdPercent) => save.mutate({ ...value.settings, thresholdPercent })} />
-          {value.estimate ? <>
-            <p>Estimated OmniAgent history {value.estimate.historyTokens.toLocaleString()} tokens · Available dialogue {Math.max(0, value.estimate.availableTokens - value.estimate.pendingTokens).toLocaleString()}</p>
-            {value.estimate.projectedHistoryTokens !== null && <p>Estimated after compaction {value.estimate.projectedHistoryTokens.toLocaleString()} tokens</p>}
-          </> : <p>No qualified dialogue budget is saved for this model.</p>}
-          {value.activeSummary && <p className="break-all">Active summary <code>{value.activeSummary.id}</code>
-            {(value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel) && <> · {value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel}</>}
-          </p>}
-          {value.request?.detail && <p role="alert">{value.request.detail}</p>}
-          {managedBusy && <p role="status">The read-only summary job is queued or running.</p>}
-          <Button type="button" variant="outline" disabled={disabled || busy || !contextId || !value.eligible}
-            onClick={() => { if (contextId) start.mutate({ contextId, text: pendingText, automatic: false }); }}>Summarize with OmniAgent</Button>
-          {native && <div className="grid gap-2 border-t border-border pt-2">
-            <p className="font-medium">Codex native compaction</p>
-            {nativeBusy && <p role="status">Codex is compacting its session.</p>}
-            {native.reason && !nativeBusy && <p>{native.reason}</p>}
-            {native.request?.detail && !nativeBusy && <p role="alert">{native.request.detail}</p>}
-            {native.request?.status === "succeeded" && !nativeBusy && <p role="status">Codex confirmed session compaction.</p>}
-            {native.request?.boundary && !nativeBusy && <p className="break-all">Provider turn <code>{native.request.boundary.turnId}</code>
-              {native.request.boundary.itemId && <> · Item <code>{native.request.boundary.itemId}</code></>}
-            </p>}
-            {native.request?.usage && !nativeBusy && <p>Provider usage · {[
-              native.request.usage.input === null ? "" : `${native.request.usage.input.toLocaleString()} input`,
-              native.request.usage.output === null ? "" : `${native.request.usage.output.toLocaleString()} output`,
-              native.request.usage.cachedInput === null ? "" : `${native.request.usage.cachedInput.toLocaleString()} cached`,
-              native.request.usage.reasoningOutput === null ? "" : `${native.request.usage.reasoningOutput.toLocaleString()} reasoning`,
-            ].filter(Boolean).join(" · ")}</p>}
-            <Button type="button" variant="outline" disabled={disabled || busy || !contextId || !native.eligible}
-              onClick={() => { if (contextId) startNative.mutate({ contextId, text: pendingText }); }}>Compact Codex session</Button>
-          </div>}
-        </>}
-      </section>
-    </details>
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <Button type="button" variant="ghost" className="conv-compaction-trigger">
+          <ScanLine size={15} aria-hidden /> Compact context <ChevronDown size={13} aria-hidden />
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content ref={panel} className="conv-compaction-popover" aria-label="Context compaction settings"
+          side="top" align="end" sideOffset={8} collisionPadding={12}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            panel.current?.focus({ preventScroll: true });
+          }}>
+          <header className="conv-compaction-header">
+            <span className="conv-compaction-icon"><ScanLine size={18} aria-hidden /></span>
+            <div>
+              <h2>Context compaction</h2>
+              <p>Summarize earlier messages to make room for your next prompt.</p>
+            </div>
+            <Popover.Close asChild><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close context compaction"><X size={16} aria-hidden /></Button></Popover.Close>
+          </header>
+          <div className="conv-compaction-body">
+            {status.isPending && <p role="status">Loading context…</p>}
+            {error && <p role="alert" className="conv-compaction-alert"><CircleAlert size={15} aria-hidden /> {String(error)}</p>}
+            {value && <>
+              <label className="conv-compaction-auto">
+                <span>Compact automatically before sending</span>
+                <input type="checkbox" checked={value.settings.automatic} disabled={save.isPending}
+                  onChange={(event) => save.mutate({ ...value.settings, automatic: event.currentTarget.checked })} />
+              </label>
+              {value.estimate ? <dl className="conv-compaction-metrics" aria-label="Estimated dialogue budget">
+                <div><dt>History</dt><dd>{value.estimate.historyTokens.toLocaleString()} tokens</dd></div>
+                <div><dt>Budget after draft</dt><dd>{Math.max(0, value.estimate.availableTokens - value.estimate.pendingTokens).toLocaleString()} tokens</dd></div>
+              </dl> : <p className="conv-compaction-muted">Dialogue budget unavailable for this model.</p>}
+              {value.estimate?.overBudget && <p className="conv-compaction-alert" role="status"><CircleAlert size={15} aria-hidden /> The draft and history exceed the dialogue budget.</p>}
+              {value.request?.detail && <p role="alert" className="conv-compaction-alert">{value.request.detail}</p>}
+              {managedBusy && <p role="status">The read-only summary job is queued or running.</p>}
+              {nativeBusy && <p role="status">Codex is compacting its session.</p>}
+              {native?.request?.detail && !nativeBusy && <p role="alert" className="conv-compaction-alert">{native.request.detail}</p>}
+              {native?.request?.status === "succeeded" && !nativeBusy && <p role="status">Codex confirmed session compaction.</p>}
+              <div className="conv-compaction-actions" aria-label="Compact now">
+                <Button type="button" disabled={disabled || busy || !contextId || !value.eligible}
+                  onClick={() => { if (contextId) start.mutate({ contextId, text: pendingText, automatic: false }); }}>
+                  <FileText size={15} aria-hidden /> Summarize with OmniAgent
+                </Button>
+                {(native?.eligible || nativeBusy) && nativeAction}
+              </div>
+              <details className="conv-compaction-details">
+                <summary><SlidersHorizontal size={15} aria-hidden /> Settings and evidence <ChevronDown size={14} aria-hidden /></summary>
+                <div className="conv-compaction-evidence">
+                  <Threshold value={value.settings.thresholdPercent} disabled={save.isPending}
+                    onSave={(thresholdPercent) => save.mutate({ ...value.settings, thresholdPercent })} />
+                  {value.estimate?.projectedHistoryTokens != null && <p>Estimated after compaction {value.estimate.projectedHistoryTokens.toLocaleString()} tokens</p>}
+                  {value.activeSummary && <p>Active summary <code>{value.activeSummary.id}</code>
+                    {(value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel) && <> · {value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel}</>}
+                  </p>}
+                  {value.providerCompactionObserved && <p>Provider-managed compaction observed for this profile.</p>}
+                  {native?.reason && !nativeBusy && <p>{native.reason}</p>}
+                  {native?.request?.boundary && !nativeBusy && <p>Provider turn <code>{native.request.boundary.turnId}</code>
+                    {native.request.boundary.itemId && <> · Item <code>{native.request.boundary.itemId}</code></>}
+                  </p>}
+                  {native?.request?.usage && !nativeBusy && <p>Provider usage · {[
+                    native.request.usage.input === null ? "" : `${native.request.usage.input.toLocaleString()} input`,
+                    native.request.usage.output === null ? "" : `${native.request.usage.output.toLocaleString()} output`,
+                    native.request.usage.cachedInput === null ? "" : `${native.request.usage.cachedInput.toLocaleString()} cached`,
+                    native.request.usage.reasoningOutput === null ? "" : `${native.request.usage.reasoningOutput.toLocaleString()} reasoning`,
+                  ].filter(Boolean).join(" · ")}</p>}
+                  {native && !native.eligible && !nativeBusy && nativeAction}
+                </div>
+              </details>
+            </>}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
     {compaction.sendError && <p role="alert" className="conv-alert">{compaction.sendError}</p>}
   </>;
 }
 
 function Threshold({ value, disabled, onSave }: { value: number; disabled: boolean; onSave: (value: number) => void }) {
-  return <label className="flex items-center gap-2">
+  return <label className="conv-compaction-threshold">
     Automatic threshold (%)
-    <input key={value} type="number" min={1} max={100} defaultValue={value} disabled={disabled} className="conv-select w-16"
+    <input key={value} type="number" min={1} max={100} defaultValue={value} disabled={disabled}
       onBlur={(event) => {
         const threshold = event.currentTarget.valueAsNumber;
         if (Number.isInteger(threshold) && threshold >= 1 && threshold <= 100 && threshold !== value) onSave(threshold);

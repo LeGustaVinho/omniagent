@@ -56,6 +56,26 @@ it("defaults to same-tab continuation, previews the saved seed, and excludes it 
   expect(onClose).toHaveBeenCalledOnce();
 });
 
+it("asks for a pipeline on fresh continuation and opens a draft for the selected published revision", async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const pipeline = { kind: "published", workflow: { id: "review", revision: "saved-revision-hash" } } as const;
+  render(<ConversationContinuationDialog pending={false} onConfirm={onConfirm} onClose={vi.fn()}
+    review={{ ...review, settings: { ...review.settings, effective: "fresh" } }}
+    pipelines={{ data: [
+      { name: "Direct conversation", pipeline: { kind: "direct" } },
+      { name: "Repository delivery", pipeline: { kind: "repository_delivery" } },
+      { name: "Review pipeline", pipeline },
+    ], isPending: false, error: null, refetch: vi.fn() }} />);
+  const dialog = within(screen.getByRole("dialog", { name: "Choose how to continue" }));
+  expect(dialog.getByRole<HTMLButtonElement>("button", { name: "Continue and send" }).disabled).toBe(true);
+  expect(dialog.getByRole("radio", { name: /Repository delivery/ })).toBeTruthy();
+  await user.click(dialog.getByRole("radio", { name: /Review pipeline/ }));
+  expect(dialog.getByTitle(pipeline.workflow.revision)).toBeTruthy();
+  await user.click(dialog.getByRole("button", { name: "Open draft" }));
+  expect(onConfirm).toHaveBeenCalledExactlyOnceWith("fresh", pipeline);
+});
+
 it("saves project defaults and lets a conversation restore inheritance", async () => {
   const user = userEvent.setup();
   let settings = review.settings;

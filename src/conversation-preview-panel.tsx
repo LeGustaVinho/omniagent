@@ -1,19 +1,19 @@
 import {
-  Activity, ArrowDown, ArrowUp, FileText, GitFork, History, MessageSquare, Paperclip, Pencil, Plus,
+  Activity, ArrowDown, ArrowUp, FileText, Gauge, GitFork, History, MessageSquare, Paperclip, Pencil,
   Rows3, ShieldCheck, Target, X,
 } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
-import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
 import { EffortSelect } from "@/components/effort-select";
 import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationSidePanel, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
+import { ConversationPipelineLabel, directConversationPipeline } from "@/conversation-pipeline-picker";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { exampleModelEfforts } from "@/model-effort-examples";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import {
-  deliveryConversation, demoModels, fileSamples, previewPlan, providers,
+  deliveryConversation, demoModels, fileSamples, previewPlan,
   type AttachmentRoute, type PreviewAttachment, type PreviewConversation, type PreviewGoal, type PreviewMessage,
 } from "@/conversation-preview-data";
 import type { DeliveryStep, WorkspaceProps } from "@/workbench-contract";
@@ -130,7 +130,6 @@ function PreviewGoalCard({ goal, update }: { goal: PreviewGoal; update: (goal: P
 export function PreviewConversationPanel(props: PanelProps) {
   const { conversation, simulation, update, onFork, onRewind, openWorkspace, openActivity, openChanges } = props;
   const [mode, setMode] = useState<ConversationMode>("plan");
-  const [provider, setProvider] = useState<Provider>("codex");
   const [selection, setSelection] = useState<ModelSelection | null>(demoModels.find(({ selection }) => selection.provider === "codex")?.selection ?? null);
   const [effort, setEffort] = useState("");
   const [deliveryRoute, setDeliveryRoute] = useState("live");
@@ -147,9 +146,9 @@ export function PreviewConversationPanel(props: PanelProps) {
   const history = useRef<HTMLDivElement>(null);
   const sideQuestionButton = useRef<HTMLButtonElement>(null);
   const stickToEnd = useRef(true);
-  const step = conversation.id === deliveryConversation ? simulation?.delivery : undefined;
+  const step = conversation.id === deliveryConversation || conversation.pipeline?.kind === "repository_delivery" ? simulation?.delivery : undefined;
   const activeRun = step === "running";
-  const modelOptions = demoModels.filter(({ selection }) => selection.provider === provider);
+  const provider = selection?.provider;
   const { draft, goal, sideQuestion } = conversation;
   const prompt = draft.trim();
   const goalInput = goalCommand(draft);
@@ -180,11 +179,10 @@ export function PreviewConversationPanel(props: PanelProps) {
     sideQuestionButton.current?.focus();
   }
 
-  function updateProfile(next: Provider) {
-    setProvider(next);
-    setSelection(demoModels.find(({ selection }) => selection.provider === next)?.selection ?? null);
+  function chooseModel(model: ModelSelection) {
+    setSelection(model);
     setEffort("");
-    setDeliveryRoute(next === "codex" ? "live" : "queued");
+    if (model.provider !== provider) setDeliveryRoute(model.provider === "codex" ? "live" : "queued");
   }
 
   function send(event: FormEvent) {
@@ -196,7 +194,7 @@ export function PreviewConversationPanel(props: PanelProps) {
     }
     if (!prompt || !selection) return;
     if (composingGoal) {
-      const chosen = modelOptions.find(({ selection: option }) => option.modelId === selection.modelId && option.profileId === selection.profileId);
+      const chosen = demoModels.find(({ selection: option }) => option.provider === selection.provider && option.modelId === selection.modelId && option.profileId === selection.profileId);
       if (!goalActive && chosen?.selectable) {
         setGoal({ objective: goalInput ?? prompt, previousObjectives: [], model: chosen.name, state: "Running", spent: 0, budget: 3 });
         setMode("goal");
@@ -270,6 +268,7 @@ export function PreviewConversationPanel(props: PanelProps) {
   return (
     <section className="conv-pane" aria-label={conversation.title}>
       <ConversationTitleBar title={conversation.title} details={<>
+        <ConversationPipelineLabel pipeline={conversation.pipeline ?? directConversationPipeline} />
         {conversation.worktree !== "example-main" && <small className="conv-title-context" title={conversation.worktree}>{conversation.worktree}</small>}
         {conversation.archived && <small className="conv-title-context">Archived</small>}
       </>}>
@@ -406,20 +405,20 @@ export function PreviewConversationPanel(props: PanelProps) {
               </div>}
               {!draft && !activeRun && !composingGoal && conversation.messages.length > 0 && <button type="button" className="conv-suggestion"
                 onClick={() => editDraft(exampleSuggestion)}>{exampleSuggestion}<kbd>Tab</kbd></button>}
+              <div className="conv-composer-tools"><button type="button" className="conv-quiet-button conv-composer-tool"
+                aria-label="Attach a file" onClick={openAttachment}><Paperclip size={15} aria-hidden /> Attach files</button></div>
               <ConversationComposerToolbar actions={<>
                 {activeRun && <button type="button" className="conv-quiet-button" onClick={() => simulation?.advanceDelivery("interrupt")}>Stop</button>}
                 <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
                   {goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal" : activeRun && deliveryRoute === "queued" ? "Queue" : "Send"} <ArrowUp size={15} aria-hidden />
                 </button>
               </>}>
-                <button type="button" className="conv-icon-button" title="Attach a file" aria-label="Attach a file" onClick={openAttachment}><Plus aria-hidden /></button>
-                <select aria-label="Provider" className="conv-select" value={provider} onChange={(event) => updateProfile(event.currentTarget.value as Provider)}>
-                  {Object.entries(providers).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-                </select>
-                <ModelPicker label="Model" layout="inline" options={modelOptions}
-                  selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
+                <ModelPicker label="Model" layout="inline" combinedCatalog options={demoModels}
+                  selection={{ mode: "single", selected: selection, onChange: chooseModel }} />
                 <ConversationModeSelect mode={mode} onChange={setMode} />
-                <EffortSelect capabilities={exampleModelEfforts(selection)} className="conv-select" value={effort} onChange={setEffort} />
+                <span className="conv-option"><Gauge size={15} aria-hidden />
+                  <EffortSelect capabilities={exampleModelEfforts(selection)} className="conv-select" value={effort} onChange={setEffort} />
+                </span>
                 {activeRun && !composingGoal && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>
                   <option value="live" disabled={provider !== "codex"}>Send to active turn</option>
                   <option value="queued">Queue for next turn</option>

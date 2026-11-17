@@ -41,24 +41,28 @@ const selected: ProjectCheckout = {
 const other: ProjectCheckout = {
   projectId: "external", checkoutId: "external-review", repositoryRoot: "C:\\repos\\Audit", checkoutRoot: "C:\\worktrees\\audit-review",
 };
+const linked: ProjectCheckout = { ...selected, checkoutId: "linked-review", checkoutRoot: "C:\\worktrees\\launch-review" };
 const archiveId = "older-chat";
 const liveId = "live-chat";
 const externalId = "external-chat";
+const linkedId = "linked-chat";
 const original = "Archive discovery";
 const libraryTitle = "Archive review";
 const finalTitle = "Archive release";
 const draft = "Draft written before restart.";
 
-function repository() {
+function repository({ leakForeignResults = false } = {}) {
   const layouts = new Map<string, string>();
   const conversations = new Map<string, Conversation>([
     [archiveId, { id: archiveId, checkoutId: selected.checkoutId, contextId: "archived-context", title: original }],
     [liveId, { id: liveId, checkoutId: selected.checkoutId, contextId: "streaming-context", title: "Live handoff" }],
     [externalId, { id: externalId, checkoutId: other.checkoutId, contextId: "remote-context", title: "Audit details" }],
+    [linkedId, { id: linkedId, checkoutId: linked.checkoutId, contextId: "linked-context", title: "Linked worktree review" }],
   ]);
   const summaries = [
     { id: liveId, checkout: selected, projectName: "Launch", agent: "codex", model: "gpt-test", status: "running", lastActivityAt: 1_700_000_001_000 },
     { id: externalId, checkout: other, projectName: "Audit", agent: "claude", model: "sonnet-test", status: "succeeded", lastActivityAt: 1_700_000_000_500 },
+    { id: linkedId, checkout: linked, projectName: "Launch", agent: "claude", model: "sonnet-test", status: "succeeded", lastActivityAt: 1_700_000_000_300 },
     { id: archiveId, checkout: selected, projectName: "Launch", agent: "codex", model: "gpt-old", status: "interrupted", lastActivityAt: 1_700_000_000_000 },
   ];
   type Section = { id: string; projectId: string; name: string };
@@ -81,12 +85,12 @@ function repository() {
       case "appearance_settings": return defaultAppearance;
       case "active_checkout": return activeCheckout;
       case "select_active_checkout":
-        activeCheckout = input.checkoutId === other.checkoutId ? other : selected;
+        activeCheckout = [selected, other, linked].find(({ checkoutId }) => checkoutId === input.checkoutId) ?? selected;
         return;
       case "run_snapshot": return { cursor: "0", runs: [], recentEvents: [] };
       case "subscribe_events": return `subscription-${input.checkoutId}`;
       case "unsubscribe_events": return;
-      case "registered_checkouts": return [selected, other];
+      case "registered_checkouts": return [selected, other, linked];
       case "workbench_layout": return layouts.get(layoutKey) ?? null;
       case "save_workbench_layout":
         layouts.set(layoutKey, input.layout!);
@@ -95,12 +99,12 @@ function repository() {
         return summaries.flatMap(({ id, ...summary }) => {
           const chat = conversations.get(id)!;
           const state = getOrganization(id);
-          return (!input.projectId || input.projectId === summary.checkout.projectId) &&
+          return (leakForeignResults || input.projectId === summary.checkout.projectId) &&
             (input.archived ?? false) === state.archived && (!input.query || chat.title.toLowerCase().includes(input.query.toLowerCase()))
             ? [{ ...summary, conversation: chat, organization: state }] : [];
         });
       case "conversation_library_sections":
-        return sections.filter(({ projectId }) => !input.projectId || projectId === input.projectId);
+        return sections.filter(({ projectId }) => projectId === input.projectId);
       case "organize_conversation": {
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong organization scope");
         const change = input.change!;
@@ -140,9 +144,10 @@ function repository() {
       case "conversation_history":
         return { contextId: conversation?.contextId, messages: [{ messageId: "saved-user", revisionId: "saved-revision",
           role: "user", text: input.conversationId === archiveId ? "Saved conversation before provider shutdown."
-            : input.conversationId === externalId ? "Saved transcript in the audit worktree." : "Saved live prompt." }] };
+            : input.conversationId === externalId ? "Saved transcript in the audit worktree."
+              : input.conversationId === linkedId ? "Saved transcript in a linked worktree." : "Saved live prompt." }] };
       case "latest_conversation_run":
-        if (input.conversationId === externalId) return null;
+        if (input.conversationId === externalId || input.conversationId === linkedId) return null;
         return { id: input.conversationId === liveId ? "existing-run" : "previous-run", projectId: selected.projectId,
           checkoutId: selected.checkoutId, turnId: "saved-turn",
           status: input.conversationId === liveId ? "running" : "interrupted" } satisfies RunRecord;
@@ -182,33 +187,27 @@ async function rename(user: ReturnType<typeof userEvent.setup>, title: string) {
   await user.click(form.getByRole("button", { name: "Save" }));
 }
 
-it("shows newest activity first, filters by project and title, and reconnects to the existing live run by conversation ID", async () => {
-  repository();
+it("orders recent conversations in the active project, excludes foreign results and reconnects to an existing run", async () => {
+  repository({ leakForeignResults: true });
   const { user, onOpenOtherCheckout } = mount();
   await screen.findByRole("region", { name: "Conversation library" });
   await library().findByRole("button", { name: "Live handoff" });
-  const project = library().getByRole("combobox", { name: "Project" });
-  expect((project as HTMLSelectElement).value).toBe(selected.projectId);
+  expect(library().queryByRole("combobox", { name: "Project" })).toBeNull();
   expect(library().queryByRole("button", { name: "Audit details" })).toBeNull();
 
-  await user.selectOptions(project, "");
-  await library().findByRole("button", { name: "Audit details" });
-  const launch = within(library().getByRole("region", { name: "Launch · Conversations" }));
+  const launch = within(library().getByRole("region", { name: "Conversations" }));
   const titles = launch.getAllByRole("listitem").map((row) => row.querySelector("button")?.getAttribute("aria-label"));
-  expect(titles).toEqual(["Live handoff", original]);
-  expect(within(library().getByRole("region", { name: "Audit · Conversations" })).getByRole("button", { name: "Audit details" })).toBeTruthy();
+  expect(titles).toEqual(["Live handoff", "Linked worktree review", original]);
   expect(library().getByText("Launch · Codex · gpt-test · running")).toBeTruthy();
-  expect(library().getByText("Audit · Claude Code · sonnet-test · succeeded")).toBeTruthy();
-  await user.selectOptions(project, other.projectId);
-  await library().findByRole("button", { name: "Audit details" });
-  expect(library().queryByRole("button", { name: "Live handoff" })).toBeNull();
+  expect(library().getByText("Launch / launch-review · Claude Code · sonnet-test · succeeded")).toBeTruthy();
   await user.type(library().getByRole("searchbox"), "Audit");
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_library", { query: "Audit", projectId: other.projectId }));
-  await user.click(await library().findByRole("button", { name: "Audit details" }));
-  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(other, externalId);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("conversation_library", { query: "Audit", projectId: selected.projectId }));
+  expect(await library().findByText("No matching conversations.")).toBeTruthy();
+  expect(onOpenOtherCheckout).not.toHaveBeenCalled();
 
   await user.clear(library().getByRole("searchbox"));
-  await user.selectOptions(project, selected.projectId);
+  await user.click(await library().findByRole("button", { name: "Linked worktree review" }));
+  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(linked, linkedId);
   await user.click(await library().findByRole("button", { name: "Live handoff" }));
   expect(await screen.findByText("Already running before the tab opened.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
@@ -248,8 +247,6 @@ it("persists library and tab renames, restores older history and draft, and shar
   expect(await screen.findByText("Saved conversation before provider shutdown.")).toBeTruthy();
   expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" })).value).toBe(draft);
   await reopened.user.click(await library().findByRole("button", { name: "Live handoff" }));
-  await reopened.user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
-  await library().findByRole("button", { name: "Audit details" });
   const live = within((await screen.findByRole("heading", { name: "Live handoff" })).closest("section")!);
   await reopened.user.click(live.getByRole("button", { name: "Find conversation references" }));
   const references = within(await screen.findByRole("dialog", { name: "Conversation references" }));
@@ -300,7 +297,6 @@ it("organizes conversations through the shared menu and reloads persisted sectio
     return within(await screen.findByRole("menu"));
   }
 
-  await first.user.selectOptions(await library().findByRole("combobox", { name: "Project" }), "");
   const section = (await menu(original)).getByRole("menuitem", { name: "Section" });
   section.focus();
   await first.user.keyboard("{ArrowRight}");
@@ -310,7 +306,7 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   await first.user.type(dialog.getByRole("textbox", { name: "Section name" }), "Release notes");
   await first.user.click(dialog.getByRole("button", { name: "Save" }));
   await screen.findByRole("region", { name: "Conversation library" });
-  expect(await library().findByRole("region", { name: "Launch · Release notes" })).toBeTruthy();
+  expect(await library().findByRole("region", { name: "Release notes" })).toBeTruthy();
 
   await first.user.click((await menu(original)).getByRole("menuitem", { name: "Pin" }));
   expect(await library().findByRole("region", { name: "Pinned" })).toBeTruthy();
@@ -324,6 +320,8 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   await screen.findByRole("region", { name: "Conversation library" });
   await reopened.user.click(await library().findByRole("button", { name: "Archived" }));
   const archivedRow = await within(await library().findByRole("region", { name: "Release notes" })).findByRole("button", { name: original });
+  expect(invoke).toHaveBeenCalledWith("conversation_library", { query: null, projectId: selected.projectId, archived: true });
+  expect(invoke).toHaveBeenCalledWith("conversation_library_sections", { projectId: selected.projectId });
   expect(archivedRow.getAttribute("aria-description")).toBe("Unread");
   await reopened.user.click((await menu(original)).getByRole("menuitem", { name: "Unarchive" }));
   await reopened.user.click(library().getByRole("button", { name: "Archived" }));
@@ -334,20 +332,27 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
 });
 
-it("opens an all-project result in its own worktree from the actual application shell", async () => {
+it("opens a same-project linked worktree and only shows another project's conversations after switching repositories", async () => {
   repository();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
   const user = userEvent.setup();
   await screen.findByRole("region", { name: "Conversation library" }, { timeout: 8_000 });
-  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
-  await user.click(await library().findByRole("button", { name: "Audit details" }));
-  expect(await screen.findByText("Saved transcript in the audit worktree.")).toBeTruthy();
-  expect(await screen.findByRole("tab", { name: "Audit details" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Switch repository or worktree" }).textContent).toContain("Audit / audit-review");
-  expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: other.checkoutId });
-  expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: other.checkoutId, conversationId: externalId });
-  expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: externalId });
+  expect(library().queryByRole("button", { name: "Audit details" })).toBeNull();
+  await user.click(await library().findByRole("button", { name: "Linked worktree review" }));
+  expect(await screen.findByText("Saved transcript in a linked worktree.")).toBeTruthy();
+  expect(await screen.findByRole("tab", { name: "Linked worktree review" })).toBeTruthy();
+  const checkout = screen.getByRole("button", { name: "Switch repository or worktree" });
+  expect(checkout.textContent).toContain("Launch / launch-review");
+  expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: linked.checkoutId });
+  expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: linked.checkoutId, conversationId: linkedId });
+  expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: linkedId });
+
+  await user.click(checkout);
+  await user.click(await screen.findByRole("button", { name: /Audit \/ audit-review/ }));
+  expect(await library().findByRole("button", { name: "Audit details" })).toBeTruthy();
+  expect(library().queryByRole("button", { name: "Linked worktree review" })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("conversation_library", { query: null, projectId: other.projectId });
 });
 
 it("opens saved conversations from the compact library and returns space to the transcript", async () => {

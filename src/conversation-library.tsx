@@ -72,11 +72,12 @@ export function useConversationRename(conversation: ConversationIdentity | undef
   });
 }
 
-function useConversationLibrary(query: string, projectId: string | null, enabled = true, archived = false) {
+export function useConversationLibrary(query: string, projectId: string, enabled = true, archived = false) {
   const title = query.trim();
   return useQuery({
     queryKey: [...conversationLibraryKey, projectId, title, archived],
     queryFn: () => invoke<ConversationLibraryEntry[]>("conversation_library", { query: title || null, projectId, ...(archived ? { archived } : {}) }),
+    select: (entries) => entries.filter(({ checkout }) => checkout.projectId === projectId),
     enabled,
     refetchInterval: 5_000,
   });
@@ -99,9 +100,11 @@ const activityTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", t
 const agentNames: Record<string, string> = { codex: "Codex", claude: "Claude Code", antigravity: "Antigravity" };
 
 function ConversationMetadata({ entry, id }: { entry: ConversationLibraryEntry; id: string }) {
-  const { projectName, agent, model, status, lastActivityAt } = entry;
+  const { checkout, projectName, agent, model, status, lastActivityAt } = entry;
   const activity = lastActivityAt === null ? null : new Date(lastActivityAt);
-  const details = [projectName, agent && (agentNames[agent] ?? agent), model, status?.replace(/_/g, " ")].filter(Boolean);
+  const worktree = checkout.checkoutRoot !== checkout.repositoryRoot
+    ? checkout.checkoutRoot.split(/[\\/]/).filter(Boolean).at(-1) : undefined;
+  const details = [worktree ? `${projectName} / ${worktree}` : projectName, agent && (agentNames[agent] ?? agent), model, status?.replace(/_/g, " ")].filter(Boolean);
   return <span id={id} className="block min-w-0 text-xs text-muted-foreground">
     <small className="block truncate" title={details.join(" · ")}>{details.join(" · ")}</small>
     {activity && <time className="block truncate" dateTime={activity.toISOString()}>{activityTime.format(activity)}</time>}
@@ -136,14 +139,13 @@ function openEntry(onOpen: OpenLibraryConversation, { checkout, conversation }: 
   return onOpen(checkout, conversation.id);
 }
 
-function libraryGroups(entries: ConversationLibraryEntry[], allProjects: boolean, archived: boolean) {
+function libraryGroups(entries: ConversationLibraryEntry[], archived: boolean) {
   const groups = new Map<string, { id: string; title: string; pinned: boolean; entries: ConversationLibraryEntry[] }>();
   for (const entry of entries) {
     const { pinned, section } = entry.organization;
     const isPinned = pinned && !archived;
-    const id = isPinned ? "pinned" : `${entry.checkout.projectId}:${section?.id ?? ""}`;
-    const title = isPinned ? "Pinned"
-      : [allProjects ? entry.projectName : null, section?.name ?? "Conversations"].filter(Boolean).join(" · ");
+    const id = isPinned ? "pinned" : `section:${section?.id ?? ""}`;
+    const title = isPinned ? "Pinned" : section?.name ?? "Conversations";
     const group = groups.get(id);
     if (group) group.entries.push(entry);
     else groups.set(id, { id, title, pinned: isPinned, entries: [entry] });
@@ -161,7 +163,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
 }) {
   const client = useQueryClient();
   const libraryRef = useRef<HTMLElement>(null);
-  const [projectId, setProjectId] = useState<string | null>(checkout.projectId);
+  const { projectId } = checkout;
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(false);
   const [renaming, setRenaming] = useState<ConversationIdentity>();
@@ -186,14 +188,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       if (change.type === "archive") setNotice(change.archived ? "Conversation moved to Archived." : "Conversation restored.");
     },
   });
-  const registered = useQuery({
-    queryKey: ["registered-checkouts"],
-    queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
-  });
-  const projects = new Map([checkout, ...(registered.data ?? [])].map((item) => [
-    item.projectId, item.repositoryRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? item.repositoryRoot,
-  ]));
-  const error = open.error ?? list.error ?? registered.error ?? sections.error ?? startError ??
+  const error = open.error ?? list.error ?? sections.error ?? startError ??
     (!sectionConversation ? organize.error : undefined);
 
   function rowAction(action: ConversationAction, { conversation, organization }: ConversationLibraryEntry, sectionId?: string) {
@@ -216,20 +211,15 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   }
 
   return <ConversationLibraryLayout sectionRef={libraryRef} query={query} searchLabel="Search conversation titles" onQuery={setQuery}
-    onCreate={() => { setArchived(false); setQuery(""); setProjectId(checkout.projectId); onStart(); }} creating={startPending} filters={<>
-      <select className="conv-select conv-project-filter" aria-label="Project" value={projectId ?? ""}
-        onChange={(event) => setProjectId(event.currentTarget.value || null)}>
-        <option value="">All projects</option>
-        {[...projects].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-      </select>
-      <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
+    onCreate={() => { setArchived(false); setQuery(""); onStart(); }} creating={startPending} searchAction={
+      <button type="button" className="conv-icon-button aria-pressed:bg-muted aria-pressed:text-primary" aria-label="Archived" aria-pressed={archived}
         title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
-    </>}>
+    }>
     {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
     {list.isPending && <p role="status" className="conv-sidebar-note">Loading conversations…</p>}
     {list.data?.length === 0 && <p className="conv-sidebar-note">{archived ? "No archived conversations match."
-      : query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
-    {libraryGroups(list.data ?? [], projectId === null, archived).map(({ id, title, entries }) =>
+      : query.trim() ? "No matching conversations." : "No conversations in this project."}</p>}
+    {libraryGroups(list.data ?? [], archived).map(({ id, title, entries }) =>
       <ConversationLibraryGroup key={id} title={title}>
         {entries.map((entry) => {
           const { conversation, organization } = entry;
@@ -303,7 +293,8 @@ export function ConversationReferencePicker({ projectId, excludeId, onOpen, onAt
 }) {
   const [shown, setShown] = useState(false);
   const [query, setQuery] = useState("");
-  const [source, setSource] = useState<ConversationLibraryEntry>();
+  const [selectedSource, setSource] = useState<ConversationLibraryEntry>();
+  const source = selectedSource?.checkout.projectId === projectId ? selectedSource : undefined;
   const list = useConversationLibrary(query, projectId, shown && !source);
   function changeShown(next: boolean) {
     setShown(next);
@@ -313,12 +304,13 @@ export function ConversationReferencePicker({ projectId, excludeId, onOpen, onAt
     mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry),
     onSuccess: () => changeShown(false),
   });
-  const matches = list.data?.filter(({ conversation, checkout }) =>
-    conversation.id !== excludeId && checkout.projectId === projectId);
+  const matches = list.data?.filter(({ conversation }) => conversation.id !== excludeId);
   const error = list.error ?? open.error;
   return <Popover.Root open={shown} onOpenChange={changeShown}>
     <Popover.Trigger asChild>
-      <button className="conv-quiet-button" type="button" aria-label="Find conversation references">@conversation</button>
+      <button className="conv-quiet-button conv-composer-tool" type="button" aria-label="Find conversation references">
+        <MessageSquare size={15} aria-hidden /> Reference conversation
+      </button>
     </Popover.Trigger>
     <Popover.Portal>
       <Popover.Content align="start" sideOffset={6} className="work-project-popover" aria-label="Conversation references">

@@ -16,6 +16,132 @@ use crate::{
 };
 
 #[tokio::test]
+async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_without_dispatch()
+-> Result<()> {
+    let (_directory, store, original, scope) = setup().await?;
+    std::fs::write(&scope.executable, b"fixture")?;
+    confirm(
+        &store,
+        &prepare(&store, &original.id, scope.clone(), "Earlier discussion").await?,
+    )
+    .await?;
+    let current = store.conversation(original.id).await?;
+    let source = store
+        .create_conversation(current.checkout_id.clone(), "Reference".into())
+        .await?;
+    confirm(
+        &store,
+        &prepare(&store, &source.id, scope.clone(), "Exact reference content").await?,
+    )
+    .await?;
+    let reference = store
+        .preview_conversation_reference(
+            current.id.clone(),
+            source.id,
+            ConversationReferenceSelection::Automatic,
+        )
+        .await?;
+    store
+        .edit_conversation_reference_draft(current.id.clone(), reference.id.clone(), true)
+        .await?;
+    let text = "Review @Reference".to_owned();
+    let mut next_scope = scope.clone();
+    next_scope.model = Some("other-model".into());
+    store
+        .save_conversation_draft(current.id.clone(), text.clone())
+        .await?;
+    let ContinuationInspection::ReviewRequired { preview_id, .. } = store
+        .submit_conversation_with_references(
+            current.id.clone(),
+            current.context_id.clone(),
+            next_scope.clone(),
+            text.clone(),
+            vec![reference.id.clone()],
+        )
+        .await?
+    else {
+        bail!("Expected continuation approval")
+    };
+
+    store
+        .save_conversation_draft(current.id.clone(), "More recent draft".into())
+        .await?;
+    let denied = store
+        .continue_conversation_into_pipeline(
+            current.id.clone(),
+            preview_id.clone(),
+            next_scope.clone(),
+            text.clone(),
+            ConversationPipelineChoice::RepositoryDelivery,
+        )
+        .await
+        .unwrap_err();
+    assert!(denied.to_string().contains("draft changed"));
+    assert_eq!(
+        store
+            .conversation_reference_draft(current.id.clone())
+            .await?,
+        [reference.clone()]
+    );
+    store
+        .save_conversation_draft(current.id.clone(), text.clone())
+        .await?;
+
+    let destination = store
+        .continue_conversation_into_pipeline(
+            current.id.clone(),
+            preview_id.clone(),
+            next_scope.clone(),
+            text.clone(),
+            ConversationPipelineChoice::RepositoryDelivery,
+        )
+        .await?;
+    assert!(matches!(
+        destination.pipeline,
+        Some(ConversationPipeline::RepositoryDelivery { .. })
+    ));
+    assert_eq!(destination.checkout_id, current.checkout_id);
+    assert_eq!(
+        store.conversation_draft(destination.id.clone()).await?,
+        text
+    );
+    assert_eq!(store.conversation_draft(current.id.clone()).await?, "");
+    assert!(
+        store
+            .conversation_reference_draft(current.id.clone())
+            .await?
+            .is_empty()
+    );
+    let carried = store
+        .conversation_reference_draft(destination.id.clone())
+        .await?;
+    assert_eq!(carried.len(), 1);
+    assert_ne!(carried[0].id, reference.id);
+    assert_eq!(carried[0].destination_conversation_id, destination.id);
+    assert_eq!(carried[0].artifact, reference.artifact);
+    assert!(
+        store
+            .latest_conversation_run(destination.id.clone())
+            .await?
+            .is_none()
+    );
+    assert!(store.claim_next_job(environment(&scope)).await?.is_none());
+    assert!(
+        store
+            .continue_conversation_into_pipeline(
+                current.id,
+                preview_id,
+                next_scope,
+                text,
+                ConversationPipelineChoice::RepositoryDelivery
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unfinished_goal_keeps_its_checkpoint_and_checkout_when_forking() -> Result<()> {
     use std::process::Command;
 

@@ -142,6 +142,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [theme, setTheme] = useState(readTheme);
   const [selected, select] = useState(graph.nodes[0]?.id ?? "");
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
+  const addNodeButton = useRef<HTMLButtonElement>(null);
   const [catalogOpen, showCatalog] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConnection>();
@@ -198,6 +199,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     apply({ ...state, graph: patch(graph) });
   }
 
+  function closeCatalog() {
+    showCatalog(false);
+    requestAnimationFrame(() => addNodeButton.current?.focus({ preventScroll: true }));
+  }
+
   function add(definition: WorkflowDefinition) {
     const stem = definition.kind.replaceAll("_", "-");
     let id = stem;
@@ -206,7 +212,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     patchGraph((previous) => ({ ...previous, nodes: [...previous.nodes, { id, kind: definition.kind,
       configuration: defaultConfiguration(definition.configuration) }] }));
     select(id);
-    showCatalog(false);
+    closeCatalog();
   }
 
   function changeNodes(changes: NodeChange<CanvasNode>[], removedWireIds: string[] = []) {
@@ -315,7 +321,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
-      <Button type="button" variant="outline" disabled={disabled} aria-expanded={catalogOpen} onClick={() => showCatalog(!catalogOpen)}>
+      <Button type="button" ref={addNodeButton} variant="outline" disabled={disabled} aria-expanded={catalogOpen} onClick={() => showCatalog(!catalogOpen)}>
         <Plus size={15} /> Add node
       </Button>
       <div className="workflow-history" aria-label="Graph edit history" role="group">
@@ -334,6 +340,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       <ul>{problems.map((issue, i) => <li key={`${issue}:${i}`}>{issue}</li>)}</ul>
     </details>}
     <PipelineCanvasFrame className="workflow-graph-frame" canvasLabel="Pipeline graph canvas" inspectorLabel="Node configuration"
+      onClosePalette={closeCatalog}
       inspectorClassName="workflow-graph-inspector pipeline-form pipeline-stack" palette={catalogOpen && !disabled ?
         <section aria-label="Node catalog"><PipelineNodeCatalog groups={groups} searchLabel="Search node catalog" compact /></section> : undefined}
       canvas={<div className="workflow-graph-canvas">

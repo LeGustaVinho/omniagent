@@ -14,11 +14,14 @@ type LaunchFields = TypedLaunchFields | { source: Source; workId: string | null 
 type LaunchRequest = LaunchFields & { projectId: string; workflow: Version; requestId: string };
 type LaunchOrigin = { kind: "editor"; requestId: string }
   | { kind: "agile"; requestId: string; workId: string }
-  | { kind: "rule"; ruleId: string; eventId: string; workId: string };
+  | { kind: "rule"; ruleId: string; eventId: string; workId: string }
+  | { kind: "conversation"; conversationId: string; requestId: string; workId?: string | null; eventId?: string | null }
+  | { kind: "backlog"; workId: string; parentRunId: string; nodeId: string };
 export type WorkflowLaunchReceipt = {
   workflowRunId: string;
   version: Version;
   origin: LaunchOrigin;
+  sourceCommit?: string;
   checkoutId?: string;
   source?: { id: string; checkoutId: string; relativePath: string } | null;
   inputs?: Record<string, unknown>;

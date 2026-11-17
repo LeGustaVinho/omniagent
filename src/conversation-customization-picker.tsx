@@ -1,6 +1,8 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { Blocks } from "lucide-react";
+import { composerCompletion, replaceComposerCompletion } from "@/composer-completion";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
@@ -8,29 +10,34 @@ import type { SessionMode } from "@/bindings/SessionMode";
 export type ComposerCustomization = {
   marker: string;
   availability: "filesystem" | "provider" | "recorded_provider";
+  route?: "native_skill" | "markdown_context" | "native_command";
+  unavailableReason?: string | null;
   skill: { id: string; provider: Provider; name: string; path: string; namespace: string | null; revision: string };
 };
 
-const skillToken = /^@skill:[0-9a-f]{64}:[0-9a-f]{64}$/;
+const skillToken = /^@(?:skill|command):[0-9a-f]{64}:[0-9a-f]{64}$/;
+const stageToken = /^@stage:([^:\s]+):((?:skill|command):[0-9a-f]{64}:[0-9a-f]{64})$/;
 
 export function hasComposerSkills(draft: string) {
   return draft.split(/\s+/).some((token) => skillToken.test(token));
 }
 
 export function conversationSkillMessage(draft: string) {
-  return hasComposerSkills(draft)
-    ? draft.split(/(\s+)/).map((part) => skillToken.test(part) ? "[Skill invocation]" : part).join("")
-    : draft;
+  return draft.split(/(\s+)/).map((part) => {
+    if (skillToken.test(part)) return part.startsWith("@command:") ? "[CLI command]" : "[Skill invocation]";
+    return stageToken.test(part) ? "[Pipeline action]" : part;
+  }).join("");
 }
 
-function completion(text: string, cursor: number) {
-  if (cursor < 0 || cursor > text.length || /\S/.test(text[cursor] ?? "")) return;
-  const token = /(?:^|\s)([@/][\w.:-]*)$/.exec(text.slice(0, cursor))?.[1];
-  if (!token) return;
-  const start = cursor - token.length;
-  if (token.startsWith("@skill:") || "@conversation".startsWith(token) && token.length > 3 || token.startsWith("@conversation")) return;
-  if (token.startsWith("/") && (start !== 0 || ["/btw", "/goal"].some((command) => command.startsWith(token) && token.length > 1))) return;
-  return { token, start, end: cursor };
+export function pipelineActionMarker(nodeId: string, marker: string) {
+  return `@stage:${encodeURIComponent(nodeId)}:${marker.slice(1)}`;
+}
+
+export function readPipelineActionMarker(token: string) {
+  const match = stageToken.exec(token);
+  if (!match) return;
+  try { return { nodeId: decodeURIComponent(match[1]!), marker: `@${match[2]}` }; }
+  catch { return undefined; }
 }
 
 export function useComposerCustomizations({ conversationId, selection, effort, mode, draft, cursor, enabled }: {
@@ -46,7 +53,8 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
   const [manual, setManual] = useState(false);
   const [dismissed, setDismissed] = useState<string>();
   const [index, setIndex] = useState(0);
-  const trigger = completion(draft, cursor);
+  const token = composerCompletion(draft, cursor);
+  const trigger = token?.trigger === "/" ? token : undefined;
   const completionKey = trigger && JSON.stringify([draft, cursor]);
   const pinnedTokens = draft.split(/\s+/).filter((token) => skillToken.test(token));
   const active = enabled && Boolean(selection && (manual || (trigger && dismissed !== completionKey)));
@@ -58,7 +66,7 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
     retry: false,
   });
   const available = query.data ?? [];
-  const needle = (manual ? "" : trigger?.token.slice(1) ?? "").toLocaleLowerCase();
+  const needle = (manual ? "" : trigger?.query ?? "").toLocaleLowerCase();
   const options = active ? available.filter(({ skill, marker }) => !pinnedTokens.includes(marker) &&
     [skill.name, skill.namespace, skill.path].some((value) => value?.toLocaleLowerCase().includes(needle))).slice(0, 20) : [];
   const highlighted = options.length ? Math.min(index, options.length - 1) : 0;
@@ -70,8 +78,8 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
   }
 
   return {
-    listId, active, options, highlighted, canOpen: enabled && Boolean(selection), error: query.error, loading: query.isPending,
-    pinned: pinnedTokens.map((token) => ({ token, option: available.find(({ marker }) => marker === token) })),
+    listId, active, manual, options, highlighted, canOpen: enabled && Boolean(selection), error: query.error, loading: query.isPending,
+    pinned: pinnedTokens.map((token) => ({ token, option: available.find(({ marker, unavailableReason }) => marker === token && !unavailableReason) })),
     dismiss,
     open() { setManual(true); setDismissed(undefined); setIndex(0); },
     move(delta: number) {
@@ -79,14 +87,11 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
     },
     pick(option: ComposerCustomization) {
       const selected = options.find(({ marker }) => marker === option.marker);
-      if (!selected) return { text: draft, cursor };
-      const range = trigger ?? { start: cursor, end: cursor };
-      const prefix = draft.slice(0, range.start);
-      const before = /\S$/.test(prefix) ? `${prefix} ` : prefix;
-      const insert = `${selected.marker} `;
-      const after = draft.slice(range.end).replace(/^ /, "");
+      if (!selected || selected.unavailableReason) return { text: draft, cursor };
+      const position = cursor < 0 ? draft.length : cursor;
+      const range = trigger ?? { start: position, end: position };
       dismiss();
-      return { text: `${before}${insert}${after}`, cursor: before.length + insert.length };
+      return replaceComposerCompletion(draft, range, selected.marker);
     },
     remove(token: string) {
       return draft.split(/(\s+)/).filter((part) => part !== token).join("").trimStart();
@@ -96,7 +101,7 @@ export function useComposerCustomizations({ conversationId, selection, effort, m
 
 type Picker = ReturnType<typeof useComposerCustomizations>;
 
-function actionLabel(option: ComposerCustomization) {
+export function composerActionLabel(option: ComposerCustomization) {
   const { name, namespace } = option.skill;
   return namespace ? `${namespace} · ${name}` : name;
 }
@@ -107,24 +112,32 @@ const availability = {
   filesystem: "Discovered · rechecked by CLI before dispatch",
 };
 
-export function ComposerCustomizationPicker({ picker, onPick, onRemove }: {
+export function composerActionDetail(option: ComposerCustomization) {
+  const route = option.route === "native_command" ? "Native CLI command"
+    : option.route === "markdown_context" ? "Pinned Markdown context" : "Codex skill input";
+  return [route, option.skill.path, availability[option.availability]].filter(Boolean).join(" · ");
+}
+
+export function ComposerCustomizationPicker({ picker, onPick, onRemove, showOptions = true, onOpen }: {
   picker: Picker;
   onPick: (option: ComposerCustomization) => void;
   onRemove: (token: string) => void;
+  showOptions?: boolean;
+  onOpen?: () => void;
 }) {
-  return <div className="grid gap-1">
+  return <div className="conv-skill-tool grid gap-1">
+    {(!picker.active || !showOptions) && <button type="button" className="conv-quiet-button conv-composer-tool justify-self-start" disabled={!picker.canOpen}
+      onClick={onOpen ?? picker.open}><Blocks size={15} aria-hidden /> Skills & plugin exports</button>}
     {picker.pinned.length > 0 && <ul aria-label="Selected skills and plugin exports" className="grid gap-1">
       {picker.pinned.map(({ token, option }, index) => <li key={`${token}:${index}`} className="flex flex-wrap items-center gap-x-2 break-all text-xs">
-        {option ? <><strong>{actionLabel(option)}</strong><span>{option.skill.path}</span>
-          <code title={option.skill.revision}>Revision {option.skill.revision.slice(0, 12)}</code></> :
+        {option ? <><strong>{composerActionLabel(option)}</strong><span>{option.skill.path || composerActionDetail(option)}</span>
+          {option.skill.revision && <code title={option.skill.revision}>Revision {option.skill.revision.slice(0, 12)}</code>}</> :
           <strong>{picker.loading ? "Loading skill selection…" : "Skill selection unavailable for this profile"}</strong>}
         <button type="button" className="conv-quiet-button" onClick={() => onRemove(token)}
-          aria-label={option ? `Remove ${actionLabel(option)}` : "Remove unavailable skill"}>Remove</button>
+          aria-label={option ? `Remove ${composerActionLabel(option)}` : "Remove unavailable skill"}>Remove</button>
       </li>)}
     </ul>}
-    {!picker.active && <button type="button" className="conv-quiet-button justify-self-start" disabled={!picker.canOpen}
-      onClick={picker.open}>Skills & plugin exports</button>}
-    {picker.active && <div className="pipeline-evidence grid gap-1">
+    {showOptions && picker.active && <div className="pipeline-evidence grid gap-1">
       <div className="flex justify-between gap-2 text-sm"><strong>Skills & plugin exports</strong>
         <button type="button" className="conv-quiet-button" onClick={picker.dismiss}>Close picker</button></div>
       {picker.loading && <p role="status" className="text-sm">Discovering customizations…</p>}
@@ -135,11 +148,11 @@ export function ComposerCustomizationPicker({ picker, onPick, onRemove }: {
       {picker.options.length > 0 && <div id={picker.listId} role="listbox" aria-label="Skill and plugin invocations"
         className="grid max-h-44 gap-1 overflow-auto">
         {picker.options.map((option, index) => <button type="button" key={option.marker} id={`${picker.listId}-${index}`}
-          role="option" aria-selected={index === picker.highlighted} onClick={() => onPick(option)}
+          role="option" aria-selected={index === picker.highlighted} disabled={Boolean(option.unavailableReason)} onClick={() => onPick(option)}
           className="grid gap-0.5 break-all rounded px-2 py-1 text-left aria-selected:bg-accent">
-          <strong className="text-sm">{actionLabel(option)}</strong>
-          <span className="text-xs">Codex skill input · {option.skill.path}</span>
-          <small className="text-muted-foreground">{availability[option.availability]}</small>
+          <strong className="text-sm">{composerActionLabel(option)}</strong>
+          <span className="text-xs">{composerActionDetail(option)}</span>
+          {option.unavailableReason && <small className="text-muted-foreground">{option.unavailableReason}</small>}
         </button>)}
       </div>}
     </div>}

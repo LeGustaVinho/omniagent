@@ -38,7 +38,14 @@ export const ITERATION_PORT_FIELDS = [
 ] as const;
 
 export const START_VALUE_TYPES = ["text", "number", "boolean", "null", "object", "array"] as const;
-export type WorkflowStartField = { name: string; valueType: typeof START_VALUE_TYPES[number]; required: boolean };
+export const CONVERSATION_START_INPUT_TYPES = { message: "text", history: "array" } as const;
+export type ConversationStartSource = keyof typeof CONVERSATION_START_INPUT_TYPES;
+export type WorkflowStartField = {
+  name: string;
+  valueType: typeof START_VALUE_TYPES[number];
+  required: boolean;
+  conversationSource?: ConversationStartSource;
+};
 
 export function isStartNode(kind: string) {
   return kind === "start" || kind === "typed_start";
@@ -223,9 +230,15 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
     }
     case "typed_start": {
       const fields = Array.isArray(configuration.fields) ? configuration.fields : null;
-      return fields?.every((field) => typeof field?.name === "string" && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(field.name) &&
-        START_VALUE_TYPES.includes(field.valueType) && typeof field.required === "boolean") &&
-        new Set(fields.map(({ name }) => name)).size === fields.length ? null : "Use unique input names starting with a letter or underscore.";
+      if (!fields?.every((field) => typeof field?.name === "string" && /^[A-Za-z_][A-Za-z0-9_-]{0,159}$/.test(field.name)) ||
+        new Set(fields.map(({ name }) => name)).size !== fields.length) return "Use unique input names starting with a letter or underscore.";
+      if (!fields.every(({ valueType, required }) => START_VALUE_TYPES.includes(valueType) && typeof required === "boolean")) {
+        return "Choose a valid type and required setting for every Start input.";
+      }
+      return fields.every(({ conversationSource, valueType }) => conversationSource == null ||
+        (Object.hasOwn(CONVERSATION_START_INPUT_TYPES, conversationSource) &&
+          CONVERSATION_START_INPUT_TYPES[conversationSource as ConversationStartSource] === valueType))
+        ? null : "Use Text for a conversation message and Array for conversation history.";
     }
     case "request_input":
       return typeof configuration.message === "string" && configuration.message.trim() && Array.isArray(configuration.fields) && configuration.fields.length

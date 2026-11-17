@@ -295,6 +295,7 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &context.conversation_id)?;
+                conversation.require_direct_turn()?;
                 ensure!(
                     instructions::preserves_destination(
                         &tx,

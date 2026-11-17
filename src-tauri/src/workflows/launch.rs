@@ -55,13 +55,20 @@ pub enum WorkflowLaunchOrigin {
         event_id: String,
         work_id: String,
     },
+    Conversation {
+        conversation_id: String,
+        request_id: String,
+        work_id: Option<String>,
+        event_id: Option<String>,
+    },
 }
 
 impl WorkflowLaunchOrigin {
-    fn work_id(&self) -> Option<&str> {
+    pub(super) fn work_id(&self) -> Option<&str> {
         match self {
             Self::Editor { .. } => None,
             Self::Agile { work_id, .. } | Self::Rule { work_id, .. } => Some(work_id),
+            Self::Conversation { work_id, .. } => work_id.as_deref(),
         }
     }
 
@@ -73,6 +80,15 @@ impl WorkflowLaunchOrigin {
             Self::Rule {
                 rule_id, event_id, ..
             } => ("rule", rule_id.as_str(), event_id.as_str()),
+            Self::Conversation {
+                conversation_id,
+                request_id,
+                ..
+            } => (
+                "conversation",
+                conversation_id.as_str(),
+                request_id.as_str(),
+            ),
         };
         ensure!(
             !key.1.trim().is_empty() && key.1.len() <= 256,
@@ -116,10 +132,10 @@ pub enum WorkflowLaunchRequest {
     Typed(TypedWorkflowLaunch),
 }
 
-struct LaunchEntry {
-    checkout_id: String,
-    document_revision_id: Option<String>,
-    inputs: Map<String, Value>,
+pub(super) struct LaunchEntry {
+    pub checkout_id: String,
+    pub document_revision_id: Option<String>,
+    pub inputs: Map<String, Value>,
 }
 
 impl From<WorkflowLaunchSource> for LaunchEntry {
@@ -366,7 +382,7 @@ pub(crate) fn launch_workflow_in_tx(
     )
 }
 
-fn launch_entry_in_tx(
+pub(super) fn launch_entry_in_tx(
     db: &Connection,
     project: &str,
     revision: &WorkflowRevision,
@@ -395,6 +411,25 @@ fn launch_entry_in_tx(
         return load_workflow_run(db, project, &receipt.workflow_run_id)?
             .context("The saved workflow launch lost its run");
     }
+    let prepared = prepare_entry(db, project, revision, &entry, origin)?;
+    persist_entry(db, project, revision, entry, origin, &key, prepared)
+}
+
+pub(super) struct PreparedLaunch {
+    pub workflow: super::WorkflowDefinition,
+    work: Option<TaskReference>,
+    event: Option<WorkflowLaunchEvent>,
+    document: Option<RepositoryMarkdownRevision>,
+    checklist_item: Option<ChecklistProgressReceipt>,
+}
+
+pub(super) fn prepare_entry(
+    db: &Connection,
+    project: &str,
+    revision: &WorkflowRevision,
+    entry: &LaunchEntry,
+    origin: &WorkflowLaunchOrigin,
+) -> Result<PreparedLaunch> {
     validate_workflow_launch_checkout(db, project, &entry.checkout_id)?;
     let work = if let Some(work) = origin.work_id() {
         let exists: bool = db.query_row(
@@ -448,7 +483,7 @@ fn launch_entry_in_tx(
             .as_ref()
             .context("The typed Start fields are unavailable")?;
         ensure!(
-            event.is_none() || schema.accepts_automation(),
+            !matches!(origin, WorkflowLaunchOrigin::Rule { .. }) || schema.accepts_automation(),
             "This workflow requires inputs supplied at manual launch"
         );
         configuration.validate_values(&entry.inputs)?;
@@ -462,7 +497,7 @@ fn launch_entry_in_tx(
         );
         ensure!(
             !schema.requires_event || event.is_some(),
-            "This workflow needs an Agile event from an automation rule"
+            "Select a recorded Agile event for the Start event port"
         );
     } else {
         ensure!(
@@ -475,6 +510,45 @@ fn launch_entry_in_tx(
         );
     }
 
+    Ok(PreparedLaunch {
+        workflow,
+        work,
+        event,
+        document,
+        checklist_item,
+    })
+}
+
+fn persist_entry(
+    db: &Connection,
+    project: &str,
+    revision: &WorkflowRevision,
+    entry: LaunchEntry,
+    origin: &WorkflowLaunchOrigin,
+    key: &str,
+    prepared: PreparedLaunch,
+) -> Result<WorkflowRun> {
+    let PreparedLaunch {
+        workflow,
+        work,
+        event,
+        document,
+        checklist_item,
+    } = prepared;
+    let start = workflow
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.definition.kind,
+                BuiltinNode::Start | BuiltinNode::TypedStart
+            )
+        })
+        .context("The published workflow has no Start node")?;
+    let typed = matches!(
+        &start.instance.configuration,
+        NodeConfiguration::TypedStart(_)
+    );
     let run = insert_workflow_run(db, project, &workflow)?;
     if let Some(event) = &event {
         bind_workflow_trigger_origin(db, project, &run.id, &event.id)?;
@@ -503,7 +577,7 @@ fn launch_entry_in_tx(
             )
         })
         .transpose()?;
-    if schema.is_some() {
+    if typed {
         let input_output = record_entry_output(
             db,
             project,
@@ -619,11 +693,21 @@ fn origin_launch_event(
     project: &str,
     origin: &WorkflowLaunchOrigin,
 ) -> Result<Option<WorkflowLaunchEvent>> {
-    let WorkflowLaunchOrigin::Rule {
-        event_id, work_id, ..
-    } = origin
-    else {
-        return Ok(None);
+    let (event_id, work_id) = match origin {
+        WorkflowLaunchOrigin::Rule {
+            event_id, work_id, ..
+        } => (event_id, work_id),
+        WorkflowLaunchOrigin::Conversation {
+            event_id: Some(event_id),
+            work_id,
+            ..
+        } => (
+            event_id,
+            work_id
+                .as_ref()
+                .context("Select the work item associated with the Agile event")?,
+        ),
+        _ => return Ok(None),
     };
     let payload: String = db.query_row(
         "SELECT payload FROM project_work_events WHERE id = ?1 AND project_id = ?2 AND task_id = ?3",

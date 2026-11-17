@@ -320,6 +320,90 @@ pub(crate) fn record_conversation_excerpt(
     Ok(artifact)
 }
 
+pub(crate) fn record_recent_conversation_excerpt(
+    db: &Connection,
+    conversation_id: &str,
+    context_id: &str,
+    max_bytes: usize,
+) -> Result<ConversationArtifactRevision> {
+    let id = Uuid::new_v4().to_string();
+    let empty = ConversationArtifactRevision::Excerpt {
+        id: id.clone(),
+        source_context_id: context_id.to_owned(),
+        excerpts: Vec::new(),
+    };
+    let mut remaining = max_bytes.saturating_sub(serde_json::to_vec(&empty)?.len());
+    let entries = context_entries(db, conversation_id, context_id)?;
+    let mut excerpts = Vec::new();
+    for entry in entries.iter().rev() {
+        let message = load_messages(db, conversation_id, std::slice::from_ref(entry))?
+            .pop()
+            .context("selected source revision is unavailable")?;
+        if message.text.is_empty() {
+            continue;
+        }
+        let origin = message_origin(db, &message.revision_id)?
+            .context("selected source revision is unavailable")?;
+        let end = message.text.len();
+        let mut excerpt = ExcerptSource {
+            source: ArtifactSource {
+                origin,
+                byte_range: ByteRange { start: 0, end },
+            },
+            role: message.role,
+            text: message.text,
+        };
+        let separator = usize::from(!excerpts.is_empty());
+        let mut size = serde_json::to_vec(&excerpt)?.len() + separator;
+        if size > remaining {
+            // Only the newest message may be clipped. Keep whole older messages in order.
+            if !excerpts.is_empty() {
+                break;
+            }
+            let text = std::mem::take(&mut excerpt.text);
+            let overhead = serde_json::to_vec(&excerpt)?.len() + end.to_string().len();
+            let start = recent_text_start(&text, remaining.saturating_sub(overhead));
+            if start == end {
+                break;
+            }
+            excerpt.source.byte_range.start = start;
+            excerpt.text = text[start..].to_owned();
+            size = serde_json::to_vec(&excerpt)?.len();
+        }
+        remaining -= size;
+        excerpts.push(excerpt);
+    }
+    ensure!(
+        !excerpts.is_empty(),
+        "No saved messages fit in this draft reference"
+    );
+    excerpts.reverse();
+    let artifact = ConversationArtifactRevision::Excerpt {
+        id,
+        source_context_id: context_id.to_owned(),
+        excerpts,
+    };
+    save(db, conversation_id, None, &artifact)?;
+    Ok(artifact)
+}
+
+fn recent_text_start(text: &str, mut budget: usize) -> usize {
+    let mut start = text.len();
+    for (offset, character) in text.char_indices().rev() {
+        let bytes = match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            '\u{0}'..='\u{1f}' => 6,
+            character => character.len_utf8(),
+        };
+        if bytes > budget {
+            break;
+        }
+        budget -= bytes;
+        start = offset;
+    }
+    start
+}
+
 fn selected_sources(
     db: &Connection,
     selection: &ConversationSelection,

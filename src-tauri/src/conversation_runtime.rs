@@ -135,11 +135,11 @@ pub async fn conversation_next_prompt_instructions(
 pub async fn conversation_library(
     store: State<'_, Store>,
     query: Option<String>,
-    project_id: Option<String>,
+    project_id: String,
     archived: Option<bool>,
 ) -> Result<Vec<ConversationLibraryEntry>, String> {
     store
-        .conversation_library_view(query, project_id, archived.unwrap_or_default())
+        .conversation_library_view(query, Some(project_id), archived.unwrap_or_default())
         .await
         .map_err(ui_error)
 }
@@ -147,10 +147,10 @@ pub async fn conversation_library(
 #[tauri::command]
 pub async fn conversation_library_sections(
     store: State<'_, Store>,
-    project_id: Option<String>,
+    project_id: String,
 ) -> Result<Vec<ConversationLibrarySection>, String> {
     store
-        .conversation_library_sections(project_id)
+        .conversation_library_sections(Some(project_id))
         .await
         .map_err(ui_error)
 }
@@ -262,6 +262,7 @@ pub async fn start_conversation_turn(
             "Direct conversation turns require a read-only or planning profile"
         );
         let conversation = store.conversation(conversation_id.clone()).await?;
+        conversation.require_direct_turn()?;
         let scope =
             selected_scope(&store, conversation.checkout_id, selection, effort, mode).await?;
         store

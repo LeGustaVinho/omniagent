@@ -297,6 +297,38 @@ pub(super) fn recorded_control(
     }).collect()
 }
 
+pub(super) enum StageAvailability {
+    Waiting,
+    Skipped,
+    Ready(super::NodeInputs),
+}
+
+pub(super) fn conversation_stage_availability(
+    db: &Connection,
+    definition: &WorkflowDefinition,
+    run: &WorkflowRun,
+    node: &PinnedNode,
+    unit: Option<&str>,
+) -> Result<StageAvailability> {
+    let state = Evaluation::new(db, definition, run)?;
+    let mut inputs = super::NodeInputs::new();
+    let mut pending = false;
+    for wire in definition.wires.iter().filter(|wire| wire.to.node == node.instance.id) {
+        match state.dependency(wire, unit)? {
+            Arrival::Ignored => return Ok(StageAvailability::Skipped),
+            Arrival::Pending => pending = true,
+            Arrival::Selected(artifact) => {
+                let data = node.definition.inputs.iter().any(|port|
+                    port.name == wire.to.port && matches!(port.value, PortType::Data(_)));
+                if let (true, Some(artifact)) = (data, artifact) {
+                    inputs.insert(wire.to.port.clone(), artifact.id);
+                }
+            }
+        }
+    }
+    Ok(if pending { StageAvailability::Waiting } else { StageAvailability::Ready(inputs) })
+}
+
 pub(super) fn require_dependencies(
     db: &Connection,
     definition: &WorkflowDefinition,

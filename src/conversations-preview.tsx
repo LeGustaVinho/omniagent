@@ -4,10 +4,12 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ConversationEmptyState, ConversationLibraryGroup, ConversationLibraryLayout, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import {
-  createLibrary, createPreviewConversation, primaryProject,
+  createLibrary, createPreviewConversation, previewDeliveryPipeline, primaryProject,
   type PreviewConversation, type PreviewLibrary, type PreviewMessage,
 } from "@/conversation-preview-data";
 import { PreviewConversationPanel } from "@/conversation-preview-panel";
+import type { ConversationPipelineChoice } from "@/bindings/ConversationPipelineChoice";
+import { ConversationPipelinePicker, directConversationChoice, repositoryDeliveryChoice } from "@/conversation-pipeline-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type PreviewWorkspaceProps = WorkspaceProps & { compact?: boolean };
@@ -21,7 +23,7 @@ type LibraryDialog = {
 };
 
 function selectConversation(library: PreviewLibrary, conversationId: string): PreviewLibrary {
-  if (!library.conversations.some(({ id }) => id === conversationId)) return library;
+  if (!library.conversations.some(({ id, project }) => id === conversationId && project === primaryProject)) return library;
   return {
     ...library,
     activeId: conversationId,
@@ -45,7 +47,6 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
   const { target, compact = false } = props;
   const [library, setLibrary] = useState(createLibrary);
   const [filter, setFilter] = useState("");
-  const [allProjects, setAllProjects] = useState(false);
   const [archived, setArchived] = useState(false);
   const [mobileLibrary, setMobileLibrary] = useState(false);
   const [notice, setNotice] = useState("");
@@ -54,6 +55,8 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
   const [dialogError, setDialogError] = useState("");
   const [forkTarget, setForkTarget] = useState("current");
   const [deleteCopies, setDeleteCopies] = useState(false);
+  const [pipelinePicker, setPipelinePicker] = useState(false);
+  const creationTrigger = useRef<HTMLElement | null>(null);
   const libraryRef = useRef<HTMLElement>(null);
   const libraryToggle = useRef<HTMLButtonElement>(null);
 
@@ -62,14 +65,13 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
   }, [target]);
 
   const current = library.conversations.find(({ id }) => id === library.activeId);
-  const scope = current?.project ?? primaryProject;
   const matching = library.conversations.filter((conversation) =>
-    conversation.archived === archived && (allProjects || conversation.project === scope)
+    conversation.archived === archived && conversation.project === primaryProject
     && conversation.title.toLowerCase().includes(filter.trim().toLowerCase()));
   const groups = new Map<string, PreviewConversation[]>();
   for (const conversation of matching) {
     const group = conversation.pinned && !archived ? "Pinned"
-      : [allProjects ? conversation.project : null, conversation.section ?? "Conversations"].filter(Boolean).join(" · ");
+      : conversation.section ?? "Conversations";
     groups.set(group, [...(groups.get(group) ?? []), conversation]);
   }
 
@@ -98,10 +100,17 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
     });
   }
 
-  function createConversation() {
+  function choosePipeline() {
+    creationTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPipelinePicker(true);
+  }
+
+  function createConversation(pipeline: ConversationPipelineChoice) {
+    setPipelinePicker(false);
     setLibrary((current) => {
       const id = `conversation-${current.nextId}`;
-      const next = createPreviewConversation(id, `New conversation ${current.nextId}`, scope);
+      const next = { ...createPreviewConversation(id, `New conversation ${current.nextId}`),
+        pipeline: pipeline.kind === "repository_delivery" ? previewDeliveryPipeline : directConversationChoice.pipeline };
       return selectConversation({
         ...current, nextId: current.nextId + 1, conversations: [...current.conversations, next],
       }, id);
@@ -172,7 +181,7 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
         const id = `conversation-${current.nextId}`;
         const next = {
           ...createPreviewConversation(id, `Fork of ${selected.title}`, selected.project),
-          messages: selected.messages.slice(0, lastIndex + 1), forkOf: selected.id,
+          messages: selected.messages.slice(0, lastIndex + 1), forkOf: selected.id, pipeline: selected.pipeline,
           worktree: forkTarget === "new" ? `example-fork-${current.nextId}` : selected.worktree,
         };
         return selectConversation({
@@ -216,14 +225,10 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
   }[dialog.action] : "";
   const navigation = <ConversationNavigation compact={compact} open={!compact || mobileLibrary} onOpenChange={changeMobileLibrary}>
     <ConversationLibraryLayout sectionRef={libraryRef} className="conv-example-sidebar" query={filter} searchLabel="Filter conversations"
-      onQuery={setFilter} onCreate={createConversation} filters={<>
-        <select className="conv-select conv-project-filter" aria-label="Conversation project scope" value={allProjects ? "all" : "current"}
-          onChange={(event) => setAllProjects(event.currentTarget.value === "all")}>
-          <option value="current">{scope}</option><option value="all">All projects</option>
-        </select>
-        <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
+      onQuery={setFilter} onCreate={choosePipeline} searchAction={
+        <button type="button" className="conv-icon-button aria-pressed:bg-muted aria-pressed:text-primary" aria-label="Archived" aria-pressed={archived}
           title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
-      </>}>
+      }>
         {orderedGroups.map(([group, conversations]) => (
           <ConversationLibraryGroup key={group} title={group}>
             {conversations.map((conversation) => (
@@ -271,8 +276,10 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
           onFork={(message) => openDialog("fork", current, message)}
           onRewind={(message) => openDialog("rewind", current, message)} />
           : <ConversationEmptyState title="No conversation open">
-            <button type="button" className="conv-primary-button" onClick={createConversation}>New conversation</button>
+            <button type="button" className="conv-primary-button" onClick={choosePipeline}>New conversation</button>
           </ConversationEmptyState>}
+      {pipelinePicker && <ConversationPipelinePicker options={[directConversationChoice, repositoryDeliveryChoice]}
+        onCreate={createConversation} onClose={() => setPipelinePicker(false)} opener={creationTrigger.current} />}
       {dialog && <Dialog.Root open onOpenChange={(open) => { if (!open) setDialog(undefined); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="conv-dialog-scrim" />

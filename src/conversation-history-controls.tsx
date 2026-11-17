@@ -1,7 +1,7 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
-import { GitFork, History, Pencil, RotateCcw } from "lucide-react";
+import { ChevronRight, GitFork, History, Pencil, RotateCcw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useContext, useState } from "react";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
@@ -118,7 +118,7 @@ function HistoryDeletionGate({ conversationId, history, disabled }: {
 }) {
   const [open, setOpen] = useState(false);
   return <details className="mt-2" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary className="conv-quiet-button cursor-pointer">Delete a revision or diff</summary>
+    <summary className="conv-history-disclosure"><Trash2 size={15} aria-hidden /> Delete a revision or diff <ChevronRight size={14} aria-hidden /></summary>
     {open && <ConversationHistoryDeletion conversationId={conversationId} history={history} disabled={disabled} />}
   </details>;
 }
@@ -225,12 +225,14 @@ export function ConversationHistoryControls(props: HistoryProps) {
     </Dialog.Trigger>
     {showing && props.history && <Dialog.Portal>
       <Dialog.Overlay className="conv-dialog-scrim" />
-      <Dialog.Content className="conv-dialog max-h-[85vh] overflow-y-auto">
-        <Dialog.Title>Conversation history</Dialog.Title>
-        <Dialog.Description>Choose a history boundary and review the resulting dialogue.</Dialog.Description>
+      <Dialog.Content className="conv-dialog conv-dialog-layout conv-history-dialog" aria-describedby={undefined}>
+        <header className="conv-dialog-header">
+          <span className="conv-dialog-mark"><History size={20} aria-hidden /></span>
+          <Dialog.Title>Conversation history</Dialog.Title>
+          <Dialog.Close asChild><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close history" disabled={pending}><X size={17} aria-hidden /></Button></Dialog.Close>
+        </header>
         <HistoryActionForm key={action ? `${action.kind}:${action.revisionId}:${action.sourceContextId ?? "active"}` : "head"}
           {...props} history={props.history} close={close} requestedAction={action} onArchivedAction={setArchivedAction} />
-        {!action && <HistoryDeletionGate conversationId={props.conversationId} history={props.history} disabled={props.disabled || pending} />}
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
@@ -242,6 +244,8 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
   const [kind, setKind] = useState<ConversationMessageHistoryAction["kind"] | "clear">(requestedAction?.kind ?? "clear");
   const [selected, setSelected] = useState(requestedAction?.revisionId ?? "");
   const [forkTitle, setForkTitle] = useState(`${title} (fork)`);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [earlierOpen, setEarlierOpen] = useState(false);
   const [edit, setEdit] = useState(history.messages.find(({ revisionId }) => revisionId === requestedAction?.revisionId)?.text ?? "");
   const sourceContextId = requestedAction?.sourceContextId;
   const fork = kind === "fork" || kind === "edit";
@@ -304,8 +308,13 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
   const changed = history.contextId !== baseId;
   const invalid = (kind === "rewind" && !message) || (kind === "fork" && Boolean(selected) && !message)
     || (kind === "edit" && (message?.role !== "user" || !edit.trim())) || (fork && !forkTitle.trim()) || (Boolean(sourceContextId) && !message);
+  const ActionIcon = kind === "clear" ? Trash2 : fork ? GitFork : RotateCcw;
+  const outcome = kind === "clear" ? "Your next prompt starts fresh. Earlier messages stay in History."
+    : kind === "rewind" ? "Keep messages through the selected point. Later messages stay in History."
+      : "Start a separate conversation from the selected messages.";
 
-  return <div className="conv-dialog-form">
+  return <>
+      <div className="conv-dialog-body conv-dialog-form conv-history-form">
           {requestedAction?.kind !== "edit" && !sourceContextId && <label>Action
             <select value={kind} disabled={lock} onChange={(event) => {
               const next = event.currentTarget.value as "clear" | "rewind" | "fork";
@@ -318,18 +327,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
               <option value="fork">Fork conversation</option>
             </select>
           </label>}
-          {!fork && <>
-          <label>
-            Queued work after context changes
-            <select value={(save.isPending ? save.variables : policy.data?.conversationOverride) ?? ""}
-              disabled={!policy.data || lock}
-              onChange={(event) => save.mutate(event.currentTarget.value ? event.currentTarget.value as QueueHistoryPolicy : null)}>
-              <option value="">{policy.data ? `Use project default · ${policies[policy.data.projectDefault]}` : "Loading policy…"}</option>
-              {policyOptions()}
-            </select>
-          </label>
-          <NextPromptScope conversationId={conversationId} mode={mode} selection={selection} effort={effort} />
-          </>}
+          <p className="conv-history-outcome"><ActionIcon size={17} aria-hidden /> {outcome}</p>
           {(kind === "rewind" || kind === "fork") && <label>
             {kind === "fork" ? "Fork through" : "Keep messages through"}
             <select value={selected} disabled={disabled || lock || !messages.length || changed}
@@ -346,16 +344,33 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
             <ForkCheckoutReview form={checkoutReview} disabled={disabled || lock || changed} />
           </>}
           {kind === "edit" && <label>Edit user message <textarea value={edit} rows={4} disabled={disabled || lock} onChange={(event) => setEdit(event.currentTarget.value)} /></label>}
-          {kind !== "clear" && <details><summary>Retained dialogue preview · {prefix.length} messages</summary>
-            {prefix.length ? <HistoryMessages messages={kind === "edit" ? prefix.map((entry) => entry.revisionId === selected ? { ...entry, text: edit } : entry) : prefix} /> : <p>The fork starts with empty dialogue.</p>}
+          {kind !== "clear" && <details className="conv-history-details"><summary className="conv-history-disclosure"><History size={15} aria-hidden /> Preview · {prefix.length} messages <ChevronRight size={14} aria-hidden /></summary>
+            <div className="conv-history-details-body">{prefix.length ? <HistoryMessages messages={kind === "edit" ? prefix.map((entry) => entry.revisionId === selected ? { ...entry, text: edit } : entry) : prefix} /> : <p>The fork starts with empty dialogue.</p>}</div>
           </details>}
-          {kind === "clear" && <p>The next context starts with empty dialogue. Previous messages remain available below after clearing.</p>}
-          <details><summary>Inspect earlier context</summary><ConversationPreviousRevisions conversationId={conversationId}
-            openConversation={(source) => { close(); openFork(source); }} onArchivedAction={!disabled && !lock && !changed ? onArchivedAction : undefined} /></details>
+          {(!fork || !requestedAction) && <details className="conv-history-details" onToggle={(event) => setOptionsOpen(event.currentTarget.open)}>
+            <summary className="conv-history-disclosure"><SlidersHorizontal size={15} aria-hidden /> Options <ChevronRight size={14} aria-hidden /></summary>
+            {optionsOpen && <div className="conv-history-details-body">
+              {!fork && <><label>Queued work after context changes
+                <select value={(save.isPending ? save.variables : policy.data?.conversationOverride) ?? ""} disabled={!policy.data || lock}
+                  onChange={(event) => save.mutate(event.currentTarget.value ? event.currentTarget.value as QueueHistoryPolicy : null)}>
+                  <option value="">{policy.data ? `Use project default · ${policies[policy.data.projectDefault]}` : "Loading policy…"}</option>
+                  {policyOptions()}
+                </select>
+              </label>
+              <NextPromptScope conversationId={conversationId} mode={mode} selection={selection} effort={effort} /></>}
+              {!requestedAction && <HistoryDeletionGate conversationId={conversationId} history={history} disabled={disabled || lock} />}
+            </div>}
+          </details>}
+          <details className="conv-history-details" onToggle={(event) => setEarlierOpen(event.currentTarget.open)}>
+            <summary className="conv-history-disclosure"><History size={15} aria-hidden /> Inspect earlier context <ChevronRight size={14} aria-hidden /></summary>
+            {earlierOpen && <div className="conv-history-details-body"><ConversationPreviousRevisions conversationId={conversationId}
+              openConversation={(source) => { close(); openFork(source); }} onArchivedAction={!disabled && !lock && !changed ? onArchivedAction : undefined} /></div>}
+          </details>
           {disabled && <p role="status">Wait for the active turn to stop before changing history.</p>}
           {changed && <p role="alert">The conversation context changed. Reopen History to review the current messages.</p>}
           {(policy.error || save.error || change.error || archive.error) && <p className="conv-alert" role="alert">{String(policy.error || save.error || change.error || archive.error)}</p>}
-          <footer>
+      </div>
+          <footer className="conv-dialog-actions">
             <Dialog.Close asChild><Button type="button" variant="outline" disabled={lock}>Close</Button></Dialog.Close>
             <Button type="button"
               disabled={disabled || lock || changed || invalid || (fork ? !checkoutReview.confirmed?.previewId : !policy.data)}
@@ -363,5 +378,5 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
               {kind === "clear" ? "Confirm clear" : kind === "rewind" ? "Confirm rewind" : kind === "edit" ? "Create fork with edit" : "Create fork"}
             </Button>
           </footer>
-        </div>;
+        </>;
 }

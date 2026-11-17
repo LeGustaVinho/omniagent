@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { ArrowUpRight, CircleAlert, CircleCheck, Clock3, FileCheck, ListChecks, Play, RotateCcw, SkipForward, X, XCircle, Zap } from "lucide-react";
+import { Dialog } from "radix-ui";
+import { useRef, useState } from "react";
 import type { InstructionDelivery } from "@/bindings/InstructionDelivery";
+import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { PendingInstruction } from "@/bindings/PendingInstruction";
 import { Button } from "@/components/ui/button";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { conversationSkillMessage } from "@/conversation-customization-picker";
 import { queueBlockerReason } from "@/queue-model";
+import "./conversation-instructions.css";
 
 const deliveryLabels: Record<InstructionDelivery, string> = {
   queued: "Queued instruction",
@@ -21,6 +27,22 @@ export type InstructionDeliveryEvidence = {
   state: "claimed" | "prepared" | "accepted" | "rejected" | "unconfirmed" | "undelivered" | "discarded";
   canResolve: boolean;
 };
+
+const deliveryState = {
+  claimed: { label: "Awaiting dispatch", icon: Clock3, tone: "neutral" },
+  prepared: { label: "Dispatch prepared", icon: FileCheck, tone: "neutral" },
+  accepted: { label: "Delivered", icon: CircleCheck, tone: "success" },
+  rejected: { label: "Returned to queue", icon: RotateCcw, tone: "neutral" },
+  unconfirmed: { label: "Delivery needs review", icon: CircleAlert, tone: "warning" },
+  undelivered: { label: "Confirmed undelivered", icon: RotateCcw, tone: "neutral" },
+  discarded: { label: "Discarded after review", icon: XCircle, tone: "neutral" },
+} satisfies Record<InstructionDeliveryEvidence["state"], { label: string; icon: typeof Clock3; tone: string }>;
+
+const deliveryRoute = {
+  steering: { label: "Active turn", icon: Zap },
+  continuation: { label: "Next turn", icon: SkipForward },
+  standalone: { label: "Separate run", icon: Play },
+} satisfies Record<InstructionDeliveryEvidence["route"], { label: string; icon: typeof Play }>;
 
 export function useConversationInstructions(conversationId: string, visible: boolean) {
   const queryClient = useQueryClient();
@@ -42,7 +64,8 @@ export function useConversationInstructions(conversationId: string, visible: boo
     queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] }),
     queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
   ]);
-  return { data: query.data ?? [], deliveries: deliveries.data ?? [], error: query.error, refresh };
+  return { data: query.data ?? [], deliveries: deliveries.data ?? [], error: query.error, refresh,
+    deliveryPending: deliveries.isPending, deliveryError: deliveries.error, reloadDeliveries: deliveries.refetch };
 }
 
 function InstructionRow({ item, conversationId, refresh }: {
@@ -90,29 +113,37 @@ function InstructionRow({ item, conversationId, refresh }: {
   </li>;
 }
 
-function DeliveryEvidence({ item, conversationId, openRun, refresh }: {
+function DeliveryEvidence({ item, instruction, conversationId, openRun, refresh }: {
   item: InstructionDeliveryEvidence;
+  instruction?: string;
   conversationId: string;
   openRun: (runId: string) => void;
   refresh: () => Promise<unknown>;
 }) {
   const { instructionId, revisionId, runId, state } = item;
+  const runLink = useRef<HTMLButtonElement>(null);
   const resolve = useMutation({
     mutationFn: (confirmedUndelivered: boolean) => invoke("resolve_uncertain_steering", {
       conversationId, instructionId, revisionId, runId, confirmedUndelivered,
     }),
+    onSuccess: () => runLink.current?.focus({ preventScroll: true }),
     onSettled: refresh,
   });
-  const labels: Record<InstructionDeliveryEvidence["state"], string> = {
-    claimed: "Awaiting dispatch", prepared: "Dispatch prepared", accepted: "Delivered", rejected: "Returned to queue",
-    unconfirmed: "Delivery needs review", undelivered: "Confirmed undelivered", discarded: "Discarded after review",
-  };
-  return <li className="conv-queued grid gap-1">
-    <strong>{labels[state]} · {item.route === "steering" ? "Active turn" : "Next turn"}</strong>
-    <button type="button" className="conv-quiet-button justify-self-start" onClick={() => openRun(runId)}>
-      {state === "accepted" ? "Open receiving turn" : "Open delivery attempt"}
-    </button>
-    {item.canResolve && <div className="flex flex-wrap gap-2">
+  const { icon: StatusIcon, label: status, tone } = deliveryState[state];
+  const { icon: RouteIcon, label: route } = deliveryRoute[item.route];
+  return <li className="instruction-delivery-row">
+    <div className="instruction-delivery-details">
+      {instruction ? <p className="instruction-delivery-prompt" title={instruction}>{instruction}</p>
+        : <p className="instruction-delivery-reference" title={revisionId}>Instruction <code>{revisionId.slice(0, 8)}</code></p>}
+      <div className="instruction-delivery-facts">
+        <span className="instruction-delivery-status" data-tone={tone}><StatusIcon size={14} aria-hidden /> {status}</span>
+        <span><RouteIcon size={14} aria-hidden /> {route}</span>
+      </div>
+    </div>
+    <Button ref={runLink} type="button" variant="ghost" className="instruction-delivery-link" onClick={() => openRun(runId)}>
+      {state === "accepted" ? "Open receiving turn" : "Open delivery attempt"} <ArrowUpRight size={15} aria-hidden />
+    </Button>
+    {item.canResolve && <div className="instruction-delivery-review">
       <Button type="button" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(true)}>Confirm undelivered and queue</Button>
       <Button type="button" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(false)}>Discard instruction</Button>
     </div>}
@@ -120,23 +151,91 @@ function DeliveryEvidence({ item, conversationId, openRun, refresh }: {
   </li>;
 }
 
-export function ConversationInstructions({ conversationId, instructions, openRun }: {
+export function ConversationInstructions({ conversationId, instructions }: {
   conversationId: string;
   instructions: ReturnType<typeof useConversationInstructions>;
-  openRun: (runId: string) => void;
 }) {
   return <>
     {instructions.data.length > 0 && <ol aria-label="Pending instructions" className="grid max-h-44 gap-1.5 overflow-y-auto">
       {instructions.data.map((item) => <InstructionRow key={item.id} item={item}
         conversationId={conversationId} refresh={instructions.refresh} />)}
     </ol>}
-    {instructions.deliveries.length > 0 && <details className="conv-pending-instruction">
-      <summary>Instruction delivery history</summary>
-      <ol className="grid max-h-44 gap-1.5 overflow-y-auto">
-        {instructions.deliveries.map((item) => <DeliveryEvidence key={`${item.instructionId}:${item.runId}`} item={item}
-          conversationId={conversationId} openRun={openRun} refresh={instructions.refresh} />)}
-      </ol>
-    </details>}
     {instructions.error && <p role="alert" className="conv-alert">{String(instructions.error)}</p>}
   </>;
+}
+
+export function ConversationInstructionHistory({ conversationId, instructions, messages, openRun }: {
+  conversationId: string;
+  instructions: ReturnType<typeof useConversationInstructions>;
+  messages: MessageRevision[];
+  openRun: (runId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const nextRun = useRef<string>(undefined);
+  const reviewCount = instructions.deliveries.filter(({ canResolve }) => canResolve).length;
+  const references = open ? new Map<string, string>() : undefined;
+  if (references) {
+    for (const { revisionId, text } of messages) references.set(revisionId, text);
+    for (const { revisionId, text } of instructions.data) references.set(revisionId, text);
+  }
+
+  function openDeliveryRun(runId: string) {
+    nextRun.current = runId;
+    setOpen(false);
+  }
+
+  return <Dialog.Root open={open} onOpenChange={setOpen}>
+    <ControlTooltip label="Instruction delivery history">
+      <Dialog.Trigger asChild>
+        <button ref={trigger} type="button" className="conv-quiet-button instruction-history-trigger"
+          aria-label="Instruction delivery history" aria-description={reviewCount ? `${reviewCount} awaiting review` : undefined}>
+          <ListChecks size={16} aria-hidden /> Deliveries
+          {reviewCount > 0 && <span className="instruction-history-count" aria-hidden>{reviewCount}</span>}
+        </button>
+      </Dialog.Trigger>
+    </ControlTooltip>
+    <Dialog.Portal>
+      <Dialog.Overlay className="conv-dialog-scrim" />
+      <Dialog.Content className="conv-dialog conv-dialog-layout instruction-history-dialog" onCloseAutoFocus={(event) => {
+        const runId = nextRun.current;
+        if (!runId) return;
+        nextRun.current = undefined;
+        event.preventDefault();
+        trigger.current?.focus({ preventScroll: true });
+        openRun(runId);
+      }}>
+        <div className="conv-dialog-header">
+          <span className="conv-dialog-mark"><ListChecks size={21} aria-hidden /></span>
+          <div>
+            <Dialog.Title>Instruction delivery history</Dialog.Title>
+            <Dialog.Description>See where each instruction went and review uncertain deliveries.</Dialog.Description>
+          </div>
+          <Dialog.Close asChild><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close instruction history">
+            <X size={17} aria-hidden />
+          </Button></Dialog.Close>
+        </div>
+        <div className="conv-dialog-body instruction-history-body">
+          {instructions.deliveryError && <div className="instruction-history-error">
+            <p role="alert">Could not load instruction deliveries. {String(instructions.deliveryError)}</p>
+            <Button type="button" variant="outline" onClick={() => void instructions.reloadDeliveries()}>Retry</Button>
+          </div>}
+          {instructions.deliveryPending && <p role="status">Loading instruction deliveries…</p>}
+          {!instructions.deliveryPending && !instructions.deliveryError && instructions.deliveries.length === 0 && <div className="instruction-history-empty">
+            <ListChecks size={22} aria-hidden />
+            <strong>No deliveries yet</strong>
+            <p>Instructions sent to an active turn or dispatched from the queue appear here.</p>
+          </div>}
+          {instructions.deliveries.length > 0 && <ol className="instruction-delivery-list" aria-label="Recorded instruction deliveries">
+            {instructions.deliveries.map((item) => {
+              const text = references?.get(item.revisionId);
+              return <DeliveryEvidence key={`${item.instructionId}:${item.revisionId}:${item.runId}`} item={item}
+                instruction={text ? conversationSkillMessage(text) : undefined}
+                conversationId={conversationId} openRun={openDeliveryRun} refresh={instructions.refresh} />;
+            })}
+          </ol>}
+        </div>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }

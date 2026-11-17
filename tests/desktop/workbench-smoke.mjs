@@ -210,6 +210,13 @@ async function click(browser, selector, wait) {
   await control.click();
 }
 
+async function replaceControlValue(browser, control, value) {
+  await control.click();
+  await browser.action("key").down(Key.Control).down("a").up("a").up(Key.Control).perform();
+  await control.addValue(value);
+  assert.equal(await control.getValue(), value);
+}
+
 async function clickConversation(browser, title) {
   await click(browser, `section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(title)}]`);
 }
@@ -218,7 +225,12 @@ async function capture(browser, name) {
   const directory = process.env.OMNIAGENT_UI_CAPTURE_DIR;
   if (!directory) return;
   await mkdir(directory, { recursive: true });
-  await browser.saveScreenshot(join(directory, name + ".png"));
+  await browser.execute(async () => {
+    await Promise.allSettled(document.getAnimations().filter((animation) => animation.animationName === "ui-reveal")
+      .map((animation) => animation.finished));
+  });
+  const { data } = await emulateDisplay(browser, "Page.captureScreenshot", { captureBeyondViewport: false, fromSurface: true });
+  await writeFile(join(directory, name + ".png"), Buffer.from(data, "base64"));
 }
 
 async function emulateDisplay(browser, cmd, params = {}) {
@@ -229,7 +241,9 @@ async function emulateDisplay(browser, cmd, params = {}) {
     body: JSON.stringify({ cmd, params }),
     signal: AbortSignal.timeout(5000),
   });
-  assert.ok(response.ok, cmd + ": " + await response.text());
+  const result = await response.text();
+  assert.ok(response.ok, cmd + ": " + result);
+  return JSON.parse(result).value;
 }
 
 async function checkDisplayPreferences(browser) {
@@ -248,7 +262,42 @@ async function checkDisplayPreferences(browser) {
   assert.equal(await browser.execute(() =>
     getComputedStyle(document.querySelector('.work-rail-button[aria-current="page"]')).borderTopWidth), "1px");
   await capture(browser, "07-high-contrast");
+  await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  await browser.waitUntil(() => browser.execute(() => document.documentElement.dataset.appMotion === "reduced"));
+  await capture(browser, "07-reduced-motion");
   await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [] });
+
+  const originalTheme = (await invoke(browser, "appearance_settings")).theme;
+  async function useTheme(theme) {
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
+    await click(browser, '.work-rail button[aria-label="Settings"]');
+    const settings = browser.$('.settings-dialog');
+    await click(settings, './/nav[@aria-label="Settings categories"]//button[span[normalize-space(.)="Appearance"]]');
+    const themeControl = settings.$('[data-setting="theme"]');
+    await themeControl.waitForDisplayed();
+    await click(themeControl, "button=" + theme[0].toUpperCase() + theme.slice(1));
+    await browser.waitUntil(async () => (await invoke(browser, "appearance_settings")).theme === theme);
+    await click(settings, 'button[aria-label="Close settings"]');
+  }
+  const areas = ["Conversations", "IDE", "Tasks", "Pipelines", "Git", "Diagnostics", "Knowledge"];
+  for (const theme of ["light", "dark"]) {
+    await useTheme(theme);
+    for (const [width, height] of [[1440, 900], [1120, 760], [640, 440]]) {
+      await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width, height } } });
+      await browser.waitUntil(() => browser.execute((size) => Math.abs(innerWidth - size) <= 4, width));
+      for (const area of areas) {
+        await click(browser, `.work-rail button[aria-label="${area}"]`);
+        await browser.waitUntil(() => browser.execute((title) => {
+          const current = document.querySelector('.work-rail-button[aria-current="page"]');
+          return current?.getAttribute("aria-label") === title &&
+            !document.querySelector('.work-deck:not([hidden]) .work-view:not([hidden]) > .work-progress');
+        }, area));
+        assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= innerWidth + 1), true, `${area} in ${theme} at ${width}`);
+        await capture(browser, `workspace-${area.toLowerCase()}-${theme}-${width}x${height}`);
+      }
+    }
+  }
+  await useTheme(originalTheme);
 }
 
 async function checkSharedWorkspaceNavigation(browser, expectedCapacity) {
@@ -275,11 +324,28 @@ async function checkSharedWorkspaceNavigation(browser, expectedCapacity) {
     }
     assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, area);
   }
+  if (await browser.execute(() => innerWidth < 1040)) {
+    const goTo = 'button[aria-label="Go to…"]';
+    await click(browser, goTo);
+    const search = browser.$('[role="combobox"][aria-label="Search destinations"]');
+    await search.waitForDisplayed();
+    await search.setValue("Git");
+    await browser.keys("Enter");
+    await browser.$('.work-rail button[aria-label="Git"][aria-current="page"]').waitForDisplayed();
+    await click(browser, '.work-rail button[aria-label="Knowledge"]');
+  }
   const queueButton = '.work-rail button[aria-label="Queue"]';
   const wasOpen = await browser.$(queueButton).getAttribute("aria-pressed") === "true";
   if (!wasOpen) await click(browser, queueButton);
   await browser.$('.work-queue-panel:not([hidden]) [aria-label="Queue states"]').waitForDisplayed();
-  if (!wasOpen) await click(browser, queueButton);
+  if (!wasOpen) {
+    const drawer = browser.$('.work-queue-drawer[role="dialog"]');
+    if (await drawer.isDisplayed()) {
+      await browser.keys("Escape");
+      await drawer.waitForDisplayed({ reverse: true });
+      await browser.waitUntil(() => browser.execute(() => document.activeElement?.getAttribute("aria-label") === "Queue"));
+    } else await click(browser, '.work-queue-panel:not([hidden]) button[aria-label="Close queue"]');
+  }
   await click(browser, '.work-rail button[aria-label="Settings"]');
   const settings = browser.$('.settings-dialog');
   await settings.$('[aria-label="Settings categories"]').waitForDisplayed();
@@ -328,6 +394,15 @@ async function checkSimulation(browser, checkout) {
   await click(knowledge, "button=Graph");
   await click(browser, "button=Plan from note");
   await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
+  await click(browser, 'button[aria-label="Tasks"]');
+  const taskWorkspace = browser.$(shown);
+  await click(taskWorkspace, "button=Add release readiness checklist");
+  await click(taskWorkspace, "button=Answer question");
+  await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
+  await click(browser, 'button[aria-label="Back to Tasks"]');
+  await taskWorkspace.$('[aria-label="Task details"]').$("button=Answer question").waitForDisplayed();
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "Answer question"));
+  await click(taskWorkspace, "button=Answer question");
   await capture(browser, "01-conversations");
   const conversationRow = browser.$(".conv-example-sidebar").$("button=Plan the release checklist");
   await conversationRow.click({ button: "right" });
@@ -342,6 +417,16 @@ async function checkSimulation(browser, checkout) {
   const modelMenu = browser.$(".model-picker-menu");
   await modelMenu.waitForDisplayed();
   assert.equal(await composerHeight(), heightBefore);
+  assert.equal(await browser.execute(() => {
+    const header = document.querySelector(".model-picker-catalog-header");
+    const heading = header.querySelector(".model-picker-heading").getBoundingClientRect();
+    const sort = header.querySelector(".model-picker-sort").getBoundingClientRect();
+    return Math.abs(heading.top + heading.height / 2 - sort.top - sort.height / 2) <= 1;
+  }), true, "Model sorting and title must share a line when the menu has room");
+  assert.equal(await conversation.$('select[aria-label="Provider"]').isExisting(), false);
+  await modelMenu.$('[role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]').waitForDisplayed();
+  await click(modelMenu, '[aria-label="Price, lowest first"]');
+  await modelMenu.$('[aria-label="Price, lowest first"][aria-checked="true"]').waitForDisplayed();
   await capture(browser, "01-composer-model-picker");
   await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
   const effortValues = () => browser.execute(() => {
@@ -355,12 +440,11 @@ async function checkSimulation(browser, checkout) {
   await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6 Luna"]');
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(await effort.getValue(), "");
-  await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "antigravity");
-  assert.deepEqual(await effortValues(), ["", "low", "medium", "high"]);
   await click(conversation, ".model-picker-trigger");
   await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]');
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh"]);
-  await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "codex");
+  await click(conversation, ".model-picker-trigger");
+  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
   await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "goal");
   const draft = conversation.$('textarea[aria-label="Message draft"]');
   await draft.setValue("Verify recovery instructions against the release checklist.");
@@ -370,15 +454,15 @@ async function checkSimulation(browser, checkout) {
   const goalDialog = browser.$('.conv-dialog[role="dialog"]');
   const objective = goalDialog.$("textarea");
   assert.equal(await objective.getValue(), "Verify recovery instructions against the release checklist.");
-  await objective.setValue("Verify backup and recovery instructions against the release checklist.");
+  await replaceControlValue(browser, objective, "Verify backup and recovery instructions against the release checklist.");
   await capture(browser, "01-goal-editor");
   await click(goalDialog, "button=Save objective");
   assert.match(await conversation.$('.conv-goal [role="status"]').getText(), /Running · 1\/3 turns/);
   await click(conversation, "button=Cancel goal");
   await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "plan");
-  await click(browser, "button=Reply");
-  await click(browser, "button=Approve implementation");
-  await click(browser, "button=Open release task");
+  await click(conversation, "button=Reply");
+  await click(conversation, "button=Approve implementation");
+  await click(conversation, "button=Open release task");
   const taskModel = 'button[aria-label^="Filter tasks by model ·"]';
   await click(browser.$(shown), taskModel);
   await click(browser, '.model-picker-menu [aria-label="GPT-6.1 Sol"]');
@@ -420,7 +504,8 @@ async function checkSimulation(browser, checkout) {
   await changes().$('select[aria-label="Diff layout"]').selectByAttribute("value", "unified");
   await capture(browser, "02-unified-changes");
   await click(changes(), 'button[aria-label="Close changes"]');
-  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent === "Review saved diff"));
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "Review saved diff"),
+    { timeoutMsg: "Closing Changes did not restore focus to the task's diff action" });
   await click(browser.$(shown), "button=Review saved diff");
   await click(changes(), "button=Accept diff");
   await click(changes(), 'button[aria-label="Close changes"]');
@@ -525,6 +610,10 @@ async function checkSimulation(browser, checkout) {
   await click(browser, 'button[aria-label="Settings"]');
   await click(browser, "button=Appearance");
   await browser.$('[data-setting="theme"]').waitForDisplayed();
+  assert.equal(await browser.execute(() => {
+    const dialog = document.querySelector(".settings-dialog").getBoundingClientRect();
+    return dialog.top >= 0 && dialog.left >= 0 && dialog.right <= innerWidth && dialog.bottom <= innerHeight;
+  }), true, "Compact Settings must stay inside the window while it opens");
   await capture(browser, "04-settings-compact");
   await browser.keys("Escape");
   await browser.waitUntil(() => browser.execute(() => document.activeElement?.getAttribute("aria-label") === "Settings"));
@@ -712,13 +801,33 @@ async function verifyDetachedJob(browser, application, scratch) {
     await status.waitForDisplayed();
     assert.equal(await status.getText(), "Completed");
     assert.equal(await browser.execute(() => {
-      const entries = document.querySelector('.work-deck:not([hidden]) .work-view:not([hidden]) .conv-library-entries');
-      return entries.scrollWidth <= entries.clientWidth + 1;
-    }), true, "Conversation rows must fit the library while Activity is open");
+      const workspace = document.querySelector('.work-deck:not([hidden]) .work-view:not([hidden])');
+      const entries = workspace.querySelector('.conv-library-entries');
+      const transcript = workspace.querySelector('.conv-workspace-main');
+      return entries ? entries.scrollWidth <= entries.clientWidth + 1 : transcript.clientWidth >= Math.min(600, workspace.clientWidth);
+    }), true, "Activity must leave room for the conversation, with the library available when there is space");
     await click(activity.$('[aria-label="Run details"]'), 'button=Artifacts');
     await activity.$('h3=Recorded output').waitForDisplayed();
     await capture(browser, "10-activity-real");
     await click(activity, 'button[aria-label="Close activity"]');
+    await browser.$('.work-deck:not([hidden]) .conv-library-entries').waitForDisplayed();
+    await click(after, '.conv-composer .model-picker-trigger');
+    const modelMenu = browser.$('.model-picker-menu[data-catalog]');
+    await modelMenu.$('.model-capability-icons [title^="CLI inventory"]').waitForDisplayed();
+    await capture(browser, "real-model-catalog-details");
+    await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label=${JSON.stringify(fixture.option.name)}]`);
+    const composerBounds = () => browser.execute((title) => {
+      const form = [...document.querySelectorAll('.conv-pane')].find((pane) => pane.getAttribute("aria-label") === title)?.querySelector('.conv-composer');
+      return [form?.clientHeight, form?.scrollHeight, form?.scrollTop];
+    }, chat.title);
+    const priorBounds = await composerBounds();
+    await click(after, ".conv-compaction-trigger");
+    const compaction = browser.$('[role="dialog"][aria-label="Context compaction settings"]');
+    await compaction.waitForDisplayed();
+    assert.deepEqual(await composerBounds(), priorBounds);
+    await capture(browser, "real-compact-context");
+    await browser.keys("Escape");
+    await compaction.waitForDisplayed({ reverse: true });
     await click(browser, '.work-rail button[aria-label="Settings"]');
     const settings = browser.$('.settings-dialog');
     await click(settings.$('[aria-label="Settings categories"]'), "button=System");
@@ -730,6 +839,26 @@ async function verifyDetachedJob(browser, application, scratch) {
     { timeoutMsg: "Qualification matrix should show the model from the persisted dispatch" });
     await capture(browser, "real-settings-qualification");
     await click(settings, 'button[aria-label="Close settings"]');
+
+    for (const [width, height, drawer] of [[1440, 900, false], [1120, 440, true], [640, 440, true]]) {
+      await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width, height } } });
+      await browser.waitUntil(() => browser.execute((size) => Math.abs(innerWidth - size) <= 4, width));
+      const queueButton = '.work-rail button[aria-label="Queue"]';
+      if (await browser.$(queueButton).getAttribute("aria-pressed") !== "true") await click(browser, queueButton);
+      const panel = browser.$('.work-queue-panel:not([hidden])');
+      await click(panel, `button[data-queue-job="${job.id}"]`);
+      assert.equal(await panel.getAttribute("role") === "dialog", drawer);
+      await click(panel, "button=Inspect attempt");
+      const inspection = await checkConversationActivity(browser);
+      await inspection.$('.run-inspection-header [role="status"]').waitForDisplayed();
+      if (drawer) await panel.waitForDisplayed({ reverse: true });
+      await click(inspection, 'button[aria-label="Close activity"]');
+      await panel.$("button=Inspect attempt").waitForDisplayed();
+      await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "Inspect attempt"));
+      await capture(browser, `real-queue-return-${width}x${height}`);
+      await click(panel, 'button[aria-label="Close queue"]');
+    }
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
   } finally {
     await writeFile(release, "");
     if (detached) {
@@ -816,6 +945,17 @@ async function verifyPendingInstructions(browser, application, scratch) {
 
     await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", scope))?.status === "succeeded",
       { timeout: 30_000 });
+    assert.equal(await panel.$('summary=Instruction delivery history').isExisting(), false);
+    await click(panel, 'button[aria-label="Instruction delivery history"]');
+    const deliveries = browser.$('.instruction-history-dialog[role="dialog"]');
+    await deliveries.$('[aria-label="Recorded instruction deliveries"]').waitForDisplayed();
+    const revisedDelivery = deliveries.$(`.//li[.//p[normalize-space(.)="${edited}"]]`);
+    await revisedDelivery.waitForDisplayed();
+    await capture(browser, "real-instruction-delivery-history");
+    await click(revisedDelivery, "button*=Open");
+    await deliveries.waitForDisplayed({ reverse: true });
+    const receivingTurn = await checkConversationActivity(browser);
+    await click(receivingTurn, 'button[aria-label="Close activity"]');
     const current = await invoke(browser, "conversation_history", scope);
     const oldEmptyContext = await invoke(browser, "rewind_conversation_history", {
       ...scope, baseId: current.contextId, throughRevision: null,
@@ -1218,7 +1358,8 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
 
     const settingsBack = browser.$("button.settings-back");
     if (await settingsBack.isDisplayed()) await settingsBack.click();
-    await browser.$("button=Providers").click();
+    const settingsNav = browser.$('.settings-dialog nav[aria-label="Settings categories"]');
+    await click(settingsNav, './/button[span[normalize-space(.)="Providers"]]');
     const executable = browser.$('input[name="codex"]');
     await executable.waitForDisplayed();
     await executable.setValue(application);
@@ -1248,12 +1389,19 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await browser.$('button[aria-label="Close settings"]').click();
     await chooseConversations(browser);
     await browser.$('button[aria-label="New conversation"]').click();
+    const newConversation = browser.$('.conversation-pipeline-dialog[role="dialog"]');
+    await newConversation.$("h2=Choose a conversation pipeline").waitForDisplayed();
+    assert.equal(await newConversation.$("button=Create conversation").isEnabled(), false);
+    await capture(browser, "real-conversation-pipeline-picker");
+    await click(newConversation, './/label[.//strong[normalize-space(.)="Direct conversation"]]');
+    await click(newConversation, "button=Create conversation");
     const draft = browser.$('textarea[id^="draft-"]');
     await draft.waitForEnabled();
     const unsent = "Rascunho — revisar depois ☕";
     await draft.setValue(unsent);
     await browser.$("p=Draft saved").waitForDisplayed();
     const [conversation] = await invoke(browser, "list_conversations", { checkoutId: main.checkoutId });
+    assert.equal(conversation.pipeline?.kind, "direct");
     assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
     await click(browser, 'button[aria-label="Settings"]');
@@ -1266,6 +1414,9 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await browser.keys("Escape");
     await click(browser, "button=History");
     const historyDialog = browser.$('.conv-dialog[role="dialog"]');
+    assert.equal(await historyDialog.$('[aria-label="Next prompt scope"]').isExisting(), false);
+    await capture(browser, "real-conversation-history");
+    await click(historyDialog, "summary=Options");
     const conversationHistoryPolicy = historyDialog.$('select:has(option[value="review"])');
     await conversationHistoryPolicy.waitForEnabled();
     assert.ok((await conversationHistoryPolicy.$('option[value=""]').getText()).includes("Use recorded context"));
@@ -1301,19 +1452,22 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     const subagentDialog = browser.$('.conv-dialog[role="dialog"]');
     const requested = subagentDialog.$('input[type="number"]');
     await requested.waitForEnabled();
-    await requested.setValue("5");
+    await replaceControlValue(browser, requested, "5");
     await click(browser, "button=Save limit");
     await browser.waitUntil(async () => (await invoke(browser, "conversation_subagent_quota", { conversationId: conversation.id })).requested === 5);
-    const authorized = subagentDialog.$('.//dt[normalize-space()="Authorized simultaneous subagents"]/following-sibling::dd[1]');
+    const authorized = subagentDialog.$('.//dt[normalize-space()="Authorized now"]/following-sibling::dd[1]');
     assert.equal(await authorized.getText(), "2");
+    await capture(browser, "real-subagent-limits");
+    await click(subagentDialog, 'summary*=Activity and CLI limits');
     assert.ok((await subagentDialog.getText()).includes("No native subagent activity has been reported."));
     const limitMode = subagentDialog.$('.//label[contains(., "Limit mode")]/select');
     await limitMode.waitForEnabled();
     await limitMode.selectByAttribute("value", "strict");
     const nativeAllowance = subagentDialog.$('.//label[contains(., "Requested native allowance per CLI session")]/input');
     await nativeAllowance.waitForEnabled();
-    await nativeAllowance.setValue("1");
+    await replaceControlValue(browser, nativeAllowance, "1");
     await click(browser, "button=Save limit");
+    await click(subagentDialog, 'summary*=Audit policy');
     const auditPolicy = subagentDialog.$('.//label[contains(., "Subagent audit policy")]/select');
     await auditPolicy.waitForEnabled();
     await auditPolicy.selectByAttribute("value", "complete");
@@ -1375,6 +1529,24 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await browser.keys(["Control", "Enter"]);
     assert.equal(await invoke(browser, "latest_conversation_job", { conversationId: conversation.id }), null);
     await mode.selectByAttribute("value", "read_only");
+    await click(browser.$(`section[aria-label=${JSON.stringify(conversation.title)}]`), "button=Goal");
+    const goalSettings = browser.$('.conv-goal-dialog[role="dialog"]');
+    await goalSettings.waitForDisplayed();
+    assert.equal(await browser.execute(() => document.activeElement?.tagName), "TEXTAREA");
+    await capture(browser, "real-goal-mode");
+    const initialSize = await browser.execute(() => ({ width: innerWidth, height: innerHeight }));
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 640, height: 440 } } });
+    await browser.waitUntil(() => browser.execute(() => Math.abs(innerWidth - 640) <= 4));
+    assert.equal(await browser.execute(() => {
+      const dialog = document.querySelector(".conv-goal-dialog");
+      const actions = dialog.querySelector("footer").getBoundingClientRect();
+      const body = dialog.querySelector(".conv-dialog-body");
+      return actions.bottom < innerHeight && actions.top > 0 && body.scrollHeight > body.clientHeight;
+    }), true, "Goal actions must remain visible while the form scrolls in a short window");
+    await capture(browser, "real-goal-mode-640x440");
+    await click(goalSettings, "button=Close");
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: initialSize } });
+    assert.equal(await recoveredDraft.getValue(), unsent);
     if (process.env.OMNIAGENT_LIVE_EFFORTS === "1") {
       const argon = "gemini-4-argon";
       const hydrogen = "gemini-4-hydrogen";
@@ -1525,6 +1697,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     });
   } catch (error) {
     if (browser && process.env.OMNIAGENT_UI_CAPTURE_DIR) {
+      console.error(error.message);
       await capture(browser, "failure").catch(() => undefined);
       const screen = await browser.execute(() => document.body.innerText.slice(0, 1300)).catch(() => "");
       if (screen) console.error(screen);
@@ -1642,6 +1815,7 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     assert.deepEqual((await invoke(browser, "conversation_history", scope)).messages.filter(({ role }) => role === "user"), [recorded]);
     await click(chat.panel, 'button[title="Conversation history controls"]');
     const history = browser.$('.conv-dialog[role="dialog"]');
+    await click(history, "summary=Options");
     await click(history, "summary=Delete a revision or diff");
     await history.$('.//label[contains(., "History item")]/select').selectByAttribute("value", `message:${recorded.revisionId}`);
     await history.$('.//label[contains(., "Scope")]/select').selectByAttribute("value", "with_derived_copies");
@@ -1742,7 +1916,10 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     const skillLabel = ({ namespace, name }) => namespace ? `${namespace} · ${name}` : name;
     for (const skill of skills) {
       await click(panel, "button=Skills & plugin exports");
-      await click(panel, `.//*[@role="option"][.//strong[normalize-space(.)="${skillLabel(skill)}"]]`);
+      const actions = browser.$('[aria-label="Composer actions"]');
+      await actions.waitForDisplayed();
+      await capture(browser, "real-composer-action-autocomplete");
+      await click(actions, `.//*[@role="option"][.//strong[normalize-space(.)="${skillLabel(skill)}"]]`);
     }
     const selectedSkills = panel.$('[aria-label="Selected skills and plugin exports"]');
     for (const skill of skills) {
@@ -1827,6 +2004,10 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
     browser = await connectTestDriver(driver, application);
     const checkout = await invoke(browser, "register_project", { directory: repo });
     await selectCheckout(browser, checkout);
+    await click(browser, 'button[aria-label="Pipelines"]');
+    await click(browser.$('nav[aria-label="Pipelines views"]'), "button=Repository delivery");
+    await browser.$('.repo-delivery [aria-label="Repository Markdown source"]').$("button=Select Markdown file").waitForDisplayed();
+    await capture(browser, "real-repository-delivery");
     await verifyVisualPipelineBuilder({
       browser, application, checkout, invoke, capture, emulateDisplay,
       restart: async (current) => {
@@ -1909,8 +2090,11 @@ test("compares committed branches and registers a manual worktree in the real Gi
 test("persists real conversation organization through a desktop restart", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Conversation library repository");
+  const otherRepo = join(scratch, "Conversation library second repository");
+  const otherTitle = "A conversation in a different repository";
   const title = "A conversation to organize";
   git(scratch, "init", "-q", repo);
+  git(scratch, "init", "-q", otherRepo);
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Library fixture");
 
@@ -1927,10 +2111,17 @@ test("persists real conversation organization through a desktop restart", { time
   try {
     browser = await connectTestDriver(driver, application);
     const checkout = await invoke(browser, "register_project", { directory: repo });
+    const otherCheckout = await invoke(browser, "register_project", { directory: otherRepo });
     await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+    await invoke(browser, "create_conversation", { checkoutId: otherCheckout.checkoutId, title: otherTitle });
     await selectCheckout(browser, checkout);
     await chooseConversations(browser);
     await row().waitForDisplayed();
+    assert.equal(await library().$('select[aria-label="Project"]').isExisting(), false);
+    assert.equal(await library().$(`button[aria-label=${JSON.stringify(otherTitle)}]`).isExisting(), false);
+    const scopedTitles = (await invoke(browser, "conversation_library", { query: null, projectId: checkout.projectId }))
+      .map(({ conversation }) => conversation.title);
+    assert.deepEqual(scopedTitles, [title]);
     await row().click({ button: "right" });
     await click(browser.$('.conv-menu[role="menu"]'), "span=Section");
     await click(browser, "span=New section…");
@@ -2020,6 +2211,9 @@ test("starts real planning from the saved Markdown revision and finds it from Kn
       return Boolean(card) && style.getPropertyValue("--xy-node-background-color").trim() === card;
     }), { timeoutMsg: "Delivery Git nodes should use the application's card theme" });
     await capture(browser, "real-plan-from-note");
+    await click(browser, 'button[aria-label="Back to Knowledge"]');
+    await knowledge.$("button=Plan from note").waitForDisplayed();
+    assert.equal(await browser.$('.work-rail button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

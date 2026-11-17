@@ -32,6 +32,7 @@ pub mod fork_checkout;
 mod history;
 mod library;
 pub(crate) mod native_fork;
+mod pipeline;
 pub(crate) mod reference_delivery;
 pub mod references;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
@@ -43,7 +44,11 @@ pub use history::ConversationHistoryInspection;
 pub use library::{
     ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
 };
-pub use reference_delivery::SubmittedConversationReference;
+pub use pipeline::{ConversationPipeline, ConversationPipelineChoice, ConversationPipelineOption};
+pub(crate) use pipeline::{
+    append_pipeline_message, initialize_pipeline_schema, load_conversation_pipeline,
+};
+pub use reference_delivery::{ConversationMentionDraftChange, SubmittedConversationReference};
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +58,19 @@ pub struct Conversation {
     pub checkout_id: String,
     pub title: String,
     pub context_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pipeline: Option<ConversationPipeline>,
+}
+
+impl Conversation {
+    pub fn require_direct_turn(&self) -> Result<()> {
+        ensure!(
+            matches!(self.pipeline, None | Some(ConversationPipeline::Direct)),
+            "Send this message through the pinned conversation pipeline"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
@@ -173,7 +191,7 @@ impl Store {
     pub async fn list_conversations(&self, checkout_id: String) -> Result<Vec<Conversation>> {
         self.execute(move |db| {
             let mut statement = db.prepare(
-                "SELECT id, checkout_id, title, active_context_id FROM conversations
+                "SELECT id, checkout_id, title, active_context_id, pipeline FROM conversations
                  WHERE checkout_id = ?1 AND background = 0 ORDER BY title COLLATE NOCASE, id",
             )?;
             let rows = statement.query_map([checkout_id], |row| {
@@ -182,6 +200,7 @@ impl Store {
                     checkout_id: row.get(1)?,
                     title: row.get(2)?,
                     context_id: row.get(3)?,
+                    pipeline: pipeline::read_optional_pipeline(row, 4)?,
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1892,6 +1911,7 @@ pub(crate) fn insert_conversation(
         checkout_id,
         title,
         context_id,
+        pipeline: None,
     })
 }
 
@@ -1988,7 +2008,7 @@ pub(crate) fn validate_saved_question(
 
 pub(crate) fn load_conversation(db: &Connection, id: &str) -> Result<Conversation> {
     Ok(db.query_row(
-        "SELECT id, checkout_id, title, active_context_id FROM conversations WHERE id = ?1",
+        "SELECT id, checkout_id, title, active_context_id, pipeline FROM conversations WHERE id = ?1",
         [id],
         |row| {
             Ok(Conversation {
@@ -1996,6 +2016,7 @@ pub(crate) fn load_conversation(db: &Connection, id: &str) -> Result<Conversatio
                 checkout_id: row.get(1)?,
                 title: row.get(2)?,
                 context_id: row.get(3)?,
+                pipeline: pipeline::read_optional_pipeline(row, 4)?,
             })
         },
     )?)
@@ -2009,7 +2030,9 @@ fn check_idle_base(db: &Connection, id: &str, requested: &str) -> Result<Convers
     );
     let active: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1
-         UNION ALL SELECT 1 FROM unconfirmed_agent_stops WHERE conversation_id = ?1)",
+         UNION ALL SELECT 1 FROM unconfirmed_agent_stops WHERE conversation_id = ?1
+         UNION ALL SELECT 1 FROM conversation_pipeline_turns
+           WHERE conversation_id = ?1 AND state IN ('queued', 'running'))",
         [id],
         |row| row.get(0),
     )?;

@@ -100,6 +100,6 @@ export function openConversation(api: DockviewApi, conversation: Conversation) {
     title: conversation.title,
     component: "conversation",
     renderer: "always",
-    params: { conversationId: conversation.id, title: conversation.title },
+    params: { conversationId: conversation.id, title: conversation.title, pipeline: conversation.pipeline },
   });
 }

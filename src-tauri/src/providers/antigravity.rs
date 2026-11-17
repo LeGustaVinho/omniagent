@@ -14,6 +14,7 @@ use super::{
     Interrupt, ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation,
     ReportedModel, RequestId, SessionChoice, SessionIntent, SessionMode, SessionOption,
     SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage,
+    composer_customizations::ComposerCommand,
     rpc::{self, Rpc},
 };
 
@@ -72,6 +73,7 @@ impl CliAdapter for AntigravityAdapter {
             questions: HashMap::new(),
             question_route: Default::default(),
             available_commands: None,
+            composer_commands: None,
             plan_command_available: false,
             goal_command: None,
             bridge: None,
@@ -246,7 +248,8 @@ struct AcpSession {
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
     questions: HashMap<RequestId, super::questions::QuestionForm>,
     question_route: super::questions::QuestionRoute,
-    available_commands: Option<(String, Vec<String>)>,
+    available_commands: Option<(String, Vec<ComposerCommand>)>,
+    composer_commands: Option<Vec<ComposerCommand>>,
     plan_command_available: bool,
     goal_command: Option<bool>,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
@@ -259,7 +262,12 @@ struct PermissionOption {
 }
 
 impl AcpSession {
-    fn command_observations(&mut self, names: Vec<String>) -> [ProviderEvent; 2] {
+    fn command_observations(&mut self, commands: Vec<ComposerCommand>) -> [ProviderEvent; 2] {
+        let names: Vec<_> = commands
+            .iter()
+            .map(|command| command.name.clone())
+            .collect();
+        self.composer_commands = Some(commands);
         self.plan_command_available = names.iter().any(|name| name == "plan");
         let available = names.iter().any(|name| name == "goal");
         self.goal_command = Some(available);
@@ -622,21 +630,22 @@ impl AcpSession {
             })]));
         }
         if update["sessionUpdate"] == "available_commands_update" {
-            let names = update["availableCommands"].as_array().and_then(|commands| {
-                commands
-                    .iter()
-                    .map(|command| string(command, "name"))
-                    .collect::<Option<Vec<_>>>()
-            });
-            let Some(names) = names else {
+            let Some(commands) = update["availableCommands"]
+                .as_array()
+                .filter(|commands| commands.iter().all(|command| command["name"].is_string()))
+            else {
                 return Ok(self.update_diagnostic(update, "Malformed ACP available commands list"));
             };
+            let commands: Vec<_> = commands
+                .iter()
+                .filter_map(ComposerCommand::from_advertisement)
+                .collect();
             if !self.ready {
-                self.available_commands = Some((session_id.to_owned(), names));
+                self.available_commands = Some((session_id.to_owned(), commands));
                 return Ok(AdapterUpdate::default());
             }
             if self.session_id.as_deref() == Some(session_id) {
-                return Ok(events(self.command_observations(names)));
+                return Ok(events(self.command_observations(commands)));
             }
         }
         if !self.ready || self.session_id.as_deref() != Some(session_id) {
@@ -931,9 +940,21 @@ impl CliSession for AcpSession {
             .session_id
             .as_deref()
             .context("missing ACP session ID")?;
-        let explicit_plan = input.text.split_whitespace().next() == Some("/plan");
+        let command = input
+            .text
+            .split_whitespace()
+            .next()
+            .and_then(|word| word.strip_prefix('/'));
+        let explicit_plan = command == Some("plan");
+        let other_advertised_command = command.is_some_and(|name| {
+            name != "plan"
+                && self
+                    .composer_commands
+                    .as_ref()
+                    .is_some_and(|commands| commands.iter().any(|command| command.name == name))
+        });
         let asked_for_plan = self.request.mode == SessionMode::Plan
-            && (explicit_plan || self.plan_command_available);
+            && (explicit_plan || (self.plan_command_available && !other_advertised_command));
         let text = if asked_for_plan {
             let prefix = if explicit_plan { "" } else { "/plan " };
             format!(
@@ -976,6 +997,10 @@ impl CliSession for AcpSession {
             outbound: vec![frame],
             events: vec![self.event(ProviderEventData::TurnStarted)],
         })
+    }
+
+    fn available_composer_commands(&self) -> Option<&[ComposerCommand]> {
+        self.composer_commands.as_deref()
     }
 
     fn receive(&mut self, frame: OutputFrame) -> Result<AdapterUpdate> {
@@ -1153,6 +1178,68 @@ mod tests {
             {"id":"mode","type":"select","currentValue":mode,
                 "options":[{"value":"default"},{"value":"plan"}]}
         ]})
+    }
+
+    #[test]
+    fn composer_command_uses_only_the_current_acp_session_inventory() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = AntigravityAdapter.create_session(SessionRequest {
+            checkout: checkout.path().into(),
+            mode: SessionMode::Plan,
+            intent: SessionIntent::Start,
+            model: None,
+            effort: None,
+        })?;
+        session.start()?;
+        receive(
+            &mut *session,
+            json!({"id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}),
+        )?;
+        let commands = |id: &str, names: Value| {
+            json!({
+                "method":"session/update",
+                "params":{"sessionId":id,"update":{
+                    "sessionUpdate":"available_commands_update",
+                    "availableCommands":names
+                }}
+            })
+        };
+        receive(
+            &mut *session,
+            commands(
+                "acp-session",
+                json!([{"name":"plan"},{"name":"review","description":"Review"}]),
+            ),
+        )?;
+        receive(
+            &mut *session,
+            json!({"id":2,"result":results("argon","medium","plan")}),
+        )?;
+        receive(
+            &mut *session,
+            commands("different-session", json!([{"name":"unexpected"}])),
+        )?;
+        let advertised = session
+            .available_composer_commands()
+            .context("missing commands")?;
+        assert_eq!(
+            advertised
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["plan", "review"]
+        );
+        let request = session.send(TurnInput {
+            attachments: Vec::new(),
+            message_id: "message".into(),
+            text: "/review src".into(),
+        })?;
+        let frame = message(&request)?;
+        assert_eq!(frame["method"], "session/prompt");
+        assert_eq!(frame["params"]["prompt"][0]["text"], "/review src");
+        receive(&mut *session, commands("acp-session", json!([])))?;
+        assert_eq!(session.available_composer_commands(), Some([].as_slice()));
+        Ok(())
     }
 
     #[test]

@@ -11,15 +11,24 @@ import { exampleCheckout, nextDeliveryStep, type DeliveryStep } from "@/workbenc
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-function Example({ initialStep = "note", openWorkspace = vi.fn() }: {
+function Example({ initialStep = "note", openWorkspace = vi.fn(), target = "plan" }: {
   initialStep?: DeliveryStep;
+  target?: string;
   openWorkspace?: React.ComponentProps<typeof ConversationsPreview>["openWorkspace"];
 }) {
   const [delivery, setDelivery] = useState(initialStep);
   return <ConversationsPreview checkout={exampleCheckout} simulation={{
     scenario: "delivery", epoch: 1, delivery, advanceDelivery: (action) => setDelivery((step) => nextDeliveryStep(step, action)),
-  }} target="plan" startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />;
+  }} target={target} startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />;
 }
+
+test("keeps example navigation within its active project even when given a foreign target", () => {
+  render(<Example target="inventory" />);
+  const library = within(screen.getByRole("region", { name: "Conversation library" }));
+  expect(library.getByRole("button", { name: "Plan the release checklist" })).toBeTruthy();
+  expect(library.queryByRole("combobox", { name: "Conversation project scope" })).toBeNull();
+  expect(screen.queryByText("Inspect example build scripts")).toBeNull();
+});
 
 test("answers and approves the seeded plan before opening the linked task without desktop IPC", async () => {
   const user = userEvent.setup();
