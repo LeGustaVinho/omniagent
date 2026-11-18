@@ -654,14 +654,14 @@ pub async fn cli_plugin_inventory(
         .configured_executable(provider)
         .await
         .map_err(|error| error.to_string())?;
-    let report = tauri::async_runtime::spawn_blocking(move || probe_plugins(configured))
+    let executable = configured.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || probe_plugins(executable))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
     store
-        .save_plugin_inventory(report)
+        .save_plugin_inventory_for_executable(report, configured)
         .await
-        .map(Some)
         .map_err(|error| error.to_string())
 }
 

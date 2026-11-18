@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
+import { providerPluginInventoryKey } from "@/provider-inventory";
 
 const ACTIONS = { install: "Install", enable: "Enable", disable: "Disable" } as const;
 type Action = keyof typeof ACTIONS;
@@ -64,6 +65,7 @@ export function UserPluginManagement({ disabled, provider }: { disabled: boolean
       } else {
         void queryClient.invalidateQueries({ queryKey: pluginKey });
       }
+      void queryClient.invalidateQueries({ queryKey: providerPluginInventoryKey(provider) });
     },
   });
   const busy = disabled || catalog.isPending || preview.isPending || apply.isPending;

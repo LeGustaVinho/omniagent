@@ -332,6 +332,16 @@ mod tests {
             load_telemetry_reported: false,
         };
         let first = store.save_plugin_inventory(report.clone()).await?;
+        let stale_scope = ConfiguredExecutable {
+            provider: Provider::Claude,
+            executable: report.executable.clone(),
+        };
+        assert!(
+            store
+                .save_plugin_inventory_for_executable(report.clone(), stale_scope)
+                .await?
+                .is_none()
+        );
         assert!(
             store
                 .latest_plugin_inventory(Provider::Codex)
@@ -339,12 +349,16 @@ mod tests {
                 .is_none()
         );
         let second = store
-            .save_plugin_inventory(PluginReport {
-                status: PluginInventoryStatus::Unsupported,
-                plugins: Vec::new(),
-                ..report
-            })
-            .await?;
+            .save_plugin_inventory_for_executable(
+                PluginReport {
+                    status: PluginInventoryStatus::Unsupported,
+                    plugins: Vec::new(),
+                    ..report
+                },
+                store.configured_executable(Provider::Claude).await?,
+            )
+            .await?
+            .expect("the automatic executable selection is still current");
         assert_ne!(second.id, first.id);
         let store = Store::open(db)?;
         assert_eq!(
@@ -425,19 +439,29 @@ fn components(value: &Value) -> Option<Vec<String>> {
 impl Store {
     pub async fn save_plugin_inventory(&self, report: PluginReport) -> Result<PluginInventory> {
         let payload = protection::protect(&serde_json::to_vec(&report)?)?;
+        self.execute(move |db| insert_plugin_inventory(db, report, payload))
+            .await
+    }
+
+    pub async fn save_plugin_inventory_for_executable(
+        &self,
+        report: PluginReport,
+        configured: ConfiguredExecutable,
+    ) -> Result<Option<PluginInventory>> {
+        let payload = protection::protect(&serde_json::to_vec(&report)?)?;
         self.execute(move |db| {
-            let id = Uuid::new_v4().to_string();
-            let checked_at = db.query_row(
-                "INSERT INTO plugin_inventories(id, provider, payload)
-                 VALUES (?1, ?2, ?3) RETURNING checked_at",
-                params![id, report.provider.as_str(), payload],
-                |row| row.get(0),
+            let transaction = db.transaction()?;
+            let current = transaction.query_row(
+                "SELECT (SELECT executable FROM cli_executables WHERE provider = ?1) IS ?2",
+                params![configured.provider.as_str(), configured.executable],
+                |row| row.get::<_, bool>(0),
             )?;
-            Ok(PluginInventory {
-                id,
-                checked_at,
-                report,
-            })
+            if !current {
+                return Ok(None);
+            }
+            let inventory = insert_plugin_inventory(&transaction, report, payload)?;
+            transaction.commit()?;
+            Ok(Some(inventory))
         })
         .await
     }
@@ -474,4 +498,23 @@ impl Store {
         })
         .await
     }
+}
+
+fn insert_plugin_inventory(
+    db: &rusqlite::Connection,
+    report: PluginReport,
+    payload: Vec<u8>,
+) -> Result<PluginInventory> {
+    let id = Uuid::new_v4().to_string();
+    let checked_at = db.query_row(
+        "INSERT INTO plugin_inventories(id, provider, payload)
+         VALUES (?1, ?2, ?3) RETURNING checked_at",
+        params![id, report.provider.as_str(), payload],
+        |row| row.get(0),
+    )?;
+    Ok(PluginInventory {
+        id,
+        checked_at,
+        report,
+    })
 }

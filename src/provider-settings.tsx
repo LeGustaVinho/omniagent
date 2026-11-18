@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { desktopCliPrerequisitesKey, ExecutableInstallation, providerExecutableLabels, useDesktopCliPrerequisites, type CliPrerequisite } from "@/desktop-cli-prerequisites";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
-import { ProviderInventory, providerModelInventoryKey, providerSkillInventoryKey } from "@/provider-inventory";
+import { ProviderInventory, providerModelInventoryKey, providerPluginInventoryKey, providerSkillInventoryKey } from "@/provider-inventory";
 import { useWorkspace } from "@/workspace-state";
 
 const AUTH_LABELS: Record<CliProbe["authentication"], string> = {
@@ -115,11 +115,11 @@ export function ProjectAttachmentSettings({ projectId }: { projectId: string }) 
 
 function ExecutableSettings({ profile, installation, checkoutId }: { profile: ConfiguredExecutable; installation?: CliPrerequisite; checkoutId?: string }) {
   const queryClient = useQueryClient();
-  const [configured, setConfigured] = useState(profile.executable);
+  const configured = profile.executable;
   const [path, setPath] = useState(profile.executable ?? "");
   const [probe, setProbe] = useState<CliProbe | null>(null);
   const [showInventory, setShowInventory] = useState(false);
-  const [pending, setPending] = useState<"save" | "cli" | "plugins" | null>(null);
+  const [pending, setPending] = useState<"save" | "cli" | null>(null);
   const [error, setError] = useState("");
   const editablePath = useRef<HTMLInputElement>(null);
   const { feedback, copy } = useContextActionFeedback();
@@ -130,14 +130,22 @@ function ExecutableSettings({ profile, installation, checkoutId }: { profile: Co
   const { provider } = profile;
   const label = providerExecutableLabels[provider];
   const ready = pending === null && requested === (configured ?? "");
-  const pluginKey = ["cli-plugin-inventory", provider];
   const inventory = useQuery({
-    queryKey: pluginKey,
-    queryFn: () => invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: false }),
-    staleTime: Infinity,
+    queryKey: [...providerPluginInventoryKey(provider), configured, installation?.executable, installation?.version],
+    queryFn: async () => {
+      const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
+      void queryClient.invalidateQueries({ queryKey: ["cli-plugin-inventory", provider], exact: true });
+      return result;
+    },
+    enabled: Boolean(installation),
+    retry: false,
+    staleTime: 60_000,
   });
+  const pluginReport = inventory.data?.report;
+  const pluginCount = pluginReport?.status === "reported" || pluginReport?.status === "partial"
+    ? pluginReport.plugins.length : undefined;
 
-  async function run(pendingAction: "save" | "cli" | "plugins", operation: () => Promise<void>) {
+  async function run(pendingAction: "save" | "cli", operation: () => Promise<void>) {
     setError("");
     setPending(pendingAction);
     try {
@@ -151,9 +159,9 @@ function ExecutableSettings({ profile, installation, checkoutId }: { profile: Co
 
   async function save(executable: string | null) {
     const updated = await invoke<ConfiguredExecutable>("set_cli_executable", { provider, executable });
+    void queryClient.invalidateQueries({ queryKey: providerPluginInventoryKey(provider), refetchType: "none" });
     queryClient.setQueryData<ConfiguredExecutable[]>(["cli-executables"], (current) =>
       current?.map((entry) => entry.provider === provider ? updated : entry));
-    setConfigured(updated.executable);
     setPath(updated.executable ?? "");
     setProbe(null);
     void queryClient.invalidateQueries({ queryKey: ["conversation-models", provider] });
@@ -167,20 +175,20 @@ function ExecutableSettings({ profile, installation, checkoutId }: { profile: Co
     if (requested && requested !== configured) void run("save", () => save(requested));
   }
 
-  const usePath = () => void run("save", () => save(null));
+  const useAutomaticDetection = () => void run("save", () => save(null));
   const probeCli = () => void run("cli", async () => setProbe(await invoke<CliProbe>("probe_cli_executable", { provider })));
-  const refreshPlugins = () => run("plugins", async () => {
-    const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
-    queryClient.setQueryData(pluginKey, result);
-  });
+  async function refreshPlugins() {
+    if (installation) await inventory.refetch({ cancelRefetch: false });
+  }
 
   return (
     <section className="rounded-lg border border-border bg-card p-4" aria-labelledby={`${provider}-executable-title`}>
       <ContextActions label={label} groups={[[
         { label: "Edit executable path", run: () => { requestAnimationFrame(() => { editablePath.current?.focus(); editablePath.current?.select(); }); } },
-        { label: "Use PATH", disabled: pending !== null || configured === null, run: usePath },
+        { label: "Use automatic detection", disabled: pending !== null || configured === null, run: useAutomaticDetection },
         { label: "Check CLI", disabled: !ready, run: probeCli },
-        { label: "Refresh installed plugin inventory", disabled: !ready, run: () => { setShowInventory(true); void refreshPlugins(); } },
+        { label: "Refresh installed plugin inventory", disabled: !ready || !installation || inventory.isFetching,
+          run: () => { setShowInventory(true); void refreshPlugins(); } },
       ], [
         { label: "Copy provider ID", run: () => copy(provider) },
         ...(configured ? [{ label: "Copy configured executable path", run: () => copy(configured) }] : []),
@@ -189,16 +197,16 @@ function ExecutableSettings({ profile, installation, checkoutId }: { profile: Co
         <label className="min-w-52 flex-1 text-sm">
           Executable path
           <input ref={editablePath} name={provider} value={path} onChange={(event) => setPath(event.target.value)}
-            placeholder="Use PATH" className="mt-1 block w-full rounded-md border border-border bg-background p-2 font-mono text-xs" />
+            placeholder="Automatic detection" className="mt-1 block w-full rounded-md border border-border bg-background p-2 font-mono text-xs" />
         </label>
         <Button type="submit" disabled={pending !== null || !requested || requested === configured}>Save</Button>
         <Button type="button" variant="outline" disabled={pending !== null || configured === null}
-          onClick={usePath}>Use PATH</Button>
+          onClick={useAutomaticDetection}>Use automatic detection</Button>
         <Button type="button" variant="outline" disabled={!ready} onClick={probeCli}>
           {pending === "cli" ? "Checking CLI…" : "Check CLI"}
         </Button>
-        <Button type="button" variant="outline" disabled={!ready}
-          onClick={() => { setShowInventory(true); void refreshPlugins(); }}>{pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
+        <Button type="button" variant="outline" disabled={!ready || !installation || inventory.isFetching}
+          onClick={() => { setShowInventory(true); void refreshPlugins(); }}>{inventory.isFetching ? "Checking plugins…" : "Check plugins"}</Button>
       </form>
       {observedInstallation && <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Installation</dt><dd><ExecutableInstallation status={observedInstallation} label={label} provider={provider} /></dd>
@@ -218,11 +226,11 @@ function ExecutableSettings({ profile, installation, checkoutId }: { profile: Co
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
       <details className="provider-inventory-report-toggle" open={showInventory}
         onToggle={(event) => setShowInventory(event.currentTarget.open)}>
-        <summary>Inventory and capabilities</summary>
-        {showInventory && <ProviderInventory provider={provider} checkoutId={checkoutId} inventory={inventory.data}
-          refreshPlugins={refreshPlugins} pluginsRefreshing={pending === "plugins"} />}
+        <summary>Inventory and capabilities{!showInventory && pluginCount !== undefined && ` · ${pluginCount} installed ${pluginCount === 1 ? "plugin" : "plugins"}`}</summary>
+        {installation && <ProviderInventory provider={provider} checkoutId={checkoutId} inventory={inventory.data} installation={installation}
+          refreshPlugins={refreshPlugins} pluginsRefreshing={inventory.isFetching} />}
       </details>
-      <UserPluginManagement key={configured ?? ""} provider={provider} disabled={pending !== null || requested !== (configured ?? "")} />
+      <UserPluginManagement key={configured ?? ""} provider={provider} disabled={!ready || inventory.isFetching} />
       <ExecutionProfileModelSettings provider={provider} />
     </section>
   );

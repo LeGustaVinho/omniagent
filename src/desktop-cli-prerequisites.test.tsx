@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Provider } from "@/bindings/Provider";
@@ -23,7 +23,20 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
   const profiles = () => providers.map((provider) => ({ provider, executable: saved.get(provider) ?? null }));
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "cli_executables") return profiles();
-    if (command === "cli_plugin_inventory") return null;
+    if (command === "cli_plugin_inventory") {
+      const { provider, refresh } = args as { provider: Provider; refresh: boolean };
+      expect(refresh).toBe(true);
+      const executable = saved.get(provider) ?? detected[provider];
+      const plugins = [
+        { id: `${provider}@test`, name: `${provider} plugin`, enabled: true },
+        ...(saved.has(provider) ? [{ id: "custom@test", name: "Custom plugin", enabled: false }] : []),
+      ];
+      return { id: provider, checkedAt: "2026-04-01T12:00:00Z", report: {
+        provider, executable, version: executable ? "1.2.3" : null,
+        status: executable ? "reported" : "executable_missing", plugins: executable ? plugins : [],
+      } };
+    }
+    if (command === "provider_model_inventory") return { models: [] };
     if (command === "reveal_desktop_cli_executable") return;
     if (command === "desktop_cli_prerequisites") return {
       git: { executable: "C:\\Program Files\\Git\\cmd\\git.exe", version: "2.55.0.windows.3", issue: null },
@@ -49,6 +62,18 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
   expect(inventory.getByText("Gemini via agy")).toBeTruthy();
   expect(inventory.getByText("agy.exe is not installed on PATH")).toBeTruthy();
   const user = userEvent.setup();
+  await waitFor(() => {
+    for (const provider of providers) {
+      expect(invoke).toHaveBeenCalledWith("cli_plugin_inventory", { provider, refresh: true });
+      expect(invoke).toHaveBeenCalledWith("provider_model_inventory", { provider });
+    }
+  });
+  const codex = within(screen.getByRole("region", { name: "Codex" }));
+  const codexInventory = await codex.findByText("Inventory and capabilities · 1 installed plugin");
+  await user.click(codexInventory);
+  await user.click(await codex.findByText("Installed plugins (1)"));
+  expect(codex.getByText("codex plugin")).toBeTruthy();
+  await user.click(codexInventory);
   fireEvent.contextMenu(inventory.getByText(detected.claude));
   await user.click(await screen.findByRole("menuitem", { name: "Show executable in File Explorer" }));
   expect(invoke).toHaveBeenCalledWith("reveal_desktop_cli_executable", { provider: "claude", expected: detected.claude });
@@ -58,12 +83,15 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
     fireEvent.change(card.getByLabelText("Executable path"), { target: { value: `"${executable}"` } });
     await user.click(card.getByRole("button", { name: "Save" }));
     expect(await card.findByText(executable)).toBeTruthy();
+    await card.findByText("Inventory and capabilities · 2 installed plugins");
     expect(invoke).toHaveBeenCalledWith("set_cli_executable", { provider, executable });
   }
   const gemini = within(screen.getByRole("region", { name: "Gemini via agy" }));
   fireEvent.contextMenu(gemini.getByRole("heading", { name: "Gemini via agy" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Use PATH" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Use automatic detection" }));
   expect(await gemini.findByText("agy.exe is not installed on PATH")).toBeTruthy();
+  expect(await gemini.findByText("Executable not found")).toBeTruthy();
+  expect(gemini.queryByText("Installed plugins (2)")).toBeNull();
   expect(invoke).toHaveBeenCalledWith("set_cli_executable", { provider: "antigravity", executable: null });
   expect(vi.mocked(invoke).mock.calls.every(([command]) => command !== "probe_cli_executable")).toBe(true);
 });

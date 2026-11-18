@@ -620,7 +620,12 @@ pub trait CliAdapter: Send + Sync {
     fn transport(&self) -> Transport;
 
     fn discover(&self, configured: Option<&Path>) -> io::Result<PathBuf> {
-        discover_executable(self.provider(), configured, env::var_os("PATH"))
+        discover_executable(
+            self.provider(),
+            configured,
+            env::var_os("PATH"),
+            env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+        )
     }
 
     fn version_arguments(&self) -> Vec<OsString> {
@@ -742,6 +747,7 @@ fn discover_executable(
     provider: Provider,
     configured: Option<&Path>,
     path: Option<OsString>,
+    local_app_data: Option<&Path>,
 ) -> io::Result<PathBuf> {
     if let Some(file) = configured {
         if !file.is_absolute() {
@@ -757,12 +763,46 @@ fn discover_executable(
         .filter(|directory| directory.is_absolute())
         .map(|directory| directory.join(provider.executable()))
         .find_map(|candidate| validate_executable(&candidate).ok())
+        .or_else(|| {
+            if provider == Provider::Codex {
+                discover_codex_desktop(local_app_data?)
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| {
+            let locations = if provider == Provider::Codex {
+                "on PATH or in the local Codex Desktop installation"
+            } else {
+                "on PATH"
+            };
             io::Error::new(
                 ErrorKind::NotFound,
-                format!("{} is not installed on PATH", provider.executable()),
+                format!("{} is not installed {locations}", provider.executable()),
             )
         })
+}
+
+fn discover_codex_desktop(local_app_data: &Path) -> Option<PathBuf> {
+    if !local_app_data.is_absolute() {
+        return None;
+    }
+    let bin = local_app_data.join("OpenAI").join("Codex").join("bin");
+    let executable = Provider::Codex.executable();
+    validate_executable(&bin.join(executable)).ok().or_else(|| {
+        std::fs::read_dir(bin)
+            .ok()?
+            .filter_map(|entry| {
+                let path = validate_executable(&entry.ok()?.path().join(executable)).ok()?;
+                let modified = path
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                Some((modified, path))
+            })
+            .max()
+            .map(|(_, path)| path)
+    })
 }
 
 fn validate_executable(file: &Path) -> io::Result<PathBuf> {
@@ -795,16 +835,57 @@ mod tests {
         std::fs::write(&executable, [])?;
         let path = env::join_paths([Path::new("relative"), directory.path()])?;
         assert_eq!(
-            discover_executable(Provider::Claude, None, Some(path.clone()))?,
+            discover_executable(Provider::Claude, None, Some(path.clone()), None)?,
             dunce::canonicalize(executable)?
         );
         assert_eq!(
-            discover_executable(Provider::Claude, Some(Path::new("claude.exe")), Some(path))
-                .unwrap_err()
-                .kind(),
+            discover_executable(
+                Provider::Claude,
+                Some(Path::new("claude.exe")),
+                Some(path),
+                None
+            )
+            .unwrap_err()
+            .kind(),
             ErrorKind::InvalidInput
         );
-        assert!(discover_executable(Provider::Codex, None, None).is_err());
+        assert!(discover_executable(Provider::Codex, None, None, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_codex_desktop_when_codex_is_absent_from_path() -> anyhow::Result<()> {
+        let local_app_data = tempfile::tempdir()?;
+        let root = local_app_data.path();
+        let desktop_bin = root.join("OpenAI/Codex/bin/c38161ad8494f88c");
+        std::fs::create_dir_all(&desktop_bin)?;
+        let bundled = desktop_bin.join("codex.exe");
+        std::fs::write(&bundled, [])?;
+        assert_eq!(
+            discover_executable(Provider::Codex, None, None, Some(root))?,
+            dunce::canonicalize(bundled)?
+        );
+
+        let path_executable = root.join("codex.exe");
+        std::fs::write(&path_executable, [])?;
+        assert_eq!(
+            discover_executable(
+                Provider::Codex,
+                None,
+                Some(env::join_paths([root])?),
+                Some(root)
+            )?,
+            dunce::canonicalize(path_executable)?
+        );
+        assert!(
+            discover_executable(
+                Provider::Codex,
+                Some(&root.join("missing.exe")),
+                None,
+                Some(root)
+            )
+            .is_err()
+        );
         Ok(())
     }
 

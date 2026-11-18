@@ -12,6 +12,7 @@ import type { ReviewState } from "@/bindings/ReviewState";
 import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { useCustomizationInventory } from "@/customizations-panel";
+import type { CliPrerequisite } from "@/desktop-cli-prerequisites";
 import type { LiveModel } from "@/live-models";
 import { QualificationMatrix } from "@/qualification-matrix";
 import "./provider-inventory.css";
@@ -32,6 +33,7 @@ type InventoryKind = "all" | "models" | "plugins" | "skills" | "declarations";
 type StatusTone = "reported" | "warning" | "unknown";
 
 export const providerModelInventoryKey = (provider: Provider) => ["provider-model-inventory", provider] as const;
+export const providerPluginInventoryKey = (provider: Provider) => ["provider-plugin-inventory", provider] as const;
 export const providerSkillInventoryKey = (provider: Provider, checkoutId?: string) => checkoutId
   ? ["provider-skill-inventory", provider, checkoutId] as const : ["provider-skill-inventory", provider] as const;
 
@@ -70,17 +72,18 @@ function Availability({ reported }: { reported: boolean | null | undefined }) {
     : reported ? <Status tone="reported">Reported</Status> : <Status tone="warning">Unavailable in report</Status>;
 }
 
-export function ProviderInventory({ provider, checkoutId, inventory, refreshPlugins, pluginsRefreshing }: {
+export function ProviderInventory({ provider, checkoutId, inventory, installation, refreshPlugins, pluginsRefreshing }: {
   provider: Provider;
   checkoutId?: string;
   inventory: PluginInventory | null | undefined;
+  installation?: CliPrerequisite;
   refreshPlugins: () => Promise<void>;
   pluginsRefreshing: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState<InventoryKind>("all");
   const modelInventory = useQuery({
-    queryKey: providerModelInventoryKey(provider),
+    queryKey: [...providerModelInventoryKey(provider), installation?.executable, installation?.version],
     queryFn: () => invoke<ModelInventory>("provider_model_inventory", { provider }),
     retry: false,
     staleTime: 60_000,
@@ -161,7 +164,7 @@ export function ProviderInventory({ provider, checkoutId, inventory, refreshPlug
     </section>}
 
     {show("plugins") && (inventory ? <PluginReport inventory={inventory} entries={plugins} searching={searching} />
-      : <p className="provider-inventory-note">Check the CLI to load its installed plugins.</p>)}
+      : <p className="provider-inventory-note" role="status">{pluginsRefreshing ? "Querying the CLI for installed plugins…" : "Plugin inventory unavailable."}</p>)}
 
     {show("skills") && <section className="provider-inventory-section" aria-label="Local skills">
       <h3><FileCode2 size={16} aria-hidden /> Local skills <span>{skills.length}</span></h3>
