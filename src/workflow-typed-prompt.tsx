@@ -3,36 +3,26 @@ import { CornerDownLeft, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
-import type { JobRole } from "@/bindings/JobRole";
-import type { ModelSelection } from "@/bindings/ModelSelection";
-import type { SessionMode } from "@/bindings/SessionMode";
+import type { TemplateDraft } from "@/conversation-template-editor";
 import { LIVE_MODEL_PROVIDERS, sameModelSelection, useLiveModelOptions } from "@/live-models";
-import { WorkflowRequirementsEditor, type StageRequirements } from "@/workflow-stage-requirements";
+import { WorkflowRequirementsEditor } from "@/workflow-stage-requirements";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { promptReferenceValue, type PromptRoleChoice } from "@/workflow-prompt-model";
 import type { ReusableReference } from "@/workflow-reusable";
 import { templateVariables, type JsonSchema } from "@/workflow-schema-model";
+import { WorkflowResourceActions, type DraftResource } from "@/workflow-resource-actions";
 
-export type RoleSnapshot = {
-  name: string;
-  role: JobRole;
-  model: ModelSelection;
-  effort: string | null;
-  instructions: string;
-  toolScope: SessionMode;
-  completionContract: string;
-  reviewPolicy: "independent" | "cross_review" | "human_approval";
-  requirements?: StageRequirements;
-};
+export type RoleSnapshot = TemplateDraft;
 export type PromptSlot = "role" | "input_schema" | "output_schema" | "reviewer";
 type SelectionProps = {
   label: string; selected?: ReusableReference; choices: PromptRoleChoice[]; disabled?: boolean;
+  actions?: ReactNode;
   onChange: (reference?: ReusableReference) => void;
 };
 
-export function WorkflowReferenceField({ label, selected, choices, disabled, onChange }: SelectionProps) {
+export function WorkflowReferenceField({ label, selected, choices, disabled, onChange, actions }: SelectionProps) {
   const value = promptReferenceValue(selected);
-  return <label>{label}<select value={value} disabled={disabled} onChange={(event) =>
+  const field = <label>{label}<select value={value} disabled={disabled} onChange={(event) =>
     onChange(choices.find(({ reference }) => promptReferenceValue(reference) === event.currentTarget.value)?.reference)}>
     <option value="">Choose {label.toLowerCase()}</option>
     {selected && !choices.some(({ reference }) => promptReferenceValue(reference) === value) && <option value={value}>
@@ -41,6 +31,7 @@ export function WorkflowReferenceField({ label, selected, choices, disabled, onC
     </option>}
     {choices.map(({ name, reference }) => <option key={promptReferenceValue(reference)} value={promptReferenceValue(reference)}>{name}</option>)}
   </select></label>;
+  return actions ? <div className="workflow-reference-field">{field}{actions}</div> : field;
 }
 
 function Resettable({ changed, source, reset, children }: {
@@ -56,7 +47,8 @@ function Resettable({ changed, source, reset, children }: {
 }
 
 export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPrompt, references, defaults, role, defaultRoleOverrides,
-  roleOverrides, roleChoices, schemaChoices, inputSchema, disabled, onPrompt, onReference, onRoleOverrides, onSavePrefab, title, onTitle }: {
+  roleOverrides, roleChoices, schemaChoices, inputSchema, disabled, onPrompt, onReference, onRoleOverrides, onSavePrefab, title, onTitle,
+  draftResource, onResource }: {
   projectId: string; checkoutId: string; prompt?: string; defaultPrompt?: string;
   references: Partial<Record<PromptSlot, ReusableReference>>;
   defaults: Partial<Record<PromptSlot, ReusableReference>>;
@@ -65,6 +57,8 @@ export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPro
   disabled: boolean; onPrompt: (prompt?: string) => void; onReference: (slot: PromptSlot, reference?: ReusableReference) => void;
   onRoleOverrides: (overrides: Record<string, unknown>) => void; onSavePrefab?: (name: string) => void;
   title?: string; onTitle?: (title: string) => void;
+  draftResource?: DraftResource;
+  onResource?: (slot: PromptSlot, reference: ReusableReference) => void;
 }) {
   const [variable, selectVariable] = useState("");
   const [name, setName] = useState("");
@@ -75,6 +69,9 @@ export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPro
   const field = (slot: PromptSlot, label: string, choices: PromptRoleChoice[]) => {
     const selected = references[slot] ?? defaults[slot];
     const picker = <WorkflowReferenceField label={label} selected={selected} choices={choices} disabled={disabled}
+      actions={!disabled && <WorkflowResourceActions projectId={projectId} checkoutId={checkoutId}
+        kind={slot === "role" || slot === "reviewer" ? "role" : "schema"} label={label} selected={selected}
+        draftResource={draftResource} onSaved={(reference) => (onResource ?? onReference)(slot, reference)} />}
       onChange={(reference) => onReference(slot, reference)} />;
     return disabled || !defaults[slot] ? picker : <Resettable changed={!!references[slot]}
       source="Inherited" reset={() => onReference(slot)}>{picker}</Resettable>;

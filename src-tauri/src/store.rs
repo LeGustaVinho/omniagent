@@ -153,6 +153,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/136-workflow-wait-deadlines.sql"),
     include_str!("../migrations/137-workflow-fork-branches.sql"),
     include_str!("../migrations/138-workflow-schemas.sql"),
+    include_str!("../migrations/139-deleted-workflow-drafts.sql"),
 ];
 // Branch snapshots used some numbers for different migrations. Table names identify the schema
 // already installed, regardless of the original number stored in user_version.

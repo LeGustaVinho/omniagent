@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, FilePenLine, Sparkles } from "lucide-react";
+import { FilePenLine, Sparkles } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useId, useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
-import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { WorkflowDraftRow } from "@/workflow-draft-row";
+import { WorkflowBack } from "@/workflow-package-review";
 import { availableModelSelection, liveModelsQuery, sameModelSelection, useLiveModelOptions } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
@@ -21,7 +22,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 type Version = { id: string; revision: string };
 type AuthoringBase = { version: WorkflowAssistanceVersion; name: string; prompt?: boolean; typedPrompt?: boolean; nodePrefab?: boolean };
 type Revision = { id: string; runId: string | null; graph: WorkflowGraph; layout?: WorkflowLayout; definitions?: WorkflowDefinitions };
-type ProjectDraft = { id: string; name: string | null; revision: string | null };
+type ProjectDraft = { id: string; name: string | null; revision: string | null; published?: boolean };
 type Draft = {
   id: string;
   conversationId: string;
@@ -173,12 +174,18 @@ function baseKey({ kind, destination, id, revision }: WorkflowAssistanceVersion)
 }
 
 export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
-  const projectId = checkout.projectId;
-  const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }) });
-  const { copy, feedback } = useContextActionFeedback();
   return <PipelineBuilderLanding checkout={checkout} openWorkspace={openWorkspace}
     authoring={<BuilderAuthoring checkout={checkout} openWorkspace={openWorkspace} />}
-    drafts={<section aria-label="Pipeline drafts" className="pipeline-builder-card">
+    drafts={<LegacyPipelineDrafts checkout={checkout} openWorkspace={openWorkspace} />} />;
+}
+
+export function LegacyPipelineDrafts({ checkout, openWorkspace, onlyUnpublished, onOpen }: Pick<WorkspaceProps, "checkout" | "openWorkspace"> & {
+  onlyUnpublished?: boolean; onOpen?: (id: string) => void;
+}) {
+  const projectId = checkout.projectId;
+  const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }),
+    select: (data) => onlyUnpublished ? data.filter(({ published }) => !published) : data });
+  return <section aria-label="Pipeline drafts" className="pipeline-builder-card">
       <header className="pipeline-builder-card-heading">
         <span className="pipeline-builder-icon"><FilePenLine size={17} aria-hidden /></span>
         <div><h3>Pipeline drafts</h3><p>Resume a draft or check an authoring request.</p></div>
@@ -186,34 +193,26 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
       <div className="pipeline-builder-card-body">
         {drafts.isPending && <p role="status">Loading pipeline drafts…</p>}
         {drafts.error && <p role="alert">{String(drafts.error)}</p>}
-        {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
         {drafts.data?.length === 0 && <p className="pipeline-builder-empty">No pipeline drafts yet.</p>}
         {!!drafts.data?.length && <ul className="workflow-draft-list">
-          {drafts.data.map((draft) => <li key={draft.id}>
-            <ContextActions label={draft.name ?? draft.id} className="workflow-draft-menu" groups={[[
-              { label: draft.revision ? "Open draft" : "Open request", run: () => openWorkspace("pipelines", workflowAuthoringTarget(draft.id)) },
-              { label: "Copy draft ID", run: () => copy(draft.id) },
-              ...(draft.revision ? [{ label: "Copy draft revision", run: () => copy(draft.revision!) }] : []),
-            ]]}><div><strong>{draft.name ?? "Pipeline authoring request"}</strong>
-              {draft.revision && <p>Revision <code>{draft.revision.slice(0, 12)}</code></p>}
-            </div></ContextActions>
-            <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", workflowAuthoringTarget(draft.id))}>
-              {draft.revision ? "Open draft" : "Open request"} <ArrowRight size={15} aria-hidden />
-            </Button>
-          </li>)}
+          {drafts.data.map((draft) => <WorkflowDraftRow key={draft.id} projectId={projectId} draftId={draft.id}
+            kind="graph" name={draft.name ?? "Pipeline authoring request"} revision={draft.revision} published={draft.published}
+            openLabel={draft.revision ? "Open draft" : "Open request"}
+            open={() => onOpen ? onOpen(draft.id) : openWorkspace("pipelines", workflowAuthoringTarget(draft.id))} />)}
         </ul>}
       </div>
-    </section>}
-  />;
+    </section>;
 }
 
-export function PipelineAuthoringEditor(props: WorkspaceProps & { draftId: string }) {
+type AuthoringProps = WorkspaceProps & { draftId: string; onBack?: () => void };
+
+export function PipelineAuthoringEditor(props: AuthoringProps) {
   return props.draftId.startsWith("package:")
     ? <WorkflowPackageEditor {...props} draftId={props.draftId.slice("package:".length)} />
     : <GraphAuthoringEditor {...props} />;
 }
 
-function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, openQueueJob }: WorkspaceProps & { draftId: string }) {
+function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, openQueueJob, onBack }: AuthoringProps) {
   const projectId = checkout.projectId;
   const query = useQuery({
     queryKey: editorKey(projectId, draftId),
@@ -225,6 +224,7 @@ function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, 
   const runId = draft?.request.runId;
   return <section aria-label="Pipeline draft editor" className="pipeline-stack h-full overflow-auto p-4">
     <header className="flex flex-wrap items-center gap-2">
+      {onBack && <WorkflowBack onClick={onBack} />}
       <h1 className="mr-auto text-lg font-semibold">{draft?.head?.graph.name ?? "Pipeline authoring"}</h1>
       {draft?.publication && <WorkflowEditorAssistance projectId={projectId} checkoutId={checkout.checkoutId} openWorkspace={openWorkspace}
         artifact={{ name: draft.head?.graph.name ?? "Pipeline", version: { ...draft.publication.workflow, kind: "pipeline", destination: "project" } }} />}

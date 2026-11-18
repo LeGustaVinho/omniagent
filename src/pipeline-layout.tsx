@@ -149,11 +149,14 @@ export function PipelineInspectorHeader({ detail, title, children }: { detail: s
   </header>;
 }
 
-export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, className, inspectorRequest, collapsibleInspector }: {
+export type PipelineInspectorView = { drawerOpen?: boolean; dockedOpen?: boolean; scrollTop?: number };
+
+export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, className, inspectorRequest, collapsibleInspector, view }: {
   canvas: ReactNode; canvasLabel: string; inspector: ReactNode; inspectorLabel: string;
   inspectorClassName?: string; className?: string;
   inspectorRequest?: number;
   collapsibleInspector?: boolean;
+  view?: PipelineInspectorView;
 }) {
   const inspectorId = useId();
   const workspace = useRef<HTMLDivElement>(null);
@@ -161,11 +164,20 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
   const inspectorOrigin = useRef<HTMLElement | null>(null);
   const { width } = useWorkspaceSize(workspace);
   const drawer = width < 792;
-  const [inspectorPreference, setInspectorPreference] = useState(false);
+  const [inspectorPreference, setInspectorPreference] = useState(view?.drawerOpen ?? false);
   const [dismissedRequest, setDismissedRequest] = useState(0);
-  const [dockedInspector, setDockedInspector] = useState(true);
+  const [dockedInspector, setDockedInspector] = useState(view?.dockedOpen ?? true);
   const inspectorOpen = inspectorPreference || Boolean(inspectorRequest && inspectorRequest !== dismissedRequest);
   const inspectorBody = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (view) {
+      view.drawerOpen = inspectorOpen;
+      view.dockedOpen = dockedInspector;
+    }
+  }, [view, inspectorOpen, dockedInspector]);
+  useEffect(() => {
+    if (inspectorBody.current && view?.scrollTop !== undefined) inspectorBody.current.scrollTop = view.scrollTop;
+  }, [view, drawer, inspectorOpen, dockedInspector]);
   useEffect(() => {
     if (!inspectorRequest || inspectorRequest === dismissedRequest) return;
     setDockedInspector(true);
@@ -207,7 +219,8 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
         <ControlTooltip label="Close inspector"><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close inspector"
           onClick={closeInspector}><X size={16} aria-hidden /></Button></ControlTooltip>
       </div>}
-      <div className="pipeline-inspector-scroll" tabIndex={-1} ref={inspectorBody}>
+      <div className="pipeline-inspector-scroll" tabIndex={-1} ref={inspectorBody}
+        onScroll={(event) => { if (view) view.scrollTop = event.currentTarget.scrollTop; }}>
         {inspector}
         {collapsibleInspector && !drawer && <div className="pipeline-docked-inspector-close">
           <ControlTooltip label="Hide inspector"><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Hide inspector"

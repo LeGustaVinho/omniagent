@@ -25,6 +25,33 @@ use crate::workflows::{
 use super::*;
 
 impl Store {
+    pub async fn publish_workflow_resource(
+        &self,
+        project: String,
+        member: PackageMember,
+    ) -> Result<PackageArtifactVersion> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)", [&project],
+                |row| row.get::<_, bool>(0))?, "The project is unavailable");
+            ensure!(
+                matches!(member.body, PackageArtifactBody::Schema { .. })
+                    || member.destination == PackageDestination::Library
+                        && matches!(member.body, PackageArtifactBody::Role { .. }),
+                "Choose a Schema or a shared Role"
+            );
+            ensure!(member.references.is_empty(), "The resource cannot bind package references");
+            let package = WorkflowPackage { name: member.name.clone(), members: vec![member] };
+            let document = PackageDocument::capture(&tx, &project, package, None)?;
+            ensure!(stale_member(&tx, &project, &document.package)?.is_none(),
+                "The published revision changed. Open the current revision before saving.");
+            let version = resolve_package(&tx, &project, document)?
+                .pop().context("The resource was not published")?.artifact.version;
+            tx.commit()?;
+            Ok(version)
+        }).await
+    }
+
     pub async fn publish_reviewed_workflow_package(
         &self,
         project: String,

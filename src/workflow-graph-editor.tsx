@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineToolbar } from "@/pipeline-layout";
+import type { PipelineInspectorView } from "@/pipeline-layout";
 import { WorkflowControlFields } from "@/workflow-control-editor";
 import { StartInputFields } from "@/workflow-node-fields";
 import { AgentRoleFields } from "@/workflow-stage-model";
@@ -176,9 +177,11 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
   JSON.stringify(Object.entries(bindings ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([id, binding]) =>
     [id, binding.reference, binding.slots]));
 
-export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
+export type WorkflowGraphView = { selected?: string; viewport?: Viewport; inspector: PipelineInspectorView };
+
+export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, view,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
-  onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
+  onDerive, deriveDisabled, fullHeight = false, toolbarStart,
   promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
   projectId: string;
   checkoutId?: string;
@@ -197,8 +200,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   deriveDisabled?: boolean;
   fullHeight?: boolean;
   toolbarStart?: ReactNode;
-  initialViewport?: Viewport;
-  onViewportChange?: (viewport: Viewport) => void;
+  view?: WorkflowGraphView;
   promptRoles?: Record<string, string>;
   nameLabel?: string;
   inspectPrompt?: (id: string) => ReactNode;
@@ -209,7 +211,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const { graph, layout } = state;
   const hasEnd = graph.nodes.some(({ kind }) => kind === "end");
   const [theme, setTheme] = useState(readTheme);
-  const [selected, select] = useState(graph.nodes[0]?.id ?? "");
+  const [selected, select] = useState(() => graph.nodes.find(({ id }) => id === view?.selected)?.id ?? graph.nodes[0]?.id ?? "");
+  useEffect(() => { if (view) view.selected = selected; }, [view, selected]);
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -237,7 +240,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const available = canUpdateDefinition && definition && catalog.find(({ kind, revision }) => kind === definition.kind && revision > definition.revision);
   const positions = useMemo(() => initialNodePositions(graph), [graph]);
   const [openingViewport] = useState(() => {
-    if (initialViewport) return initialViewport;
+    if (view?.viewport) return view.viewport;
     if (!fullHeight || !graph.nodes.length) return;
     const entry = graph.nodes.find(({ kind }) => isStartNode(kind)) ?? graph.nodes[0]!;
     return readableGraphViewport(graph.nodes.map(({ id }) => layout[id] ?? positions[id]!), layout[entry.id] ?? positions[entry.id]);
@@ -655,7 +658,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         <ul>{problems.map((issue, i) => <li key={`${issue}:${i}`}>{issue}</li>)}</ul>
       </details>}
     </PipelineToolbar>
-    <PipelineCanvasFrame className="workflow-graph-frame" canvasLabel="Pipeline graph canvas" inspectorLabel="Node configuration"
+    <PipelineCanvasFrame className="workflow-graph-frame" canvasLabel="Pipeline graph canvas" inspectorLabel="Node configuration" view={view?.inspector}
       collapsibleInspector={fullHeight} inspectorRequest={inspectorRequest} inspectorClassName="workflow-graph-inspector pipeline-form"
       canvas={<div ref={canvas} tabIndex={0} aria-label="Workflow canvas actions" className="workflow-graph-canvas" onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
@@ -695,7 +698,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           fitView={!openingViewport} defaultViewport={openingViewport} fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={fullHeight ? 0.025 : 0.08} maxZoom={2}
           compactControls={fullHeight} canvasTools={fullHeight && graph.nodes.length >= 16 ?
             <MiniMap pannable zoomable ariaLabel="Pipeline overview" nodeColor="var(--primary)" /> : undefined}
-          onMoveEnd={(_, viewport) => onViewportChange?.(viewport)}
+          onMoveEnd={view && ((_, viewport) => { view.viewport = viewport; })}
           selectionKeyCode="Shift" multiSelectionKeyCode={["Control", "Meta"]}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}

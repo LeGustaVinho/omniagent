@@ -1,33 +1,59 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, Braces, Layers3, Plus, Waypoints } from "lucide-react";
+import { Braces, Layers3, Plus, Search, UserRound, Waypoints, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConversationTemplateEditor, emptyRoleDraft } from "@/conversation-template-editor";
+import { LegacyPipelineDrafts, PipelineAuthoringEditor } from "@/workflow-authoring";
 import { PipelineSectionHeading } from "@/pipeline-layout";
-import { packageDraftTarget, schemaMember, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
+import { newPipelineMember, schemaMember, WorkflowPackageEditor, WorkflowTemplateChooser,
+  type PackageDraft, type PackageMemberSummary, type PackageSummary, type WorkflowMember } from "@/workflow-authoring-package";
+import { WorkflowArtifactViewer } from "@/workflow-package-review";
+import { WorkflowDraftRow } from "@/workflow-draft-row";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import type { WorkflowCatalogItem } from "@/workflow-node-picker";
 import { defaultTypedPrompt } from "@/workflow-prompt-model";
-import type { ReusableBody, ReusableReference } from "@/workflow-reusable";
+import { publishedWorkflowArtifactQuery } from "@/workflow-reusable";
+import { workflowTemplates } from "@/workflow-templates";
 import type { WorkspaceProps } from "@/workbench-contract";
-import { NativeWorkflowTemplates } from "@/workflow-native-templates";
 
-const sections = [
-  { key: "schema", label: "Schemas", title: "Schema", icon: Braces, description: "Define the data nodes can pass to each other.",
-    includes: ({ version }: WorkflowCatalogItem) => version.kind === "schema" },
-  { key: "prefab", label: "Node Prefabs", title: "Node Prefab", icon: Layers3, description: "Save a reusable AI Node with a Role, prompt, and Schemas.",
-    includes: ({ nodePrefab }: WorkflowCatalogItem) => Boolean(nodePrefab) },
-  { key: "function", label: "Functions", title: "Function", icon: Waypoints, description: "Build a reusable graph between Start and Return.",
-    includes: ({ version, prompt, typedPrompt }: WorkflowCatalogItem) => version.kind === "subflow" && !prompt && !typedPrompt },
+export const libraryCategories = [
+  { id: "pipeline", label: "Pipeline", title: "Pipeline", icon: Workflow, kind: "pipeline" },
+  { id: "functions", label: "Functions", title: "Function", icon: Waypoints, kind: "subflow" },
+  { id: "schemas", label: "Schemas", title: "Schema", icon: Braces, kind: "schema" },
+  { id: "prefabs", label: "Node Prefabs", title: "Node Prefab", icon: Layers3, kind: "prefab" },
+  { id: "roles", label: "Roles", title: "Role", icon: UserRound, kind: "role" },
 ] as const;
 
-type DraftKind = typeof sections[number]["key"];
-type DraftRequest = { kind: DraftKind; name: string } | { kind: "published"; item: WorkflowCatalogItem };
-type DraftMember = { key: string; name: string; body: ReusableBody; references?: Record<string, ReusableReference>;
-  base?: WorkflowCatalogItem["version"]; destination?: string };
+export type LibraryCategory = typeof libraryCategories[number]["id"];
+type DraftKind = "pipeline" | "schema" | "prefab" | "function";
+type DraftMember = WorkflowMember;
+type NativeTemplate = typeof workflowTemplates[number];
+type Screen =
+  | { type: "draft"; id: string; memberKey?: string }
+  | { type: "legacy"; id: string }
+  | { type: "published"; item: WorkflowCatalogItem }
+  | { type: "native"; template: NativeTemplate; memberKey: string };
+
+function memberKind({ version, nodePrefab, prompt, typedPrompt }: WorkflowCatalogItem) {
+  return nodePrefab ? "prefab" : prompt || typedPrompt ? "prompt" : version.kind;
+}
+
+function draftKind({ kind, nodePrefab, prompt }: PackageMemberSummary) {
+  return nodePrefab ? "prefab" : prompt ? "prompt" : kind;
+}
+
+function nativeMembers(template: NativeTemplate): WorkflowMember[] {
+  return template.members.map(({ key, name, body, ...member }) => {
+    const { template: role, ...content } = body;
+    return { key, name, body: { ...content, ...(role && { template: { ...emptyRoleDraft(), ...role } }) },
+      references: "references" in member ? member.references : undefined };
+  });
+}
 
 function newMember(kind: DraftKind, name: string): DraftMember {
   switch (kind) {
+    case "pipeline": return newPipelineMember(name);
     case "schema": return schemaMember(kind, name);
     case "prefab": return { key: kind, name, body: { kind: "prompt", prompt: { ...defaultTypedPrompt(), nodePrefab: true } } };
     case "function": return { key: kind, name, body: {
@@ -47,10 +73,18 @@ function newMember(kind: DraftKind, name: string): DraftMember {
   }
 }
 
-export function WorkflowLibrary({ projectId, openWorkspace }: { projectId: string; openWorkspace: WorkspaceProps["openWorkspace"] }) {
+export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { category: LibraryCategory }) {
+  const { checkout, openWorkspace } = props;
+  const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
-  const [open, setOpen] = useState<DraftKind>();
+  const section = libraryCategories.find(({ id }) => id === category)!;
+  const [screen, show] = useState<Screen>();
+  const [filter, setFilter] = useState("");
+  const [create, setCreate] = useState(false);
   const [name, setName] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const scroll = useRef(0);
+  const origin = useRef<HTMLElement | null>(null);
   const catalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<WorkflowCatalogItem[]>("workflow_package_catalog", { projectId }),
@@ -58,75 +92,155 @@ export function WorkflowLibrary({ projectId, openWorkspace }: { projectId: strin
   const drafts = useQuery({
     queryKey: ["workflow-packages", projectId],
     queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId }),
-    select: (items) => items.filter(({ standalonePipeline, published }) => !standalonePipeline && !published),
+    select: (items) => items.filter(({ published }) => !published),
   });
-  function openDraft(result: PackageDraft) {
+
+  function enter(next: Screen) {
+    if (!screen) {
+      scroll.current = list.current?.scrollTop ?? 0;
+      origin.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    show(next);
+  }
+
+  function back() {
+    show(undefined);
+    edit.reset();
+    requestAnimationFrame(() => {
+      if (list.current) list.current.scrollTop = scroll.current;
+      const target = origin.current?.isConnected && !origin.current.closest("[data-state='closed']")
+        ? origin.current : list.current?.querySelector<HTMLInputElement>("input[type='search']");
+      target?.focus({ preventScroll: true });
+    });
+  }
+
+  function openDraft(result: PackageDraft, memberKey?: string) {
     client.setQueryData(["workflow-packages", projectId, result.id], result);
     void client.invalidateQueries({ queryKey: ["workflow-packages", projectId], exact: true });
-    openWorkspace("pipelines", packageDraftTarget(result.id));
+    enter({ type: "draft", id: result.id, memberKey });
   }
-  const draft = useMutation({
-    mutationFn: async (request: DraftRequest) => {
+
+  const edit = useMutation({
+    mutationFn: async (request: { item: WorkflowCatalogItem } | { kind: DraftKind; name: string }) => {
       let member: DraftMember;
-      if (request.kind === "published") {
-        const { item } = request;
-        const artifact = await invoke<{ body: ReusableBody; references: Record<string, ReusableReference> } | null>(
-          "read_published_workflow_package_artifact", { projectId, version: item.version });
-        if (!artifact) throw new Error("The selected artifact revision is unavailable.");
-        member = { key: "artifact", name: item.name, body: artifact.body, references: artifact.references,
-          base: item.version, destination: item.version.destination };
+      if ("item" in request) {
+        const { version } = request.item;
+        const artifact = await client.fetchQuery(publishedWorkflowArtifactQuery(projectId, version));
+        if (!artifact) throw new Error("The selected revision is unavailable.");
+        member = { key: "artifact", name: artifact.name, body: artifact.body, references: artifact.references,
+          base: version, destination: version.destination };
       } else {
         member = newMember(request.kind, request.name);
       }
-      return invoke<PackageDraft>("create_workflow_package", { projectId, conversationId: null, package: { name: member.name, members: [member] } });
+      const draft = await invoke<PackageDraft>("create_workflow_package", {
+        projectId, conversationId: null, package: { name: member.name, members: [member] },
+      });
+      return { draft, memberKey: member.key };
     },
-    onSuccess: (result) => { setOpen(undefined); openDraft(result); },
+    onSuccess: ({ draft, memberKey }) => { setCreate(false); openDraft(draft, memberKey); },
   });
-  const items = catalog.data ?? [];
-  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
-    <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
-    <NativeWorkflowTemplates projectId={projectId} onCreated={openDraft} />
-    {(catalog.error || drafts.error || !open && draft.error) && <p role="alert">{String(catalog.error ?? drafts.error ?? draft.error)}</p>}
-    {catalog.isPending && <p role="status">Loading published artifacts…</p>}
-    {sections.map(({ key, label, title, description, icon: Icon, includes }) => {
-      const list = items.filter(includes);
-      return <section className="workflow-library-section" key={key} aria-label={label}>
+
+  const query = filter.trim().toLowerCase();
+  const matches = (name: string) => name.toLowerCase().includes(query);
+  const published = (catalog.data ?? []).filter((item) => memberKind(item) === section.kind && matches(item.name)
+    && (category !== "roles" || item.version.destination === "library"));
+  const categorizedDrafts = (drafts.data ?? []).flatMap<{ draft: PackageSummary; member?: PackageMemberSummary; label: string }>((draft) => {
+    const members = draft.members ?? [];
+    const entries = members.filter((member) => draftKind(member) === section.kind && (matches(member.name) || matches(draft.name)));
+    if (entries.length) return entries.map((member) => ({ draft, member, label: member.name }));
+    if (category === "pipeline" && !members.some((member) => libraryCategories.some(({ kind }) => kind === draftKind(member))) && matches(draft.name)) {
+      return [{ draft, member: undefined, label: draft.name }];
+    }
+    return [];
+  });
+  const creation = section.kind === "subflow" ? "function" : section.kind;
+  const intro = category === "roles" ? "Shared Roles" : section.label;
+  const heading = <PipelineSectionHeading title={intro} icon={<section.icon size={20} aria-hidden />} />;
+  const error = catalog.error ?? drafts.error ?? (!create && !screen ? edit.error : null);
+  return <>
+    <div ref={list} hidden={!!screen} className="workflow-library-list">
+      {category === "roles" && <ConversationTemplateEditor checkout={checkout} openWorkspace={openWorkspace} />}
+      <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
         <header className="pipeline-actions justify-between">
-          <h3><Icon size={17} aria-hidden /> {label}</h3>
-          <WorkflowBuilderDialog title={`New ${title}`} description={description} open={open === key}
-            onOpenChange={(next) => {
-              if (draft.isPending) return;
-              if (next) { draft.reset(); setName(""); }
-              setOpen(next ? key : undefined);
-            }} trigger={<Button type="button" variant="outline" disabled={draft.isPending}>
-              <Plus size={15} aria-hidden /> New {title}
-            </Button>}>
+          {heading}
+          {creation !== "role" && <WorkflowBuilderDialog title={`New ${section.title}`} description={`Name your ${section.title.toLowerCase()} to open its editor.`}
+            open={create} onOpenChange={(next) => {
+              if (edit.isPending) return;
+              if (next) { edit.reset(); setName(""); }
+              setCreate(next);
+            }} trigger={<Button type="button"><Plus size={15} aria-hidden /> New {section.title}</Button>}>
             <form className="pipeline-stack pipeline-form" onSubmit={(event) => {
               event.preventDefault();
-              if (name.trim() && !draft.isPending) draft.mutate({ kind: key, name: name.trim() });
+              if (name.trim() && !edit.isPending) edit.mutate({ kind: creation, name: name.trim() });
             }}>
-              <label>Name<input value={name} disabled={draft.isPending} onChange={(event) => setName(event.currentTarget.value)}
-                required maxLength={160} autoComplete="off" /></label>
-              <Button type="submit" className="w-fit" disabled={!name.trim() || draft.isPending}>Create {title}</Button>
-              {draft.error && <p role="alert">{String(draft.error)}</p>}
+              <label>Name<input value={name} disabled={edit.isPending} onChange={(event) => setName(event.currentTarget.value)}
+                required maxLength={120} autoComplete="off" /></label>
+              <Button type="submit" className="w-fit" disabled={!name.trim() || edit.isPending}>Create {section.title}</Button>
+              {edit.error && <p role="alert">{String(edit.error)}</p>}
             </form>
-          </WorkflowBuilderDialog>
+          </WorkflowBuilderDialog>}
         </header>
-        {list.length ? <ul>{list.map((item) => <li key={JSON.stringify(item.version)}>
-          <div><strong>{item.name}</strong><code>{item.version.revision.slice(0, 10)}</code></div>
-          <Button type="button" variant="ghost" disabled={draft.isPending} aria-label={`Open revision of ${item.name}`}
-            onClick={() => draft.mutate({ kind: "published", item })}>Open <ArrowUpRight size={15} aria-hidden /></Button>
-          {!!item.blockers.length && <small>{item.blockers.join(" ")}</small>}
-        </li>)}</ul> : !catalog.isPending && <p className="text-sm text-muted-foreground">No published {label.toLowerCase()}.</p>}
-      </section>;
-    })}
-    {!!drafts.data?.length && <section className="workflow-library-section" aria-label="Reusable drafts">
-      <h3>Reusable drafts</h3>
-      <ul>{drafts.data.map(({ id, name }) => <li key={id}>
-        <strong>{name}</strong>
-        <Button type="button" variant="ghost" aria-label={`Open draft of ${name}`}
-          onClick={() => openWorkspace("pipelines", packageDraftTarget(id))}>Open draft <ArrowUpRight size={15} aria-hidden /></Button>
-      </li>)}</ul>
-    </section>}
-  </section>;
+        <label className="work-search workflow-library-search"><Search size={15} aria-hidden />
+          <input type="search" aria-label={`Search ${intro}`} placeholder={`Search ${intro.toLowerCase()}`} value={filter}
+            onChange={(event) => setFilter(event.currentTarget.value)} /></label>
+        {error && <p role="alert">{String(error)}</p>}
+        <section className="workflow-library-section" aria-label="Published revisions">
+          <h3>Published</h3>
+          {catalog.isPending ? <p role="status">Loading published revisions…</p> : published.length ? <ul>{published.map((item) =>
+            <li key={JSON.stringify(item.version)}>
+              <div><strong>{item.name}</strong><code>{item.version.revision.slice(0, 10)}</code></div>
+              <div className="workflow-library-actions">
+                <Button type="button" variant="outline" aria-label={`View ${item.name}`} onClick={() => enter({ type: "published", item })}>View</Button>
+                <Button type="button" variant="outline" aria-label={`Edit ${item.name}`} disabled={edit.isPending}
+                  onClick={() => edit.mutate({ item })}>Edit</Button>
+              </div>
+              {!!item.blockers.length && <small>{item.blockers.join(" ")}</small>}
+            </li>)}</ul> : <p className="pipeline-meta">No published {intro.toLowerCase()}.</p>}
+        </section>
+        <section className="workflow-library-section" aria-label="Draft revisions">
+          <h3>Drafts</h3>
+          {drafts.isPending ? <p role="status">Loading drafts…</p> : categorizedDrafts.length ? <ul>{categorizedDrafts.map(({ draft, member, label }) => {
+            const open = () => enter({ type: "draft", id: draft.id, memberKey: member?.key });
+            return category === "pipeline" && member?.kind === "pipeline" ?
+              <WorkflowDraftRow key={`${draft.id}:${member.key}`} projectId={projectId} draftId={draft.id} kind="package"
+                name={label} revision={draft.revision} memberCount={draft.memberCount} open={open} openLabel="Open draft"
+                openAriaLabel={`Open draft of ${label}`} /> :
+              <li key={`${draft.id}:${member?.key ?? ""}`}><strong>{label}</strong>
+                <Button type="button" variant="outline" aria-label={`Open draft of ${label}`} onClick={open}>Open draft</Button></li>;
+          })}</ul> : <p className="pipeline-meta">No drafts.</p>}
+        </section>
+        {category === "pipeline" && <LegacyPipelineDrafts checkout={checkout} openWorkspace={openWorkspace} onlyUnpublished
+          onOpen={(id) => enter({ type: "legacy", id })} />}
+        <section className="workflow-library-section" aria-label="Native templates">
+          <h3>Native templates</h3>
+          {workflowTemplates.map((template) => {
+            const entries = template.members.filter(({ kind, name }) => kind === section.kind && matches(name));
+            const prompts = category === "pipeline" ? template.members.filter(({ kind }) => kind === "prompt") : [];
+            return entries.length > 0 && <article key={template.key} className="workflow-native-template" aria-label={template.name}>
+              <header className="workflow-native-template-heading"><Workflow size={20} aria-hidden /><h4>{template.name}</h4>
+                {category === "pipeline" && <WorkflowTemplateChooser projectId={projectId} initialTemplateKey={template.key} onCreated={openDraft} />}
+              </header>
+              <ul>{entries.map(({ key, name }) => <li key={key}><strong>{name}</strong>
+                <Button type="button" variant="outline" aria-label={`View ${name}`}
+                  onClick={() => enter({ type: "native", template, memberKey: key })}>View</Button></li>)}</ul>
+              {prompts.length > 0 && <details><summary>Prompts</summary><ul>{prompts.map(({ key, name }) =>
+                <li key={key}><strong>{name}</strong><Button type="button" variant="outline" aria-label={`View ${name}`}
+                  onClick={() => enter({ type: "native", template, memberKey: key })}>View</Button></li>)}</ul></details>}
+            </article>;
+          })}
+        </section>
+      </section>
+    </div>
+    {screen?.type === "draft" && <WorkflowPackageEditor key={screen.id} {...props} draftId={screen.id} memberKey={screen.memberKey} onBack={back} />}
+    {screen?.type === "legacy" && <PipelineAuthoringEditor key={screen.id} {...props} draftId={screen.id} onBack={back} />}
+    {screen?.type === "published" && <WorkflowArtifactViewer projectId={projectId} checkoutId={checkoutId}
+      source={{ version: screen.item.version }} onBack={back} actions={<>
+        <Button type="button" disabled={edit.isPending} onClick={() => edit.mutate({ item: screen.item })}>Edit</Button>
+        {edit.error && <p role="alert">{String(edit.error)}</p>}
+      </>} />}
+    {screen?.type === "native" && <WorkflowArtifactViewer projectId={projectId} checkoutId={checkoutId}
+      source={{ key: screen.memberKey }} members={nativeMembers(screen.template)} onBack={back}
+      actions={<WorkflowTemplateChooser projectId={projectId} initialTemplateKey={screen.template.key}
+        onCreated={(draft) => openDraft(draft, screen.memberKey)} />} />}
+  </>;
 }

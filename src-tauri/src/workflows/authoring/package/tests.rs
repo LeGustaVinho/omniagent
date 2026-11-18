@@ -72,6 +72,58 @@ fn package(members: Vec<PackageMember>) -> WorkflowPackage {
 }
 
 #[tokio::test]
+async fn deletes_pipeline_package_revisions_but_keeps_a_published_base() -> Result<()> {
+    use crate::workflows::authoring::WorkflowDraftKind;
+
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("delete-package.sqlite"))?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let project = repo.project_id;
+    let pipeline = member("pipeline", PackageArtifactBody::Pipeline { graph: graph() });
+    let source = store.create_workflow_package(project.clone(), None, package(vec![pipeline.clone()])).await?;
+    let publication = commit(&store, &project, &source).await?;
+    let base = artifact(&publication, "pipeline").version.clone();
+    let mut editing = pipeline;
+    editing.base = Some(base.clone());
+    let draft = store.create_workflow_package(project.clone(), None, package(vec![
+        editing, member("schema", PackageArtifactBody::Schema { fields: vec![] }),
+    ])).await?;
+    let mut changed = draft.package.clone();
+    changed.name = "Second draft revision".into();
+    let updated = store.save_workflow_package(project.clone(), draft.id.clone(), draft.revision.clone(), changed).await?;
+    assert!(store.delete_workflow_draft(project.clone(), source.id.clone(), WorkflowDraftKind::Package, Some(source.revision)).await.is_err());
+    assert!(store.delete_workflow_draft("other".into(), draft.id.clone(), WorkflowDraftKind::Package, Some(updated.revision.clone())).await.is_err());
+    assert!(store.delete_workflow_draft(project.clone(), draft.id.clone(), WorkflowDraftKind::Package, Some(draft.revision)).await.is_err());
+    store.delete_workflow_draft(project.clone(), draft.id.clone(), WorkflowDraftKind::Package, Some(updated.revision)).await?;
+    assert!(store.workflow_package(project.clone(), draft.id.clone()).await.is_err());
+    assert!(store.published_workflow_package_artifact(project, base).await?.is_some());
+    store.execute(move |db| {
+        assert!(!db.prepare("SELECT 1 FROM workflow_package_revisions WHERE draft_id = ?1")?.exists([&draft.id])?);
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        Ok(())
+    }).await
+}
+
+#[tokio::test]
+async fn publishes_a_reusable_schema_at_the_selected_head() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("reusable-schema.sqlite"))?;
+    let project = approved_delivery_repository(&store, temp.path()).await?.project_id;
+    let mut schema = member("schema", PackageArtifactBody::Schema { fields: vec![] });
+    let first = store.publish_workflow_resource(project.clone(), schema.clone()).await?;
+    schema.name = "Updated schema".into();
+    schema.base = Some(first.clone());
+    let second = store.publish_workflow_resource(project.clone(), schema.clone()).await?;
+    assert_eq!(first.id, second.id);
+    assert_ne!(first.revision, second.revision);
+    assert!(store.publish_workflow_resource(project.clone(), schema).await.is_err());
+    assert!(store.published_workflow_package_artifact(project.clone(), first).await?.is_some());
+    assert_eq!(store.workflow_package_catalog(project.clone()).await?[0].version, second);
+    assert!(store.workflow_packages(project, None).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn opens_an_archived_function_for_repair_without_publishing_retired_nodes() -> Result<()> {
     use crate::workflows::ArchivedNode;
     use serde_json::json;

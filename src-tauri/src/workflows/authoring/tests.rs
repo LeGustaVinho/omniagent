@@ -26,6 +26,45 @@ fn graph(name: &str) -> WorkflowGraph {
     }
 }
 
+#[tokio::test]
+async fn deletes_settled_legacy_draft_and_preserves_the_authoring_run() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("delete-legacy.sqlite"))?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let conversation = store.create_conversation(repo.checkout_id.clone(), "Authoring".into()).await?;
+    let checkout = Path::new(&repo.checkout_root);
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "author-fixture".into(),
+        account_binding: None,
+        checkout: checkout.into(),
+        executable: checkout.join("codex.exe"),
+        cli_version: "fixture".into(),
+        runner: "fixture-runner".into(),
+        permission_revision: "read-only".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some("author-model".into()),
+        effort: None,
+    };
+    fs::write(&scope.executable, b"fixture")?;
+    let project = repo.project_id;
+    let draft = store.start_workflow_authoring(conversation.id.clone(), repo.checkout_id, scope.clone(), None,
+        "Build a pipeline".into()).await?;
+    assert!(store.delete_workflow_draft(project.clone(), draft.id.clone(), WorkflowDraftKind::Graph, None).await.is_err());
+    let run = finish_request(&store, &draft, &scope, serde_json::to_string(&graph("Discarded pipeline"))?, &[]).await?;
+    let saved = store.inspect_workflow_authoring(project.clone(), draft.id.clone()).await?;
+    store.delete_workflow_draft(project.clone(), draft.id.clone(), WorkflowDraftKind::Graph,
+        Some(saved.head.context("Expected a saved revision")?.id)).await?;
+    assert!(store.conversation_workflow_authoring(conversation.id).await?.is_empty());
+    store.execute(move |db| {
+        assert!(db.prepare("SELECT 1 FROM runs WHERE id = ?1")?.exists([&run])?);
+        assert!(db.prepare("SELECT 1 FROM deleted_workflow_authoring_jobs WHERE job_id = ?1")?.exists([&draft.request.job_id])?);
+        assert!(!db.prepare("SELECT 1 FROM workflow_authoring_revisions WHERE draft_id = ?1")?.exists([&draft.id])?);
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        Ok(())
+    }).await
+}
+
 pub(super) async fn finish_request(
     store: &Store,
     draft: &AuthoringDraft,

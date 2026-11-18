@@ -5,9 +5,8 @@ import { Dialog, Popover } from "radix-ui";
 import { Layers3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { PackageDraft } from "@/workflow-authoring-package";
-import { WorkflowGraphEditor } from "@/workflow-graph-editor";
 import type { PromptContract, PromptExpansion } from "@/workflow-prompt-model";
-import type { RoleSnapshot } from "@/workflow-typed-prompt";
+import type { TemplateDraft } from "@/conversation-template-editor";
 import type { SchemaField } from "@/workflow-schema-model";
 import {
   isPresetEligible, isStartNode, portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
@@ -19,7 +18,7 @@ export type ReusableReference = { source: "published"; version: ReusableVersion 
   | { source: "parameter"; name: string; kind: string };
 export type ReusableBody = { kind: string; graph?: WorkflowGraph; configuration?: WorkflowNodeConfiguration; editableFields?: string[];
   inputs?: Record<string, WorkflowEndpoint>; outputs?: Record<string, WorkflowEndpoint>; prompt?: PromptContract;
-  fields?: SchemaField[]; template?: RoleSnapshot };
+  fields?: SchemaField[]; template?: TemplateDraft };
 type MatchSource = { type: "package_revision"; draftId: string; revision: string; memberKey: string }
   | { type: "published"; version: ReusableVersion };
 type Boundary = {
@@ -30,6 +29,15 @@ type InputGroup = { key: string; source: WorkflowEndpoint; wires: WorkflowWire[]
 type Selection = { type: "preset"; nodeId: string; editableFields: string[] }
   | { type: "subflow"; nodeIds: string[] | null; inputs: Record<string, WorkflowWire[]>; outputs: Record<string, WorkflowEndpoint> };
 type ArtifactSummary = { version: ReusableVersion; name: string; blockers: string[]; prompt?: boolean };
+export type PublishedWorkflowArtifact = ArtifactSummary & {
+  body: ReusableBody; references: Record<string, ReusableReference>; layout?: WorkflowLayout; definitions?: WorkflowDefinitions;
+};
+export function publishedWorkflowArtifactQuery(projectId: string, version: ReusableVersion) {
+  return {
+    queryKey: ["workflow-published-artifact", projectId, version],
+    queryFn: () => invoke<PublishedWorkflowArtifact | null>("read_published_workflow_package_artifact", { projectId, version }),
+  };
+}
 export type ReusableDescription = {
   artifact: ArtifactSummary & { body: ReusableBody; references: Record<string, ReusableReference>; layout?: WorkflowLayout;
     promptExpansion?: PromptExpansion };
@@ -263,45 +271,4 @@ export function ReusableCatalog({ projectId, disabled, onAdd }: {
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>;
-}
-
-export function PublishedSubflow({ projectId, checkoutId, version }: {
-  projectId: string; checkoutId?: string; version: ReusableVersion;
-}) {
-  return <Dialog.Root>
-    <Dialog.Trigger asChild><Button type="button" variant="outline">Open pinned subflow</Button></Dialog.Trigger>
-    <Dialog.Portal>
-      <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
-      <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100%-2rem)] w-[min(80rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-lg border border-border bg-card p-5 shadow-lg">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Dialog.Title className="text-lg font-semibold">Pinned subflow</Dialog.Title>
-          <Dialog.Close asChild><Button type="button" variant="outline">Close pinned subflow</Button></Dialog.Close>
-        </div>
-        <Dialog.Description>Inspect the saved child graph and its typed connections.</Dialog.Description>
-        <SubflowGraph projectId={projectId} checkoutId={checkoutId} version={version} />
-      </Dialog.Content>
-    </Dialog.Portal>
-  </Dialog.Root>;
-}
-
-function SubflowGraph({ projectId, checkoutId, version }: {
-  projectId: string; checkoutId?: string; version: ReusableVersion;
-}) {
-  const child = useQuery(reusableNodeQuery(projectId, version));
-  const graph = child.data?.artifact.body.graph;
-  if (child.error) return <p role="alert">{String(child.error)}</p>;
-  if (!child.data) return <p role="status">Loading pinned subflow…</p>;
-  if (!graph) return <p role="alert">The pinned subflow graph is unavailable.</p>;
-  const { artifact, graphDefinitions } = child.data;
-  return <section className="pipeline-stack" aria-label={`Pinned subflow ${artifact.name}`}>
-    <p>{artifact.name} · <code className="break-all">{artifact.version.revision}</code></p>
-    <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId}
-      state={{ graph, layout: artifact.layout ?? {}, updateDefinitions: {} }} setState={() => undefined}
-      definitions={graphDefinitions} catalog={[]} disabled problems={[]} allowDefinitionUpdates={false}
-      inspectReference={(id) => {
-        const reference = artifact.references[id];
-        return reference?.source === "published" && reference.version.kind === "subflow" ?
-          <PublishedSubflow key={JSON.stringify(reference.version)} projectId={projectId} checkoutId={checkoutId} version={reference.version} /> : null;
-      }} />
-  </section>;
 }

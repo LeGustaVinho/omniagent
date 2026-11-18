@@ -14,6 +14,37 @@ import { testCheckout } from "@/test-fixtures/checkout";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
+it("confirms a revision-scoped pipeline deletion and reloads the draft list", async () => {
+  let drafts = [{ id: "delete-me", name: "Obsolete pipeline", revision: "draft-v2", memberCount: 2,
+    published: false, standalonePipeline: true, members: [{ kind: "pipeline" }] }];
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === "list_workflow_packages") return drafts;
+    if (name === "delete_workflow_draft") {
+      drafts = [];
+      return;
+    }
+    throw Error(name);
+  });
+  render(<QueryClientProvider client={new QueryClient()}>
+    <PipelineBuilderLanding checkout={testCheckout} openWorkspace={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  const openMenu = async () => {
+    await user.click(await screen.findByRole("button", { name: "Actions for Obsolete pipeline" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete draft" }));
+    return within(screen.getByRole("dialog", { name: "Delete draft?" }));
+  };
+  const confirm = await openMenu();
+  expect(confirm.getByText(/all 2 members/)).toBeTruthy();
+  await user.click(confirm.getByRole("button", { name: "Cancel" }));
+  expect(invoke).not.toHaveBeenCalledWith("delete_workflow_draft", expect.anything());
+  await user.click((await openMenu()).getByRole("button", { name: "Delete draft" }));
+  expect(invoke).toHaveBeenCalledWith("delete_workflow_draft", {
+    projectId: testCheckout.projectId, draftId: "delete-me", kind: "package", expectedRevision: "draft-v2",
+  });
+  expect(await screen.findByText("No visual pipeline drafts yet.")).toBeTruthy();
+});
+
 it("creates independent Development Pipeline drafts using the native package action", async () => {
   const selection = { provider: "codex", profileId: "desktop", modelId: "fixture" };
   const created: { name: string; members: { key: string; body: {

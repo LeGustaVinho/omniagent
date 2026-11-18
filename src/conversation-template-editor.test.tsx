@@ -9,6 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ConversationTemplateEditor } from "@/conversation-template-editor";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import type { ModelOption } from "@/bindings/ModelOption";
+import { WorkflowResourceActions } from "@/workflow-resource-actions";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -33,7 +34,9 @@ const scope = { projectId: checkout.projectId, checkoutId: checkout.checkoutId }
 const firstVersion = { revision: "exact-revision-1", ordinal: 1, baseRevision: null };
 const secondVersion = { revision: "exact-revision-2", ordinal: 2, baseRevision: firstVersion.revision };
 
-function setup({ conflict = false, workspace = false }: { conflict?: boolean; workspace?: boolean } = {}) {
+function setup({ conflict = false, workspace = false, onUse }: {
+  conflict?: boolean; workspace?: boolean; onUse?: (reference: unknown) => void;
+} = {}) {
   let revisions: { templateId: string; version: typeof firstVersion | typeof secondVersion; template: typeof first }[] = conflict
     ? [{ templateId: "stable-template", version: firstVersion, template: first }]
     : [];
@@ -90,10 +93,27 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
       openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={client}>
-    {workspace ? <LiveWorkspace /> : <ConversationTemplateEditor checkout={checkout} />}
+    {onUse ? <WorkflowResourceActions {...scope} kind="role" label="Role" onSaved={onUse} />
+      : workspace ? <LiveWorkspace /> : <ConversationTemplateEditor checkout={checkout} />}
   </QueryClientProvider>);
   return userEvent.setup();
 }
+
+it("publishes a Role through the shared inspector form and returns its exact version", async () => {
+  const onUse = vi.fn();
+  const user = setup({ onUse });
+  await user.click(screen.getByRole("button", { name: "Create Role" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Create Role" }));
+  await user.type(dialog.getByRole("textbox", { name: "Name" }), first.name);
+  await user.click(await dialog.findByRole("button", { name: /^Default CLI and model · / }));
+  await user.click(await screen.findByRole("menuitemradio", { name: option.name }));
+  const save = dialog.getByRole<HTMLButtonElement>("button", { name: "Save and use" });
+  await waitFor(() => expect(save.disabled).toBe(false));
+  await user.click(save);
+  await waitFor(() => expect(onUse).toHaveBeenCalledWith({ source: "published", version: {
+    id: "stable-template", revision: firstVersion.revision, kind: "role", destination: "project",
+  } }));
+});
 
 it("saves a display label against exact revisions without replacing the Role definition", async () => {
   const user = setup({ conflict: true });

@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
-import { ArrowUpRight, Workflow } from "lucide-react";
+import { MarkerType, type Edge, type Node, type NodeProps, type Viewport } from "@xyflow/react";
+import { ArrowLeft, ArrowUpRight, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ContextActions, PositionedContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunList, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
+import type { PipelineInspectorView } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, isSupportedWorkflowNode, wireKey } from "@/workflow-graph-model";
@@ -22,6 +23,7 @@ import {
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
 type ExecutionTarget = { kind: "node" | "edge"; id: string };
+type ExecutionLocation = { path: string; selected: string; unit?: string; focus?: string };
 
 function ExecutionNodeCard({ data, selected }: NodeProps<ExecutionNode>) {
   const node = data.pinned;
@@ -82,6 +84,9 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
   const focus = focusedNode && executionStageLocation(definition, focusedNode);
   const [selected, setSelected] = useState(() => focus?.nodeId ?? executionCanvasGraph(definition).nodes[0]?.instance.id ?? "");
   const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
+  const [history, setHistory] = useState<ExecutionLocation[]>([]);
+  const views = useRef(new Map<string, { viewport?: Viewport; inspector: PipelineInspectorView }>());
+  const workspace = useRef<HTMLElement>(null);
   function viewStage(id: string) {
     const visible = graph.nodes.some(({ instance }) => instance.id === id);
     if (visible) {
@@ -90,8 +95,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
       const node = staged.get(id)?.node;
       if (!node) return;
       const location = executionStageLocation(definition, node);
-      setSubflowPath(location.scopePath);
-      setSelected(location.nodeId);
+      openSubflow(location.scopePath, location.nodeId);
     }
     revealInspector((request) => request + 1);
   }
@@ -110,11 +114,34 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
   const subflow = definition.subflows?.find(({ path }) => path === subflowPath);
   const graph = useMemo(() => executionCanvasGraph(definition, subflow), [definition, subflow]);
-  function openSubflow(path: string) {
+  function openSubflow(path: string, nodeId?: string) {
+    if (path === subflowPath) {
+      if (nodeId) setSelected(nodeId);
+      return;
+    }
+    const active = document.activeElement?.getAttribute("data-run-focus") ?? undefined;
+    setHistory((previous) => path ? [...previous, { path: subflowPath, selected, unit: unit && unitKey(unit), focus: active }] : []);
     const scope = definition.subflows?.find((entry) => entry.path === path);
     setSubflowPath(path);
-    setSelected(executionCanvasGraph(definition, scope).nodes[0]?.instance.id ?? "");
+    setSelected(nodeId ?? executionCanvasGraph(definition, scope).nodes[0]?.instance.id ?? "");
+    revealInspector(0);
   }
+  function goBack() {
+    const path = subflowPath.split("::").slice(0, -1).join("::");
+    const previous = history.at(-1) ?? { path, selected: subflowPath };
+    setHistory((entries) => entries.slice(0, -1));
+    setSubflowPath(previous.path);
+    setSelected(previous.selected);
+    if (history.length) setSelectedUnit(previous.unit);
+    revealInspector(0);
+    requestAnimationFrame(() => {
+      const origin = workspace.current?.querySelector<HTMLElement>(`[data-run-focus="${previous.focus ?? "scope"}"]`)
+        ?? workspace.current?.querySelector<HTMLElement>('[data-run-focus="scope"]');
+      origin?.focus({ preventScroll: true });
+    });
+  }
+  const view = views.current.get(subflowPath) ?? { inspector: {} };
+  views.current.set(subflowPath, view);
   const concreteStages = definition.nodes
     .map((node) => {
       const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
@@ -210,12 +237,13 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     ]] };
   }
   const context = menu && canvasActions(menu.target);
-  return <section className="pipeline-view" aria-label="Pinned workflow execution">
+  return <section ref={workspace} className="pipeline-view" aria-label="Pinned workflow execution">
     <PipelineToolbar>
       <div className="workflow-run-selectors">
+        {subflowPath && <Button type="button" variant="outline" onClick={goBack}><ArrowLeft size={15} aria-hidden /> Voltar</Button>}
         {runPicker}
         {!!definition.subflows?.length && <label className="workflow-execution-field">Pinned subflow
-          <select value={subflowPath} onChange={(event) => openSubflow(event.currentTarget.value)}>
+          <select data-run-focus="scope" value={subflowPath} onChange={(event) => openSubflow(event.currentTarget.value)}>
             <option value="">Entire workflow</option>
             {definition.subflows.map(({ name, path }) => <option key={path} value={path}>{name} · {path}</option>)}
           </select>
@@ -260,7 +288,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
         </li>)}</ul>
       </details>}
     </header>
-    <PipelineCanvasFrame className="workflow-run-frame" canvasLabel="Workflow execution graph" inspectorLabel="Execution node evidence" inspectorRequest={inspectorRequest}
+    <PipelineCanvasFrame key={subflowPath} className="workflow-run-frame" canvasLabel="Workflow execution graph"
+      inspectorLabel="Execution node evidence" inspectorRequest={inspectorRequest} view={view.inspector}
       canvas={<div className="workflow-graph-canvas" onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         if (!(event.target instanceof Element)) return;
@@ -280,7 +309,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
           const selectedNode = changes.find((change) => change.type === "select" && change.selected);
           if (selectedNode?.type === "select") setSelected(selectedNode.id);
         }} colorMode={theme}
-        fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} /></div>}
+        fitView={!view.viewport} defaultViewport={view.viewport} onMoveEnd={(_, viewport) => { view.viewport = viewport; }}
+        fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} /></div>}
       inspector={<>
         <PipelineInspectorHeader detail="Execution details" title={active?.node.definition.title ?? "No stage selected"}>
           <label className="workflow-execution-field">Inspect execution node
@@ -293,7 +323,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
           <WorkflowExecutionStateBadge status={active.detail.status} />
           {active.group ? <section className="workflow-record-card pipeline-stack" aria-label="Subflow execution">
             {active.detail.reason && <p>{active.detail.reason}</p>}
-            <Button type="button" variant="outline" className="w-fit" onClick={() => openSubflow(active.group!.path)}>
+            <Button type="button" variant="outline" className="w-fit" data-run-focus="open" onClick={() => openSubflow(active.group!.path)}>
               Open internal graph <ArrowUpRight size={14} aria-hidden />
             </Button>
             {active.detail.status === "completed" && Object.entries(active.group.outputs).map(([port, endpoint]) => {

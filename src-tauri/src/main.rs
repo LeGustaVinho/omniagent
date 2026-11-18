@@ -412,6 +412,8 @@ fn main() {
             workflow_ipc::triggers::workflow_trigger_activations,
             workflow_ipc::authoring::publish_reviewed_workflow,
             workflow_ipc::authoring::list_workflow_packages,
+            workflow_ipc::authoring::delete_workflow_draft,
+            workflow_ipc::authoring::publish_workflow_resource,
             workflow_ipc::authoring::inspect_workflow_package,
             workflow_ipc::authoring::preview_workflow_package_revision,
             workflow_ipc::workflow_agent_response,

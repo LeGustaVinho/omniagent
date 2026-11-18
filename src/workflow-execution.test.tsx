@@ -116,6 +116,9 @@ it("shows a Function as one live graph node with its published result and intern
   expect(within(screen.getByRole("region", { name: "Result on reply" })).getByText(/A structured summary/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Open internal graph" }));
   expect(screen.getByRole("button", { name: "AI Node Agent · Completed" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
+  expect(screen.getByRole("combobox", { name: "Inspect execution node" })).toHaveProperty("value", "summarize");
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open internal graph" })));
 });
 
 it.each([true, false])("opens the waiting Loop iteration with a root End: %s", async (withEnd) => {
@@ -515,11 +518,13 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(inspector.getByText("No execution reaches this stage through the selected branches")).toBeTruthy();
   expect(inspector.getByText("ready · command-failed.completed · Skipped input")).toBeTruthy();
   await user.selectOptions(screen.getByRole("combobox", { name: "Pinned subflow" }), "quality");
-  expect(graph.queryByRole("button", { name: "Pinned source · Completed" })).toBeNull();
-  expect(graph.getByRole("button", { name: "Saved command · Completed" })).toBeTruthy();
+  const internal = within(screen.getByRole("region", { name: "Workflow execution graph" }));
+  expect(internal.queryByRole("button", { name: "Pinned source · Completed" })).toBeNull();
+  expect(internal.getByRole("button", { name: "Saved command · Completed" })).toBeTruthy();
   await user.click(screen.getByText("Pinned subflow outputs"));
   expect(screen.getByText("quality-revision")).toBeTruthy();
-  await user.click(inspector.getByRole("button", { name: "Open command output and logs" }));
+  await user.click(within(screen.getByRole("complementary", { name: "Execution node evidence" }))
+    .getByRole("button", { name: "Open command output and logs" }));
   expect(props.openActivity).toHaveBeenLastCalledWith("command-saved");
   await user.selectOptions(screen.getByRole("combobox", { name: "Saved workflow run" }), "newer-run");
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "run:newer-run");

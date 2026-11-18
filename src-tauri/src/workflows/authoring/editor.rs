@@ -181,6 +181,7 @@ pub struct ProjectWorkflowDraft {
     id: String,
     name: Option<String>,
     revision: Option<String>,
+    published: bool,
 }
 
 impl Store {
@@ -190,13 +191,14 @@ impl Store {
     ) -> Result<Vec<ProjectWorkflowDraft>> {
         self.execute(move |db| {
             let mut statement = db.prepare(
-                "SELECT id, head_revision FROM workflow_authoring_drafts WHERE project_id = ?1 ORDER BY rowid DESC",
+                "SELECT d.id, d.head_revision, EXISTS(SELECT 1 FROM workflow_authoring_publications p WHERE p.draft_id = d.id)
+                 FROM workflow_authoring_drafts d WHERE d.project_id = ?1 ORDER BY d.rowid DESC",
             )?;
-            statement.query_map(params![project], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            statement.query_map(params![project], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?)))?
                 .map(|row| {
-                    let (id, revision) = row?;
+                    let (id, revision, published) = row?;
                     let name = load_head(db, &id, revision.as_deref())?.map(|head| head.graph.name);
-                    Ok(ProjectWorkflowDraft { id, name, revision })
+                    Ok(ProjectWorkflowDraft { id, name, revision, published })
                 }).collect()
         }).await
     }

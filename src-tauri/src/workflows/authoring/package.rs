@@ -197,6 +197,17 @@ pub struct WorkflowPackageSummary {
     pub member_count: usize,
     pub standalone_pipeline: bool,
     pub published: bool,
+    pub members: Vec<WorkflowPackageMemberSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowPackageMemberSummary {
+    key: String,
+    name: String,
+    kind: PackageArtifactKind,
+    prompt: bool,
+    node_prefab: bool,
 }
 
 impl Store {
@@ -374,10 +385,39 @@ impl Store {
                     Ok(WorkflowPackageSummary {
                         id, revision, name: document.package.name, member_count: members.len(),
                         standalone_pipeline, published,
+                        members: members.iter().map(|member| WorkflowPackageMemberSummary {
+                            key: member.key.clone(),
+                            name: member.name.clone(),
+                            kind: member.body.kind(),
+                            prompt: matches!(member.body, PackageArtifactBody::Prompt { .. }),
+                            node_prefab: matches!(&member.body, PackageArtifactBody::Prompt { prompt } if prompt.node_prefab),
+                        }).collect(),
                     })
                 }).collect()
         }).await
     }
+}
+
+pub(super) fn delete_pipeline_draft(
+    db: &Connection,
+    project: &str,
+    draft: &str,
+    expected_revision: Option<&str>,
+) -> Result<()> {
+    let stored = load_draft(db, project, draft)?;
+    ensure!(Some(stored.revision.as_str()) == expected_revision, "The draft changed. Review its latest revision before deleting.");
+    ensure!(stored.publication.is_none(), "Published drafts cannot be deleted");
+    ensure!(stored.package.members.iter().any(|member| member.body.kind() == PackageArtifactKind::Pipeline),
+        "Choose a package containing a pipeline draft");
+    super::deletion::retain_authoring_job_history(db, project, draft, true)?;
+    db.execute("DELETE FROM workflow_package_mcp_calls WHERE run_id IN
+        (SELECT run_id FROM workflow_package_mcp_sessions WHERE draft_id = ?1)", [draft])?;
+    db.execute("DELETE FROM workflow_package_mcp_sessions WHERE draft_id = ?1", [draft])?;
+    db.execute("DELETE FROM workflow_package_requests WHERE draft_id = ?1", [draft])?;
+    db.execute("UPDATE workflow_package_drafts SET head_revision = NULL WHERE id = ?1", [draft])?;
+    db.execute("DELETE FROM workflow_package_revisions WHERE draft_id = ?1", [draft])?;
+    db.execute("DELETE FROM workflow_package_drafts WHERE id = ?1", [draft])?;
+    Ok(())
 }
 
 fn create_draft(

@@ -6,6 +6,7 @@ import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import { WorkflowRequirementsEditor, type RequirementConfiguration } from "@/workflow-stage-requirements";
 import { readStageGoal, WorkflowStageGoal, type StageGoalConfiguration, type StageGoalRoleRevision } from "@/workflow-stage-goal";
 import { stagePlanMode, WorkflowStagePlan } from "@/workflow-stage-plan";
+import { WorkflowResourceActions } from "@/workflow-resource-actions";
 
 export function AgentRoleFields({ projectId, checkoutId, mode, configuration, nodeId, nodeKind, goalRole, disabled, fixedModel = false, onChange }: {
   projectId: string;
@@ -53,6 +54,13 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       }} />}
     <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       options={options} disabled={disabled || fixedModel} rolePin configuration={requirements}
+      roleActions={!disabled && !fixedModel && checkoutId && <WorkflowResourceActions kind="role" label="Role requirements"
+        projectId={projectId} checkoutId={checkoutId} selected={requirements.roleTemplate && {
+          source: "published", version: { id: requirements.roleTemplate.templateId, revision: requirements.roleTemplate.revision,
+            destination: "project", kind: "role" },
+        }} onSaved={({ version }) => onChange({ ...configuration, requirements: {
+          ...requirements, roleTemplate: { templateId: version.id, revision: version.revision },
+        } })} />}
       onChange={(requirements) => onChange({ ...configuration, requirements })} />
     <WorkflowStageGoal projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       node={{ id: nodeId, kind: nodeKind, configuration: previewConfiguration }} roleRevision={goalRoleVersion}

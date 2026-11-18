@@ -161,6 +161,13 @@ fn load_recovery_source(
     job: &Job,
     goal_revision: Option<&str>,
 ) -> Result<Option<RecoveryCheckpoint>> {
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM deleted_workflow_authoring_jobs WHERE job_id = ?1)",
+        [&job.id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(None);
+    }
     let Some(attempt) = job.latest_attempt.as_ref() else {
         return Ok(None);
     };

@@ -29,7 +29,7 @@ vi.mock("@xyflow/react", async (importOriginal) => {
     Controls: () => null,
     Handle: ({ id, type }: { id: string; type: string }) => <span data-port-handle={`${type}:${id}`} />,
     useUpdateNodeInternals: () => update,
-    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu, onSelectionContextMenu, onInit }: {
+    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu, onSelectionContextMenu, onInit, defaultViewport, onMoveEnd }: {
       nodes: Card[]; nodeTypes: { workflow: ComponentType<Card> };
       edges: Wire[];
       onNodesChange: (changes: ({ type: "position"; id: string; position: Position } | { type: "select"; id: string; selected: boolean })[]) => void;
@@ -38,10 +38,13 @@ vi.mock("@xyflow/react", async (importOriginal) => {
       onPaneContextMenu?: (event: MouseEvent) => void;
       onSelectionContextMenu?: (event: MouseEvent, nodes: Card[]) => void;
       onInit?: (instance: typeof flow) => void;
+      defaultViewport?: { x: number; y: number; zoom: number };
+      onMoveEnd?: (event: null, viewport: { x: number; y: number; zoom: number }) => void;
     }) => {
       useEffect(() => { onInit?.(flow); }, [onInit]);
       const selected = nodes.filter((node) => node.selected);
-      return <div data-testid="test-pipeline-pane" onContextMenu={onPaneContextMenu}>
+      return <div data-testid="test-pipeline-pane" data-viewport={JSON.stringify(defaultViewport)} onContextMenu={onPaneContextMenu}>
+      {onMoveEnd && <button type="button" onClick={() => onMoveEnd(null, { x: 160, y: -24, zoom: 0.7 })}>Pan and zoom</button>}
       {selected.length > 1 && <div data-testid="pipeline-selection" className="react-flow__nodesselection-rect"
         onContextMenu={(event) => onSelectionContextMenu?.(event, selected)} />}
       {nodes.map(({ id, ...card }) => <div key={id} className="react-flow__node" data-id={id} data-testid={`node-${id}`}
@@ -104,39 +107,77 @@ it("groups and opens native template artifacts read-only without publishing a dr
   const ipc = vi.mocked(invoke);
   ipc.mockClear();
   ipc.mockResolvedValue([]);
-  render(<QueryClientProvider client={new QueryClient()}>
-    <PipelinesWorkspace checkout={testCheckout} target="library" openWorkspace={vi.fn()}
+  function Workspace() {
+    const [target, setTarget] = useState("library");
+    return <PipelinesWorkspace checkout={testCheckout} target={target} openWorkspace={(_, next) => setTarget(next ?? "")}
+      openActivity={vi.fn()} openChanges={vi.fn()} />;
+  }
+  render(<QueryClientProvider client={new QueryClient()}><Workspace /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const nav = within(screen.getByRole("navigation", { name: "Library views" }));
+  expect(nav.getAllByRole("button").map((item) => item.textContent)).toEqual(["Pipeline", "Functions", "Schemas", "Node Prefabs", "Roles"]);
+  for (const [category, asset, field] of [
+    ["Pipeline", "Development Pipeline", "Pipeline name"], ["Functions", "Clarify Requirements", "Function name"],
+    ["Schemas", "Feature Request", "Schema name"], ["Node Prefabs", "Discovery Analyst", "Card title"],
+    ["Roles", "Delivery Engineer", "Name"],
+  ]) {
+    const categoryButton = nav.getByRole("button", { name: category });
+    await user.click(categoryButton);
+    expect(categoryButton.getAttribute("aria-current")).toBe("page");
+    const native = within(screen.getByRole("article", { name: "Development Pipeline" }));
+    await user.click(native.getByRole("button", { name: `View ${asset}` }));
+    const viewer = within(screen.getByRole("region", { name: "Artifact preview" }));
+    expect((await viewer.findByRole("textbox", { name: field })).matches(":disabled")).toBe(true);
+    await user.click(viewer.getByRole("button", { name: "Voltar" }));
+  }
+  expect(ipc).not.toHaveBeenCalledWith("create_workflow_package", expect.anything());
+  expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: testCheckout.projectId });
+});
+
+it("opens the pinned Function canvas in Library and edits that revision in the same category", async () => {
+  const version = { kind: "subflow", destination: "library", id: "saved-function", revision: "immutable-revision" };
+  const artifact = { name: "Review documents", version, blockers: [], references: {},
+    body: { kind: "subflow", graph: { name: "Review documents", nodes: [
+      { id: "start", kind: "start", configuration: { kind: "none" } },
+    ], wires: [] } }, layout: { start: { x: 120, y: 40 } }, definitions: { start } };
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
+    switch (command) {
+      case "workflow_package_catalog": return [artifact];
+      case "list_workflow_packages": return [];
+      case "read_published_workflow_package_artifact": return artifact;
+      case "workflow_node_definitions": return [start];
+      case "create_workflow_package": return { id: "edit-draft", revision: "draft-revision", publication: null,
+        package: (input as { package: unknown }).package, layouts: { artifact: artifact.layout } };
+      case "preview_workflow_package_revision": return { members: [], revisions: ["draft-revision"], revision: "draft-revision" };
+      default: throw Error(command);
+    }
+  });
+  const openWorkspace = vi.fn();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={testCheckout} target="library:functions" openWorkspace={openWorkspace}
       openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
-  const library = within(screen.getByRole("region", { name: "Workflow library" }));
-  expect(await library.findByText("No published schemas.")).toBeTruthy();
-  const native = within(library.getByRole("article", { name: "Development Pipeline" }));
   const user = userEvent.setup();
-  for (const [category, asset, detail] of [
-    ["Pipeline", "Development Pipeline", "Connections"], ["Functions", "Clarify Requirements", "Nodes"],
-    ["Schemas", "Feature Request", "JSON Schema"], ["Node Prefabs", "Discovery Analyst", "Prompt"],
-    ["Roles", "Delivery Engineer", "Role"],
-  ] as const) {
-    const categoryButton = native.getByRole("button", { name: new RegExp(`^${category} \\d+$`) });
-    await user.click(categoryButton);
-    expect(categoryButton.getAttribute("aria-pressed")).toBe("true");
-    await user.click(within(native.getByRole("list", { name: category })).getByRole("button", { name: `View ${asset}` }));
-    const dialog = within(await screen.findByRole("dialog", { name: asset }));
-    expect(dialog.getByRole("region", { name: detail })).toBeTruthy();
-    expect(dialog.getByText("Artifact source")).toBeTruthy();
-    expect(dialog.queryByRole("textbox")).toBeNull();
-    await user.keyboard("{Escape}");
-  }
-  expect(native.getByRole("button", { name: "Use template" })).toBeTruthy();
-  expect(ipc).not.toHaveBeenCalledWith("create_workflow_package", expect.anything());
-  expect(library.queryByRole("searchbox")).toBeNull();
-  expect(library.queryByText("Import or export workflow packages")).toBeNull();
-  expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions", expect.anything());
-  expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: testCheckout.projectId });
+  await user.type(screen.getByRole("searchbox", { name: "Search Functions" }), "Review");
+  await user.click(await screen.findByRole("button", { name: "View Review documents" }));
+  expect(await screen.findByRole("textbox", { name: "Function name" })).toHaveProperty("disabled", true);
+  expect(screen.getByTestId("node-start").dataset.position).toBe(JSON.stringify(artifact.layout.start));
+  expect(invoke).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: testCheckout.projectId, version });
+  expect(invoke).not.toHaveBeenCalledWith("create_workflow_package", expect.anything());
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  expect(await screen.findByRole("textbox", { name: "Function name" })).toHaveProperty("disabled", false);
+  expect(invoke).toHaveBeenCalledWith("create_workflow_package", expect.objectContaining({
+    package: { name: artifact.name, members: [expect.objectContaining({ base: version, body: artifact.body })] },
+  }));
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
+  expect(screen.getByRole("searchbox", { name: "Search Functions" })).toHaveProperty("value", "Review");
+  expect(openWorkspace).not.toHaveBeenCalled();
 });
 
 it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and opens its editor", async (title) => {
   const schema = { kind: "schema", destination: "project", id: "schema", revision: "schema-revision" };
+  const createdSchema = { ...schema, id: "created-schema", revision: "published-from-inspector" };
+  const editedSchema = { ...schema, revision: "edited-from-inspector" };
   const useFunction = title === "Function";
   const end: WorkflowDefinition = { ...start, kind: "end", title: "End", configuration: "end",
     inputs: [control("ready"), data("result", "json_object")], outputs: [control("completed"), data("result", "json_object")] };
@@ -145,7 +186,15 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
   const projectId = testCheckout.projectId;
   ipc.mockImplementation(async (command, payload) => {
     switch (command) {
-      case "list_workflow_packages": return draft ? [{ id: draft.id, name: draft.package.name, memberCount: 1, standalonePipeline: false, published: false }] : [];
+      case "list_workflow_packages": return draft ? [{ id: draft.id, name: draft.package.name, memberCount: 1, standalonePipeline: false, published: false, members: draft.package.members.map(({ key, name, body }) => ({
+        key, name, kind: useFunction ? body.kind : "subflow", prompt: !useFunction, nodePrefab: !useFunction,
+      })) }] : [];
+      case "project_workflow_graph_drafts": return [];
+      case "publish_workflow_resource": {
+        const { member } = payload as { member: { base: typeof schema | null; name: string } };
+        if (member.name === "Stale output") throw Error("The published revision changed.");
+        return member.base ? editedSchema : createdSchema;
+      }
       case "workflow_package_catalog": return [{ name: "Request object", version: schema, blockers: [] }];
       case "create_workflow_package":
         draft = { id: "new-artifact", revision: "initial", conversationId: null, publication: null, request: null,
@@ -154,7 +203,8 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
       case "inspect_workflow_package": return draft;
       case "preview_workflow_package_revision": return { revision: draft?.revision, revisions: [draft?.revision], members: [] };
       case "workflow_node_definitions": return [start, end];
-      case "read_published_workflow_package_artifact": return { body: { kind: "schema", fields: [{ name: "message", type: "string", required: true }] } };
+      case "read_published_workflow_package_artifact": return { name: "Request object",
+        body: { kind: "schema", fields: [{ name: "message", type: "string", required: true }] } };
       case "save_workflow_package":
         draft = { ...draft!, revision: "configured", package: (payload as { package: PackageDraft["package"] }).package };
         return draft;
@@ -162,7 +212,7 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
     }
   });
   function Workspace() {
-    const [target, setTarget] = useState("library");
+    const [target, setTarget] = useState(useFunction ? "library:functions" : "library:prefabs");
     return <PipelinesWorkspace checkout={testCheckout} target={target}
       openWorkspace={(_, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
@@ -187,16 +237,46 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
 
   if (useFunction) {
     expect(await screen.findByRole<HTMLInputElement>("textbox", { name: "Function name" })).toHaveProperty("value", "Analyze requests");
-    const chooseInput = within(screen.getByRole("combobox", { name: "Input Schema" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "Input Schema" }), chooseInput.getByRole("option", { name: /Request object/ }));
+    const originalGraph = screen.getByRole("region", { name: "Pipeline graph editor" });
+    await user.click(screen.getByRole("button", { name: "Create Input Schema" }));
+    let schemaDialog = within(screen.getByRole("dialog", { name: "Create Input Schema" }));
+    await user.type(schemaDialog.getByRole("textbox", { name: "Schema name" }), "Cancelled");
+    await user.click(schemaDialog.getByRole("button", { name: "Cancel" }));
+    expect(ipc).not.toHaveBeenCalledWith("publish_workflow_resource", expect.anything());
+    await user.click(screen.getByRole("button", { name: "Create Input Schema" }));
+    schemaDialog = within(screen.getByRole("dialog", { name: "Create Input Schema" }));
+    await user.type(schemaDialog.getByRole("textbox", { name: "Schema name" }), "Request from inspector");
+    await user.click(schemaDialog.getByRole("button", { name: "Save and use" }));
+    expect(ipc).toHaveBeenCalledWith("publish_workflow_resource", {
+      projectId, member: { key: "schema", name: "Request from inspector", body: { kind: "schema", fields: [] },
+        base: null, destination: "project" },
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create Input Schema" })).toBeNull());
+    expect(screen.getByRole("region", { name: "Pipeline graph editor" })).toBe(originalGraph);
     await user.selectOptions(screen.getByRole("combobox", { name: "Inspect node" }), "return");
     expect(screen.getByRole("heading", { name: "Return" })).toBeTruthy();
     const chooseOutput = screen.getByRole("combobox", { name: "Output Schema" });
     await user.selectOptions(chooseOutput, within(chooseOutput).getByRole("option", { name: /Request object/ }));
+    await user.click(screen.getByRole("button", { name: "Edit Output Schema" }));
+    const editor = within(screen.getByRole("dialog", { name: "Edit Output Schema" }));
+    const schemaName = await editor.findByRole("textbox", { name: "Schema name" });
+    expect(schemaName).toHaveProperty("value", "Request object");
+    await user.clear(schemaName);
+    await user.type(schemaName, "Stale output");
+    await user.click(editor.getByRole("button", { name: "Save and use" }));
+    expect((await editor.findByRole("alert")).textContent).toContain("The published revision changed.");
+    expect(schemaName).toHaveProperty("value", "Stale output");
+    await user.clear(schemaName);
+    await user.type(schemaName, "Output contract");
+    await user.click(editor.getByRole("button", { name: "Save and use" }));
+    expect(ipc).toHaveBeenCalledWith("publish_workflow_resource", {
+      projectId, member: expect.objectContaining({ name: "Output contract", base: schema, destination: "project" }),
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit Output Schema" })).toBeNull());
     await user.click(screen.getByRole("button", { name: "Save draft revision" }));
     expect(ipc).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({ package: expect.objectContaining({
       members: [expect.objectContaining({ references: {
-        "start:schema": { source: "published", version: schema }, "return:schema": { source: "published", version: schema },
+        "start:schema": { source: "published", version: createdSchema }, "return:schema": { source: "published", version: editedSchema },
       } })],
     }) }));
   } else {
@@ -204,7 +284,7 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
     expect(settings.getByRole("textbox", { name: "Card title" })).toHaveProperty("value", "Analyze requests");
     expect(settings.getByRole("textbox", { name: "Prompt" })).toBeTruthy();
   }
-  await user.click(screen.getByRole("button", { name: "Library" }));
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
   expect(await screen.findByRole("button", { name: "Open draft of Analyze requests" })).toBeTruthy();
 });
 
@@ -214,8 +294,8 @@ it("opens the main pipeline first and returns to it from draft Functions and Pre
     id: "draft", revision: "saved", conversationId: null, publication: null, request: null,
     package: { name: "Development Pipeline", members: [
       { key: "clarify", name: "Clarify Requirements", body: { kind: "subflow", graph: {
-        name: "Clarify Requirements", nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }], wires: [],
-      } } },
+        name: "Clarify Requirements", nodes: [{ id: "inside-prefab", kind: "subflow", configuration: { kind: "none" } }], wires: [],
+      } }, references: { "inside-prefab": { source: "draft", key: "discovery" } } },
       { key: "discovery", name: "Discovery Analyst",
         body: { kind: "prompt", prompt: { ...defaultTypedPrompt(), nodePrefab: true } } },
       { key: "pipeline", name: "Development Pipeline", body: { kind: "pipeline", graph: {
@@ -244,15 +324,22 @@ it("opens the main pipeline first and returns to it from draft Functions and Pre
   const members = screen.getByRole<HTMLSelectElement>("combobox", { name: "Graph member" });
   expect(members.value).toBe("pipeline");
   expect(members.options[0]?.value).toBe("pipeline");
-  expect(screen.queryByRole("button", { name: "Back to pipeline" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Voltar" })).toBeNull();
 
+  await user.click(screen.getByRole("button", { name: "Pan and zoom" }));
   await user.click(await screen.findByRole("button", { name: "Open draft Function" }));
   expect(await screen.findByRole("textbox", { name: "Function name" })).toHaveProperty("value", "Clarify Requirements");
-  await user.click(screen.getByRole("button", { name: "Back to pipeline" }));
+  await user.click(await screen.findByRole("button", { name: "Open draft Prefab" }));
+  expect(await screen.findByRole("textbox", { name: "Card title" })).toHaveProperty("value", "Discovery Analyst");
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
+  expect(screen.getByRole("textbox", { name: "Function name" })).toHaveProperty("value", "Clarify Requirements");
+  expect(screen.getByRole("combobox", { name: "Inspect node" })).toHaveProperty("value", "inside-prefab");
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
+  expect(screen.getByTestId("test-pipeline-pane").dataset.viewport).toBe(JSON.stringify({ x: 160, y: -24, zoom: 0.7 }));
   await user.click(await screen.findByRole("button", { name: "Select discovery-node" }));
   await user.click(screen.getByRole("button", { name: "Open draft Prefab" }));
   expect(await screen.findByRole("textbox", { name: "Card title" })).toHaveProperty("value", "Discovery Analyst");
-  await user.click(screen.getByRole("button", { name: "Back to pipeline" }));
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
   expect(await screen.findByRole("textbox", { name: "Pipeline name" })).toHaveProperty("value", "Development Pipeline");
 });
 

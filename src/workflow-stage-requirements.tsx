@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { Capability } from "@/bindings/Capability";
@@ -58,10 +58,11 @@ function sourceKey(source: Source) {
   return JSON.stringify(source.kind === "skill" ? { ...source, invoke: false } : source);
 }
 
-export function WorkflowRequirementsEditor({ projectId, checkoutId, mode, model, options, effort, disabled, configuration, rolePin, onChange }: {
+export function WorkflowRequirementsEditor({ projectId, checkoutId, mode, model, options, effort, disabled, configuration, rolePin, onChange, roleActions }: {
   projectId: string; checkoutId?: string; mode: SessionMode; model: ModelSelection | null; options: readonly ModelOption[];
   effort?: string | null; disabled: boolean; configuration: RequirementConfiguration; rolePin?: boolean;
   onChange: (configuration: RequirementConfiguration) => void;
+  roleActions?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [previewModel, setPreviewModel] = useState<ModelSelection | null>(null);
@@ -154,6 +155,7 @@ export function WorkflowRequirementsEditor({ projectId, checkoutId, mode, model,
         <option value={roleKey}>Pinned role revision {configuration.roleTemplate?.revision}</option>}
       {roleChoices.map(({ key, label: name }) => <option key={key} value={key}>{name}</option>)}
     </select></label>}
+    {rolePin && roleActions}
     {roleHeads.error && <p role="alert">{String(roleHeads.error)}</p>}
     {roleRequirements.error && <p role="alert">{String(roleRequirements.error)}</p>}
     {inherited && <ul aria-label="Pinned role evidence" className="pipeline-stack">

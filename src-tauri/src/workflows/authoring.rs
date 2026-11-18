@@ -22,6 +22,8 @@ use super::{
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_GRAPH_BYTES: usize = 48 * 1024;
 
+mod deletion;
+pub use deletion::WorkflowDraftKind;
 mod editor;
 use editor::{DraftDocument, ProtectedDraft};
 pub use editor::{ProjectWorkflowDraft, WorkflowCanvasEdit, WorkflowNodePosition};
@@ -310,7 +312,7 @@ fn load_scope(db: &Connection, project: &str, id: &str) -> Result<DraftScope> {
         },
     )
     .optional()?
-    .context("This authoring draft is outside the selected project")
+    .context("This authoring draft is unavailable in the selected project")
 }
 
 fn load_head(db: &Connection, id: &str, head: Option<&str>) -> Result<Option<DraftRevision>> {

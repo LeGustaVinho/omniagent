@@ -169,6 +169,7 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
       case "workflow_node_definitions": return [start, verify];
       case "workflow_package_catalog": return [preset.artifact, subflow.artifact];
       case "describe_workflow_reusable_node": return (payload as { version: typeof presetVersion }).version.kind === "preset" ? preset : subflow;
+      case "read_published_workflow_package_artifact": return { ...subflow.artifact, definitions: subflow.graphDefinitions };
       case "save_workflow_package": return { ...draft, revision: "saved-next", package: (payload as { package: typeof draft.package }).package };
       default: throw Error(name);
     }
@@ -191,13 +192,13 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
   await user.click(screen.getByRole("button", { name: "Redo graph edit" }));
   expect(screen.getByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeTruthy();
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Review subflow · reusable/ }));
-  await user.click(within(parent).getByRole("button", { name: "Open pinned subflow" }));
-  const child = await screen.findByRole("region", { name: "Pinned subflow Review subflow" });
+  await user.click(within(parent).getByRole("button", { name: "Open pinned Function" }));
+  const child = await screen.findByRole("region", { name: "Artifact preview" });
   expect(within(child).getByText("subflow-r1")).toBeTruthy();
   const childInspect = within(child).getByLabelText("Inspect node");
   await user.selectOptions(childInspect, "verify");
   expect((within(child).getByLabelText(/Agent role/) as HTMLInputElement).disabled).toBe(true);
-  await user.click(screen.getByRole("button", { name: "Close pinned subflow" }));
+  await user.click(screen.getByRole("button", { name: "Voltar" }));
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(await screen.findByText("saved-next")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({

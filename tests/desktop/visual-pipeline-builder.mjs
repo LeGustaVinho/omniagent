@@ -321,8 +321,11 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const views = browser.$('[aria-label="Pipelines views"]');
   await click(views.$("button=Library"));
   const library = browser.$('[aria-label="Workflow library"]');
+  const libraryViews = browser.$('[aria-label="Library views"]');
+  await click(libraryViews.$("button=Schemas"));
   await library.$("button=New Schema").waitForDisplayed({ timeout });
-  for (const [open, create] of [["New Node Prefab", "Create Node Prefab"], ["New Function", "Create Function"]]) {
+  for (const [category, open, create] of [["Node Prefabs", "New Node Prefab", "Create Node Prefab"], ["Functions", "New Function", "Create Function"]]) {
+    await click(libraryViews.$(`button=${category}`));
     await click(library.$(`button=${open}`));
     const reusable = browser.$('[role="dialog"]');
     await reusable.$(`button=${create}`).waitForDisplayed({ timeout });
@@ -331,11 +334,37 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   }
   assert.equal(await library.$("[data-pipeline-node]").isExisting(), false);
   assert.equal(await library.$("summary=Import or export workflow packages").isExisting(), false);
-  const libraryViews = browser.$('[aria-label="Library views"]');
+  await setWindow(browser, invoke, 640, 440);
+  await click(library.$('button[aria-label="View Clarify Requirements"]'));
+  const preview = browser.$('[aria-label="Artifact preview"]');
+  await preview.$('input[aria-label="Function name"]').waitForDisplayed({ timeout });
+  const back = preview.$("button=Voltar");
+  await back.waitForDisplayed({ timeout });
+  await browser.execute(() => Array.from(document.querySelectorAll('[aria-label="Artifact preview"] button')).find((button) => button.textContent.trim() === "Voltar").focus());
+  await browser.keys("Enter");
+  await library.$('button[aria-label="View Clarify Requirements"]').waitForDisplayed({ timeout });
+  await setWindow(browser, invoke, 1440, 900);
   await click(libraryViews.$("button=Roles"));
   await browser.$('[aria-label="Role library"]').waitForDisplayed({ timeout });
-  await click(libraryViews.$("button=Artifacts"));
+  await click(libraryViews.$("button=Pipeline"));
   await library.waitForDisplayed({ timeout });
+  const discardName = "Discard this fixture pipeline";
+  const discarded = await invoke(browser, "create_workflow_package", { projectId, conversationId: null, package: {
+    name: discardName, members: [{ key: "pipeline", name: discardName, body: { kind: "pipeline",
+      graph: { name: discardName, nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }], wires: [] },
+    } }],
+  } });
+  await click(libraryViews.$("button=Functions"));
+  await click(libraryViews.$("button=Pipeline"));
+  const discardSelector = `button[aria-label=${JSON.stringify("Actions for " + discardName)}]`;
+  const discardMenu = library.$(discardSelector);
+  await discardMenu.waitForExist({ timeout });
+  await browser.execute((selector) => document.querySelector(selector).focus(), discardSelector);
+  await browser.keys([Key.Shift, Key.F10]);
+  await click(browser.$("//div[@role='menuitem' and normalize-space(.)='Delete draft']"));
+  await click(browser.$('[role="dialog"]').$("button=Delete draft"));
+  await discardMenu.waitForExist({ timeout, reverse: true });
+  await assert.rejects(invoke(browser, "inspect_workflow_package", { projectId, draftId: discarded.id }), /unavailable/i);
   await click(views.$("button=Maintenance"));
   const maintenance = browser.$('[aria-label="Workflow maintenance"]');
   await maintenance.$("h3=Proposed changes").waitForDisplayed({ timeout });
@@ -833,6 +862,9 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   const nodeEvidence = execution.$('[aria-label="Execution node evidence"]');
   await select(nodeEvidence, "Inspect execution node", "prompt-2");
   await textIsVisible(browser, nodeEvidence.$('[aria-label="Result on result"]'), "The desktop fixture read the summary.");
+  await click(nodeEvidence.$("button=Open internal graph"));
+  await click(execution.$("button=Voltar"));
+  assert.equal(await nodeEvidence.$(".//label[starts-with(normalize-space(.), 'Inspect execution node')]/select").getValue(), "prompt-2");
   await select(nodeEvidence, "Inspect execution node", end);
   await textIsVisible(browser, nodeEvidence, "Selected ports · completed");
   const runs = await invoke(browser, "list_repository_deliveries", { projectId });
@@ -868,6 +900,11 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   await pinnedPrompt.waitForDisplayed({ timeout });
   assert.equal(await pinnedPrompt.getValue(), evaluator);
   await textIsVisible(browser, reuseInspector, "Inherited prompt");
+  await click(reuseInspector.$("button=Open pinned Prefab"));
+  const prefab = browser.$('[aria-label="Artifact preview"]');
+  await prefab.$('[aria-label="AI Node Agent settings"] textarea').waitForDisplayed({ timeout });
+  await click(prefab.$("button=Voltar"));
+  assert.equal(await reuseInspector.$('[aria-label="AI Node Agent settings"] textarea').getValue(), evaluator);
   await click(browser.$("button=Save draft revision"));
   let reused;
   await browser.waitUntil(async () => {

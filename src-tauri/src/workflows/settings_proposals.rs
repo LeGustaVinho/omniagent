@@ -265,6 +265,7 @@ fn origin(db: &Connection, scope: &RunScope) -> Result<SettingsPatchActor> {
              (EXISTS(SELECT 1 FROM conversation_summary_requests WHERE job_id = attempt.job_id)
               OR EXISTS(SELECT 1 FROM workflow_authoring_requests WHERE job_id = attempt.job_id)
               OR EXISTS(SELECT 1 FROM workflow_package_requests WHERE job_id = attempt.job_id)
+              OR EXISTS(SELECT 1 FROM deleted_workflow_authoring_jobs WHERE job_id = attempt.job_id)
               OR EXISTS(SELECT 1 FROM job_side_requests WHERE job_id = attempt.job_id)
               OR EXISTS(SELECT 1 FROM model_comparison_candidates WHERE job_id = attempt.job_id))
          )",

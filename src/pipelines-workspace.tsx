@@ -1,11 +1,10 @@
 import { Button } from "@/components/ui/button";
-import { ConversationTemplateEditor } from "@/conversation-template-editor";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
 import { WorkflowMaintenanceCandidates, WorkflowMaintenancePlugins } from "@/workflow-maintenance";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
-import { WorkflowLibrary } from "@/workflow-library";
+import { libraryCategories, WorkflowLibrary, type LibraryCategory } from "@/workflow-library";
 import { type WorkflowExecutionFocus } from "@/workflow-execution-model";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
@@ -20,14 +19,13 @@ const pipelineTabs = [
   { id: "maintenance", label: "Maintenance" },
 ] as const;
 type PipelineView = (typeof pipelineTabs)[number]["id"];
-type LibraryView = "library" | "library:roles";
+type LibraryView = `library:${LibraryCategory}`;
 
 function LibraryNavigation({ active, onSelect }: { active: LibraryView; onSelect: (view: LibraryView) => void }) {
   return <nav className="workflow-library-navigation" aria-label="Library views">
-    <Button type="button" variant="ghost" aria-current={active === "library" ? "page" : undefined}
-      onClick={() => onSelect("library")}>Artifacts</Button>
-    <Button type="button" variant="ghost" aria-current={active === "library:roles" ? "page" : undefined}
-      onClick={() => onSelect("library:roles")}>Roles</Button>
+    {libraryCategories.map(({ id, label }) => <Button key={id} type="button" variant="ghost"
+      aria-current={active === `library:${id}` ? "page" : undefined}
+      onClick={() => onSelect(`library:${id}`)}>{label}</Button>)}
   </nav>;
 }
 
@@ -43,6 +41,8 @@ function pipelineRoute(target = ""): { view: PipelineView; libraryView?: Library
   if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
   if (target.startsWith("compare-note:")) return { view: "compare" };
   if (isRolesTarget(target)) return { view: "library", libraryView: "library:roles" };
+  const libraryView = libraryCategories.find(({ id }) => target === `library:${id}`);
+  if (libraryView) return { view: "library", libraryView: `library:${libraryView.id}` };
   const tab = pipelineTabs.find(({ id }) => id === target);
   if (tab) return { view: tab.id };
   if (!target || target === "builder" || target === "delivery") return { view: "drafts" };
@@ -60,7 +60,8 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
 }
 
 function ProjectPipelinesWorkspace(props: WorkspaceProps) {
-  const { view, libraryView = "library", draftId, runId, runFocus } = pipelineRoute(props.target);
+  const { view, libraryView = "library:pipeline", draftId, runId, runFocus } = pipelineRoute(props.target);
+  const category = libraryView.slice("library:".length) as LibraryCategory;
   return <PipelineWorkspaceFrame>
     <PipelineTabs views={pipelineTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
@@ -69,9 +70,7 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
         : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus} />
         : view === "library" ? <>
           <LibraryNavigation active={libraryView} onSelect={(target) => props.openWorkspace("pipelines", target)} />
-          {libraryView === "library:roles"
-            ? <ConversationTemplateEditor checkout={props.checkout} openWorkspace={props.openWorkspace} />
-            : <WorkflowLibrary projectId={props.checkout.projectId} openWorkspace={props.openWorkspace} />}
+          <WorkflowLibrary key={libraryView} category={category} {...props} />
         </>
         : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
         : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />

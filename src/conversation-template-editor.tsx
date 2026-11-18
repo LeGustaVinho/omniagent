@@ -19,7 +19,7 @@ import "./workflow-roles.css";
 
 type ToolScope = Exclude<SessionMode, "plan">;
 type ReviewPolicy = "independent" | "cross_review" | "human_approval";
-type TemplateDraft = {
+export type TemplateDraft = {
   name: string;
   role: JobRole;
   model: ModelSelection | null;
@@ -53,7 +53,7 @@ const reviewNames: Record<ReviewPolicy, string> = {
   human_approval: "Human approval",
 };
 
-function emptyDraft(): TemplateDraft {
+export function emptyRoleDraft(): TemplateDraft {
   return {
     name: "", role: "agent", model: null, effort: null, instructions: "", toolScope: "read_only",
     completionContract: "", reviewPolicy: "human_approval",
@@ -66,6 +66,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState<Selection>();
+  const [viewOnly, setViewOnly] = useState(false);
   const [search, setSearch] = useState("");
   const headsKey = ["conversation-templates", projectId];
   const heads = useQuery({
@@ -89,6 +90,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
   const loadedHead = detail.data?.history[0];
   const knownHead = activeHead && (!loadedHead || activeHead.version.ordinal >= loadedHead.ordinal)
     ? activeHead.version : loadedHead;
+  const historical = Boolean(knownHead && reference?.revision !== knownHead.revision);
   const query = search.trim().toLowerCase();
   const roles = heads.data ?? [];
   const visibleRoles = roles.filter(({ name, displayLabel }) => [name, displayLabel].some((label) => label?.toLowerCase().includes(query)));
@@ -100,6 +102,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
       previous.find((entry) => entry.templateId === templateId && entry.version.ordinal > version.ordinal) ?? head,
     ].sort((a, b) => a.name.localeCompare(b.name)));
     setSelected({ templateId, revision: version.revision });
+    setViewOnly(false);
   }
 
   async function accept(saved: Detail) {
@@ -130,7 +133,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
         {visibleRoles.length > 0 && <ul className="pipeline-select-list">
           {visibleRoles.map(({ templateId, version, name, displayLabel }) => <li key={templateId}>
             <button className="pipeline-select-item" type="button" aria-pressed={reference?.templateId === templateId}
-              onClick={() => setSelected({ templateId, revision: version.revision })}>
+              onClick={() => { setViewOnly(false); setSelected({ templateId, revision: version.revision }); }}>
               <UserRound className="workflow-role-icon" size={17} aria-hidden />
               <span>{displayLabel ?? name}<small>{displayLabel && displayLabel !== name && `${name} · `}Revision {version.ordinal}</small></span>
               <ChevronRight size={14} className="pipeline-end" aria-hidden />
@@ -154,15 +157,17 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
                 {detail.data.history.map((version) => <option key={version.revision} value={version.revision}>Revision {version.ordinal}</option>)}
               </select>
             </label>
+            {!historical && <Button type="button" variant="outline" onClick={() => setViewOnly((value) => !value)}>
+              {viewOnly ? "Edit Role" : "View saved Role"}
+            </Button>}
             {openWorkspace && <WorkflowEditorAssistance key={reference.revision} projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace}
               artifact={{ name: detail.data.revision.template.name, version: { id: reference.templateId, revision: reference.revision, kind: "role", destination: "project" } }} />}
           </div>
-          {knownHead?.revision === reference.revision && <TemplateDisplayLabelEditor
+          {!viewOnly && knownHead?.revision === reference.revision && <TemplateDisplayLabelEditor
             key={`${projectId}:${reference.templateId}:${reference.revision}`} projectId={projectId}
             templateId={reference.templateId} templateRevision={reference.revision} />}
           <TemplateForm key={reference.revision} checkoutId={checkoutId} projectId={projectId} saved={detail.data.revision}
-            historical={Boolean(knownHead && reference.revision !== knownHead.revision)}
-            onSaved={accept} onConflict={openHead} />
+            historical={historical} viewOnly={viewOnly} onSaved={accept} onConflict={openHead} />
         </>}
       </section>}
     </div>
@@ -227,27 +232,19 @@ function TemplateDisplayLabelEditor({ projectId, templateId, templateRevision }:
   </details>;
 }
 
-function TemplateForm({ checkoutId, projectId, saved, historical = false, onSaved, onConflict }: {
+function TemplateForm({ checkoutId, projectId, saved, historical = false, viewOnly = false, onSaved, onConflict }: {
   checkoutId: string;
   projectId: string;
   saved?: Revision;
   historical?: boolean;
+  viewOnly?: boolean;
   onSaved: (detail: Detail) => Promise<void>;
   onConflict: (head: Head) => void;
 }) {
-  const [draft, setDraft] = useState<TemplateDraft>(() => saved?.template ?? emptyDraft());
-  const live = useLiveModelOptions(undefined, !historical);
-  const model = live.models.find(({ option }) => draft.model && sameModelSelection(option.selection, draft.model));
-  const liveModel = model?.option.selectable ? draft.model : null;
-  const effortUnavailable = Boolean(liveModel && draft.effort && !model?.efforts.includes(draft.effort));
-  const matrix = useQuery({
-    queryKey: ["conversation-template-profile", projectId, checkoutId, liveModel, draft.effort, draft.toolScope],
-    queryFn: () => invoke<Matrix>("conversation_template_profile", {
-      projectId, checkoutId, model: liveModel, effort: draft.effort, toolScope: draft.toolScope,
-    }),
-    enabled: !historical && Boolean(liveModel) && !effortUnavailable,
-    retry: false,
-  });
+  const [draft, setDraft] = useState<TemplateDraft>(() => saved?.template ?? emptyRoleDraft());
+  const readOnly = historical || viewOnly;
+  const visibleDraft = readOnly && saved ? saved.template : draft;
+  const validation = useRoleValidation(projectId, checkoutId, visibleDraft, !readOnly);
   const save = useMutation({
     mutationFn: () => invoke<Save>("save_conversation_template", {
       projectId, checkoutId,
@@ -257,13 +254,7 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
     onSuccess: async (result) => { if (result.status === "saved") await onSaved(result.detail); },
   });
   const conflict = save.data?.status === "conflict" ? save.data.current : undefined;
-  const option = matrix.data?.toolScopes.find(({ mode }) => mode === draft.toolScope);
-  const canSave = !historical && !save.isPending && Boolean(draft.name.trim() && liveModel && !effortUnavailable
-    && option && !option.blocker && !matrix.error && !conflict);
-
-  function update<K extends keyof TemplateDraft>(key: K, value: TemplateDraft[K]) {
-    setDraft((previous) => ({ ...previous, [key]: value }));
-  }
+  const canSave = validation.canSave && !save.isPending && !conflict;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -272,10 +263,49 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
 
   return <form className="pipeline-stack pipeline-form workflow-role-form" onSubmit={submit}>
     <header>
-      <h3>{historical ? `Revision ${saved?.version.ordinal}` : saved ? "Edit Role" : "New Role"}</h3>
-      {historical && <p className="pipeline-meta">Read-only revision</p>}
+      <h3>{readOnly ? `Revision ${saved?.version.ordinal}` : saved ? "Edit Role" : "New Role"}</h3>
+      {readOnly && <p className="pipeline-meta">Read-only revision</p>}
     </header>
-    <fieldset className="pipeline-stack workflow-role-fields" disabled={historical || save.isPending}>
+    <WorkflowRoleFields projectId={projectId} checkoutId={checkoutId} draft={visibleDraft} disabled={save.isPending}
+      readOnly={readOnly} validation={validation} onChange={setDraft} />
+    {!readOnly && conflict && <div role="alert" className="pipeline-stack">
+      <p>Revision {conflict.version.ordinal} was saved elsewhere. Your edits are still here.</p>
+      <Button type="button" variant="outline" onClick={() => onConflict(conflict)}>Discard edits and open latest revision</Button>
+    </div>}
+    {save.error && <p role="alert">{String(save.error)}</p>}
+    {!readOnly && <div className="workflow-role-footer">
+      <Button type="submit" disabled={!canSave}>{save.isPending ? "Saving revision…" : "Save Role revision"}</Button>
+    </div>}
+  </form>;
+}
+
+export function useRoleValidation(projectId: string, checkoutId: string, draft: TemplateDraft, enabled: boolean) {
+  const live = useLiveModelOptions(undefined, enabled);
+  const model = live.models.find(({ option }) => draft.model && sameModelSelection(option.selection, draft.model));
+  const liveModel = model?.option.selectable ? draft.model : null;
+  const effortUnavailable = Boolean(liveModel && draft.effort && !model?.efforts.includes(draft.effort));
+  const matrix = useQuery({
+    queryKey: ["conversation-template-profile", projectId, checkoutId, liveModel, draft.effort, draft.toolScope],
+    queryFn: () => invoke<Matrix>("conversation_template_profile", {
+      projectId, checkoutId, model: liveModel, effort: draft.effort, toolScope: draft.toolScope,
+    }),
+    enabled: enabled && Boolean(liveModel) && !effortUnavailable,
+    retry: false,
+  });
+  const option = matrix.data?.toolScopes.find(({ mode }) => mode === draft.toolScope);
+  const canSave = enabled && Boolean(draft.name.trim() && liveModel && !effortUnavailable && option && !option.blocker && !matrix.error);
+  return { live, model, liveModel, effortUnavailable, matrix, option, canSave };
+}
+
+export function WorkflowRoleFields({ projectId, checkoutId, draft, readOnly, disabled, validation, onChange }: {
+  projectId: string; checkoutId: string; draft: TemplateDraft; readOnly?: boolean; disabled?: boolean;
+  validation: ReturnType<typeof useRoleValidation>; onChange: (draft: TemplateDraft) => void;
+}) {
+  const { live, model, liveModel, effortUnavailable, matrix, option } = validation;
+  function update<K extends keyof TemplateDraft>(key: K, value: TemplateDraft[K]) {
+    onChange({ ...draft, [key]: value });
+  }
+  return <fieldset className="pipeline-stack workflow-role-fields" disabled={readOnly || disabled}>
       <section className="pipeline-box pipeline-stack workflow-role-group">
         <h4>Identity</h4>
         <div className="workflow-role-pair">
@@ -288,29 +318,29 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
       <section className="pipeline-box pipeline-stack workflow-role-group">
         <h4>Execution</h4>
         <div className="workflow-role-pair">
-          {historical ? <p className="break-all">CLI model · {draft.model?.provider} · {draft.model?.profileId} · {draft.model?.modelId}</p> :
+          {readOnly ? <label>Default CLI and model<input value={draft.model ? [draft.model.provider, draft.model.profileId, draft.model.modelId].join(" · ") : "Choose a model when using this template"} readOnly /></label> :
             <ModelPicker label="Default CLI and model" options={live.options} loading={live.loading}
-              disabled={save.isPending} selection={{ mode: "single", selected: draft.model, onChange: (selection) =>
-                setDraft((previous) => ({ ...previous, model: selection, effort: null })) }} />}
-          {historical ? <p>Effort · {draft.effort ?? "CLI default"}</p> :
+              disabled={disabled} selection={{ mode: "single", selected: draft.model, onChange: (selection) =>
+                onChange({ ...draft, model: selection, effort: null }) }} />}
+          {readOnly ? <label>Effort<input value={draft.effort ?? "CLI default"} readOnly /></label> :
             !!model?.efforts.length && <label>Effort<EffortSelect capabilities={model} value={draft.effort ?? ""}
               onChange={(value) => update("effort", value || null)} /></label>}
         </div>
-        {!historical && draft.model && !liveModel && !live.loading && <p role="alert">The saved CLI, profile, and model are unavailable. Choose an available model to save a revision.</p>}
-        {!historical && live.errors.length > 0 && <details><summary>CLI availability</summary>
+        {!readOnly && draft.model && !liveModel && !live.loading && <p role="alert">The saved CLI, profile, and model are unavailable. Choose an available model to save a revision.</p>}
+        {!readOnly && live.errors.length > 0 && <details><summary>CLI availability</summary>
           {live.errors.map((error, index) => <p key={index}>{String(error)}</p>)}
         </details>}
-        {!historical && effortUnavailable && <p role="alert">The saved effort is unavailable. <Button type="button" variant="outline" onClick={() => update("effort", null)}>Use CLI default effort</Button></p>}
-        <label>Tool scope<select value={draft.toolScope} disabled={historical || !matrix.data || Boolean(matrix.error)}
+        {!readOnly && effortUnavailable && <p role="alert">The saved effort is unavailable. <Button type="button" variant="outline" onClick={() => update("effort", null)}>Use CLI default effort</Button></p>}
+        <label>Tool scope<select value={draft.toolScope} disabled={readOnly || !matrix.data || Boolean(matrix.error)}
           onChange={(event) => update("toolScope", event.currentTarget.value as ToolScope)}>
           {(matrix.data?.toolScopes ?? [{ mode: draft.toolScope, blocker: null }]).map(({ mode, blocker }) =>
             <option key={mode} value={mode} disabled={Boolean(blocker)}>{scopeNames[mode]}{blocker ? " (unavailable)" : ""}</option>)}
         </select></label>
         {option?.blocker && <p role="alert">{option.blocker}</p>}
         {draft.toolScope === "approved_write" && <p className="pipeline-meta">Writing stages require project permission and a workflow release.</p>}
-        {!historical && <ProfileMatrix matrix={matrix.data} loading={Boolean(liveModel && !effortUnavailable && matrix.isPending)} error={matrix.error} />}
+        {!readOnly && <ProfileMatrix matrix={matrix.data} loading={Boolean(liveModel && !effortUnavailable && matrix.isPending)} error={matrix.error} />}
         <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={draft.toolScope} model={draft.model}
-          options={live.options} effort={draft.effort} disabled={historical || save.isPending} configuration={{ stage: draft.requirements }}
+          options={live.options} effort={draft.effort} disabled={Boolean(readOnly || disabled)} configuration={{ stage: draft.requirements }}
           onChange={({ stage }) => update("requirements", stage)} />
       </section>
       <section className="pipeline-box pipeline-stack workflow-role-group">
@@ -322,16 +352,14 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
           {Object.entries(reviewNames).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
         </select></label>
       </section>
-    </fieldset>
-    {conflict && <div role="alert" className="pipeline-stack">
-      <p>Revision {conflict.version.ordinal} was saved elsewhere. Your edits are still here.</p>
-      <Button type="button" variant="outline" onClick={() => onConflict(conflict)}>Discard edits and open latest revision</Button>
-    </div>}
-    {save.error && <p role="alert">{String(save.error)}</p>}
-    {!historical && <div className="workflow-role-footer">
-      <Button type="submit" disabled={!canSave}>{save.isPending ? "Saving revision…" : "Save Role revision"}</Button>
-    </div>}
-  </form>;
+    </fieldset>;
+}
+
+export function ReadOnlyWorkflowRole({ projectId, checkoutId, draft }: { projectId: string; checkoutId: string; draft: TemplateDraft }) {
+  const validation = useRoleValidation(projectId, checkoutId, draft, false);
+  return <section className="pipeline-stack pipeline-form workflow-role-form" aria-label="Role">
+    <WorkflowRoleFields projectId={projectId} checkoutId={checkoutId} draft={draft} readOnly validation={validation} onChange={() => undefined} />
+  </section>;
 }
 
 function ProfileMatrix({ matrix, loading, error }: { matrix?: Matrix; loading: boolean; error: Error | null }) {

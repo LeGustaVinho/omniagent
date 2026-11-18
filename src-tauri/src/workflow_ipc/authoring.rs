@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
-    PackageArtifactVersion, PublishedPackageArtifact, WorkflowAuthoringOutput, WorkflowPackage,
+    PackageArtifactVersion, PackageMember, PublishedPackageArtifact, WorkflowAuthoringOutput, WorkflowPackage,
     WorkflowPackageCatalogEntry, WorkflowPackageDraft, WorkflowPackagePreview,
     WorkflowPackagePublishOutcome, WorkflowPackageSummary,
     derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
@@ -15,7 +15,7 @@ use omniagent::{
     workflows::{
         WorkflowGraph, WorkflowRevision,
         authoring::{
-            AuthoringBase, AuthoringDraft, WorkflowCanvasEdit, WorkflowPublicationOutcome,
+            AuthoringBase, AuthoringDraft, WorkflowCanvasEdit, WorkflowDraftKind, WorkflowPublicationOutcome,
         },
     },
 };
@@ -23,6 +23,26 @@ use tauri::State;
 
 use super::report;
 use crate::conversation_runtime::selected_scope;
+
+#[tauri::command]
+pub async fn delete_workflow_draft(
+    store: State<'_, Store>,
+    project_id: String,
+    draft_id: String,
+    kind: WorkflowDraftKind,
+    expected_revision: Option<String>,
+) -> Result<(), String> {
+    store.delete_workflow_draft(project_id, draft_id, kind, expected_revision).await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn publish_workflow_resource(
+    store: State<'_, Store>,
+    project_id: String,
+    member: PackageMember,
+) -> Result<PackageArtifactVersion, String> {
+    store.publish_workflow_resource(project_id, member).await.map_err(report)
+}
 
 #[tauri::command]
 pub async fn describe_workflow_reusable_boundary(
