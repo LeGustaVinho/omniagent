@@ -36,14 +36,12 @@ export const defaultTypedPrompt = (): PromptContract => ({
 });
 
 export function promptNodeDefinition(name: string, base: WorkflowDefinition,
-  schemas?: { input?: JsonSchema; output?: JsonSchema }, write = false): WorkflowDefinition {
+  schemas?: { input?: JsonSchema; output?: JsonSchema }): WorkflowDefinition {
   const control = (name: string): WorkflowPort => ({ name, value: { kind: "control" } });
   const data = (name: string, artifact: string): WorkflowPort => ({ name, value: { kind: "data", artifact } });
   return {
     ...base, title: name,
-    inputs: [control("ready"), data("input", "json_object"), ...(write ? [
-      data("release", "release"), data("worktree", "worktree"), data("plan", "plan"),
-    ] : [])],
+    inputs: [control("ready"), data("input", "json_object")],
     outputs: [control("completed"), control("failed"), data("result", "json_object")],
     inputSchemas: schemas?.input ? { input: schemas.input } : undefined,
     outputSchemas: schemas?.output ? { result: schemas.output } : undefined,

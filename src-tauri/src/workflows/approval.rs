@@ -124,6 +124,17 @@ pub(crate) fn workflow_release_authorized(
     run: &str,
     release_id: &str,
 ) -> Result<Option<bool>> {
+    let scope: Option<(String, String, String)> = db.query_row(
+        "SELECT approval_node_id, plan_revision, task_id FROM job_pipeline_releases
+         WHERE id = ?1 AND project_id = ?2 AND pipeline_run_id = ?3",
+        params![release_id, project, run],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    if let Some((node, revision, task)) = scope
+        && super::write_scope::release_is_human(db, project, run, &node)?
+    {
+        return Ok(Some(super::write_scope::current_release(db, project, run, &node, &revision, &task)?));
+    }
     let decision: Option<String> = db
         .query_row(
             "SELECT b.decision_artifact_id FROM workflow_release_bindings b

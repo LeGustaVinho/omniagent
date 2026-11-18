@@ -51,6 +51,12 @@ Create a pipeline that passes a typed request through a Wait node and returns it
 3. Wire `Start.inputs → Wait.input` and `Wait.result → End.result`.
 4. Save the draft, review the graph and publish it. Launch the revision and enter a request. Open **Pipelines → Runs** to inspect the wait and returned result.
 
+### Run the Development Pipeline
+
+1. Open **Pipelines → Builder → From template** and choose **Use template**. Select a local Codex or Claude model for the Roles, then review and publish the draft.
+2. Launch it from a registered Git checkout and enter the feature request. Set the remote and destination branch when the project needs an explicit target. The selected profile needs Git, the project's test and build commands, and authenticated GitHub CLI access for pull request delivery.
+3. Review the plan and backlog in **Runs** and authorize the managed task worktrees when prompted. Review the exact pull request revision when a merge requires approval. The final result records the integration SHA, delivered work and any blockers.
+
 ### Pick up an interrupted run
 
 If OmniAgent restarts during a task, open **Queue** and select the interrupted attempt. Review its recorded outcome and the worktree it used. If the attempt stopped during a Git write, complete the reconciliation review when prompted before retrying.

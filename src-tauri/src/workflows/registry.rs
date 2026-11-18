@@ -482,8 +482,16 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
                 current.outputs = vec![control("completed"), object("result"), control("failed")];
             }
         }
-        BuiltinNode::Agent if pinned.revision == 3 => {
+        BuiltinNode::Agent if matches!(pinned.revision, 3 | 4) => {
             configure_structured_agent(&mut current, pinned.executor == Executor::WriteAgent);
+            if pinned.revision == 3 && pinned.executor == Executor::WriteAgent {
+                current.revision = 3;
+                current.inputs.extend([
+                    Port { name: "release".into(), value: PortType::Data(ArtifactKind::Release) },
+                    Port { name: "worktree".into(), value: PortType::Data(ArtifactKind::Worktree) },
+                    Port { name: "plan".into(), value: PortType::Data(ArtifactKind::Plan) },
+                ]);
+            }
         }
         BuiltinNode::Agent => {
             if pinned.title == "Agent" {
@@ -595,13 +603,9 @@ pub(super) fn configure_structured_agent(definition: &mut NodeDefinition, write:
         port("result", PortType::Data(ArtifactKind::JsonObject)),
     ];
     if write {
+        definition.revision = 4;
         definition.executor = Executor::WriteAgent;
         definition.effect = Effect::WriteRepository;
-        definition.inputs.extend([
-            port("release", PortType::Data(ArtifactKind::Release)),
-            port("worktree", PortType::Data(ArtifactKind::Worktree)),
-            port("plan", PortType::Data(ArtifactKind::Plan)),
-        ]);
     }
 }
 

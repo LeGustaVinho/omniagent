@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
+import { developmentPipelinePackage } from "@/development-pipeline";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview, type SchemaMember } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
@@ -135,6 +136,17 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
   }
   const [creatingPipeline, showCreatePipeline] = useState(false);
   const [pipelineName, setPipelineName] = useState("");
+  const [choosingTemplate, showTemplate] = useState(false);
+  const [templateModel, setTemplateModel] = useState<ModelSelection | null>(null);
+  const templateModels = useLiveModelOptions(providers, choosingTemplate);
+  const selectedTemplateModel = availableModelSelection(templateModels.options, templateModel)
+    ?? (templateModel === null ? templateModels.options.find(({ selectable }) => selectable)?.selection ?? null : null);
+  const useTemplate = useMutation({
+    mutationFn: (model: ModelSelection) => invoke<PackageDraft>("create_workflow_package", {
+      projectId, conversationId: null, package: developmentPipelinePackage(model),
+    }),
+    onSuccess: (draft) => { showTemplate(false); openDraft(draft); },
+  });
   const create = useMutation({
     mutationFn: (name: string) => {
       const packageDocument: Package = {
@@ -182,6 +194,33 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
                 <div className="pipeline-actions justify-end">
                   <Dialog.Close asChild><Button variant="outline" type="button" disabled={create.isPending}>Cancel</Button></Dialog.Close>
                   <Button type="submit" disabled={!pipelineName.trim() || create.isPending}>Create pipeline</Button>
+                </div>
+              </form>
+            </BuilderLandingDialog>
+          </Dialog.Root>
+        </article>
+        <article className="pipeline-builder-start">
+          <span className="pipeline-builder-icon"><PackageIcon size={18} aria-hidden /></span>
+          <div><h3>From template</h3><p>Plan, implement, and validate changes with the Development Pipeline.</p></div>
+          <Dialog.Root open={choosingTemplate} onOpenChange={(open) => {
+            if (useTemplate.isPending) return;
+            if (open) useTemplate.reset();
+            showTemplate(open);
+          }}>
+            <Dialog.Trigger asChild><Button type="button" variant="outline">Use template</Button></Dialog.Trigger>
+            <BuilderLandingDialog title="Development Pipeline" icon={<Workflow size={20} aria-hidden />}
+              description="Choose the default model for the template Roles." busy={useTemplate.isPending}>
+              <form className="pipeline-form pipeline-builder-dialog-form" onSubmit={(event) => {
+                event.preventDefault();
+                if (selectedTemplateModel && !useTemplate.isPending) useTemplate.mutate(selectedTemplateModel);
+              }}>
+                <ModelPicker label="Template model" options={templateModels.options} loading={templateModels.loading}
+                  disabled={useTemplate.isPending} combinedCatalog
+                  selection={{ mode: "single", selected: selectedTemplateModel, onChange: setTemplateModel }} />
+                {(useTemplate.error ?? templateModels.errors[0]) && <p role="alert">{String(useTemplate.error ?? templateModels.errors[0])}</p>}
+                <div className="pipeline-actions justify-end">
+                  <Dialog.Close asChild><Button variant="outline" type="button" disabled={useTemplate.isPending}>Cancel</Button></Dialog.Close>
+                  <Button type="submit" disabled={!selectedTemplateModel || useTemplate.isPending}>Create draft</Button>
                 </div>
               </form>
             </BuilderLandingDialog>

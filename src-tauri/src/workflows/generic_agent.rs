@@ -142,7 +142,12 @@ pub(super) fn require_admission(
             .transpose()
             .map(Option::flatten)
     };
-    let approved_release = if typed
+    let approved_release = if super::write_scope::writer(node) {
+        let value = read("input", ArtifactKind::JsonObject)?;
+        let release = super::write_scope::require_binding(db, project, binding, value.as_ref())?;
+        ensure!(request.task_id.as_ref() == Some(&release.task_id), "The approved release belongs to a different task");
+        Some(release)
+    } else if typed
         .is_some_and(|config| config.effective_role.tool_scope == SessionMode::ApprovedWrite)
     {
         let release = read("release", ArtifactKind::Release)?;

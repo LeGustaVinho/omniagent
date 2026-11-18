@@ -53,6 +53,7 @@ mod timed;
 pub mod triggers;
 mod unit_execution;
 mod units;
+pub(crate) mod write_scope;
 
 pub use approval::{
     ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence,

@@ -89,14 +89,15 @@ pub(crate) fn issue_pipeline_release(
         writer_owner(db, project, task, checkout)?.is_some(),
         "The release needs an assigned task worktree in this project"
     );
+    let human = crate::workflows::write_scope::release_is_human(db, project, pipeline_run, approval_node)?;
     let id = Uuid::new_v4().to_string();
     let changed = db.execute(
         "INSERT INTO job_pipeline_releases
          (id, pipeline_run_id, approval_node_id, project_id, checkout_id, task_id, plan_revision)
-         SELECT ?1, p.id, n.instance_id, p.project_id, ?5, ?6, p.plan_revision
+         SELECT ?1, p.id, n.instance_id, p.project_id, ?5, ?6, ?4
          FROM job_pipeline_runs p JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
          WHERE p.id = ?2 AND p.project_id = ?7 AND n.instance_id = ?3
-           AND n.kind = 'implementation_approval' AND p.plan_revision = ?4",
+           AND n.kind = 'implementation_approval' AND (p.plan_revision = ?4 OR ?8)",
         params![
             id,
             pipeline_run,
@@ -104,7 +105,8 @@ pub(crate) fn issue_pipeline_release(
             plan_revision,
             checkout,
             task,
-            project
+            project,
+            human
         ],
     )?;
     ensure!(
@@ -239,9 +241,15 @@ pub(super) fn release_blocker(db: &Connection, job: &Job) -> Result<Option<Relea
         params![origin.pipeline_run_id, job.project_id],
         |row| row.get(0),
     )?;
-    if current.as_ref() != Some(&release.plan_revision)
-        || origin.plan_revision.as_ref() != Some(&release.plan_revision)
-    {
+    let human = crate::workflows::write_scope::release_is_human(
+        db, &job.project_id, &origin.pipeline_run_id, &release.approval_node_id)?;
+    let wrong_plan = if human {
+        origin.plan_revision.is_some()
+    } else {
+        current.as_ref() != Some(&release.plan_revision)
+            || origin.plan_revision.as_ref() != Some(&release.plan_revision)
+    };
+    if wrong_plan {
         return Ok(Some(ReleaseBlocker::StalePlan));
     }
     if release.checkout_id != job.checkout_id || Some(&release.task_id) != job.task_id.as_ref() {

@@ -201,6 +201,13 @@ fn pinned_release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBl
         .pipeline
         .as_ref()
         .context("Pinned job has no pipeline origin")?;
+    if let Some(release) = &origin.release
+        && crate::workflows::write_scope::release_is_human(
+            db, &job.project_id, &origin.pipeline_run_id, &release.approval_node_id,
+        )?
+    {
+        return release_blocker(db, job);
+    }
     if let Some(current) = crate::workflows::stage_plan::plan_head_is_current(db, &job.id)? {
         if !current {
             return Ok(Some(ReleaseBlocker::StalePlan));

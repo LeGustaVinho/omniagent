@@ -14,6 +14,51 @@ import { testCheckout } from "@/test-fixtures/checkout";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
+it("creates independent Development Pipeline drafts using the native package action", async () => {
+  const selection = { provider: "codex", profileId: "desktop", modelId: "fixture" };
+  const created: { name: string; members: { key: string; body: {
+    kind: string; graph?: { nodes: { kind: string; id: string }[] }; template?: { model: unknown };
+  } }[] }[] = [];
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "list_workflow_packages") return [];
+    if (command === "conversation_models") return (args as { provider: string }).provider === selection.provider
+      ? [{ option: { name: "Fixture model", selectable: true, selection, rating: null } }] : [];
+    if (command === "create_workflow_package") {
+      const input = (args as { package: typeof created[number] }).package;
+      created.push(input);
+      return { id: `template-${created.length}`, package: input, revision: "draft" };
+    }
+    throw new Error(command);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelineBuilderLanding checkout={testCheckout} openWorkspace={openWorkspace} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  for (const ordinal of [1, 2]) {
+    await user.click(screen.getByRole("button", { name: "Use template" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Development Pipeline" }));
+    const create = dialog.getByRole<HTMLButtonElement>("button", { name: "Create draft" });
+    await waitFor(() => expect(create.disabled).toBe(false));
+    await user.click(create);
+    await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:template-${ordinal}`));
+  }
+  expect(created[0]).toEqual(created[1]);
+  expect(created[0]).not.toBe(created[1]);
+  const template = created[0]!;
+  expect(template.name).toBe("Development Pipeline");
+  expect(template.members.length).toBeLessThanOrEqual(96);
+  expect(new TextEncoder().encode(JSON.stringify(template)).length).toBeLessThan(256 * 1024);
+  expect(template.members.filter(({ body }) => body.kind === "role")
+    .every(({ body }) => JSON.stringify(body.template?.model) === JSON.stringify(selection))).toBe(true);
+  const nodes = template.members.flatMap(({ body }) => body.graph?.nodes ?? []);
+  expect(nodes.every(({ kind }) => ["start", "typed_start", "end", "subflow", "fork", "join_results", "wait", "loop", "human"].includes(kind))).toBe(true);
+  expect(nodes.map(({ id }) => id)).toEqual(expect.arrayContaining([
+    "master-plan-round", "specification-round", "backlog-round", "approve-work", "candidate-attempt",
+    "baseline-and-red", "quality-gate", "wait-for-ci", "approve-merge", "integrated-audit",
+  ]));
+});
+
 const version = { destination: "library", kind: "command", id: "local-command", revision: "published-v1" };
 const artifact = {
   version, name: "Repository checker",

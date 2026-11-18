@@ -676,6 +676,14 @@ fn record_decision(
     request: &WorkflowPendingDecision,
     decision: &WorkflowStageDecision,
 ) -> Result<WorkflowArtifact> {
+    if super::write_scope::authorizes_writes(node)
+        && let WorkflowStageDecision::HumanApproval { approved: true, values } = decision
+    {
+        ensure!(
+            values.get("authorizeWrites") == Some(&Value::Bool(true)),
+            "Authorize writes to the managed task worktrees or reject the request"
+        );
+    }
     let evidence = validated_evidence(node, &request.request, decision)?;
     let plan_key = run.plan_revision.as_deref().unwrap_or("");
     let output = request.request.output_port();

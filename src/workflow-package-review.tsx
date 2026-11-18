@@ -277,8 +277,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     const fields = (overrides?.roleOverrides ?? {}) as Record<string, unknown>;
     const role = resources.role(effective.role);
     return { local, effective, overrides, defaults, fields, role,
-      input: resources.schema(effective.input_schema), output: resources.schema(effective.output_schema),
-      write: (fields.toolScope ?? defaults.toolScope ?? role?.toolScope) === "approved_write" };
+      input: resources.schema(effective.input_schema), output: resources.schema(effective.output_schema) };
   }
   const discovered: WorkflowDefinitions = { ...pinned };
   const nodeBindings: NonNullable<WorkflowEditorState["nodeBindings"]> = Object.create(null);
@@ -355,7 +354,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     if (!base || !member.body.prompt.schemaContract) continue;
     const typed = typedPrompt(id, member);
     definitions[id] = promptNodeDefinition(member.name, base,
-      typed ? { input: typed.input, output: typed.output } : undefined, typed?.write);
+      typed ? { input: typed.input, output: typed.output } : undefined);
   }
   propagateSchemas(graph, definitions);
   const rolesByNode = Object.fromEntries([...promptsByNode.entries()].map(([id, member]) => {

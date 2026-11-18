@@ -23,7 +23,6 @@ const ENTRY: &str = "entry";
 const EXECUTE: &str = "execute";
 const FAILURE: &str = "failure";
 
-pub(super) const WORKFLOW_WRITE_UNAVAILABLE: &str = "Choose a repository-read Role. AI Node Agent cannot request approved worktree write in this workflow.";
 
 pub(super) struct LoweredPrompt {
     pub(super) graph: WorkflowGraph,
@@ -193,6 +192,7 @@ fn typed_agent(
     role: &super::PackageArtifactVersion,
 ) -> Result<()> {
     config.validate()?;
+    let write = config.effective_role.tool_scope == SessionMode::ApprovedWrite;
     let input = config.input_schema.clone();
     let output = config.output_schema.clone();
     graph.node(
@@ -210,7 +210,7 @@ fn typed_agent(
         },
     )?;
     let definition = graph.pins.get_mut(id).context("Missing Agent definition")?;
-    configure_structured_agent(definition, false);
+    configure_structured_agent(definition, write);
     definition.input_schemas.insert("input".into(), input);
     definition.output_schemas.insert("result".into(), output);
     Ok(())
@@ -233,10 +233,6 @@ pub(super) fn lower(
             .context("Select an Output Schema")?,
     )?;
     let effective = effective_role("role", dependencies, &prompt.role_overrides)?;
-    ensure!(
-        effective.tool_scope == SessionMode::ReadOnly,
-        WORKFLOW_WRITE_UNAVAILABLE
-    );
     let policy = effective.review_policy;
     let reviewer_role = if policy == TemplateReviewPolicy::CrossReview {
         ensure!(

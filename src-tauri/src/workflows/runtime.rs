@@ -103,7 +103,8 @@ pub(super) fn insert_workflow_run(
         )?;
     }
     for node in &workflow.nodes {
-        let scheduler_kind = if node.definition.executor == Executor::RecordImplementationRelease {
+        let scheduler_kind = if node.definition.executor == Executor::RecordImplementationRelease
+            || super::write_scope::authorizes_writes(node) {
             "implementation_approval"
         } else {
             "execution"
@@ -337,6 +338,7 @@ impl Store {
         } else {
             None
         };
+        let human_release = super::write_scope::writer(&node);
         ensure!(
             dispatch.plan_revision.as_ref()
                 == plan
@@ -413,7 +415,7 @@ impl Store {
                     && request.task_id.as_ref() == Some(&release.release.task_id),
                 "the scheduled implementation must match the checkout, task and plan approved for release"
             );
-        } else {
+        } else if !human_release {
             ensure!(
                 dispatch.release_id.is_none(),
                 "this node has no release input"

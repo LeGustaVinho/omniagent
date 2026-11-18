@@ -268,9 +268,14 @@ impl Store {
         } else {
             None
         };
+        let managed = if super::write_scope::writer(&definition) {
+            Some(self.prepare_human_write_scope(project, run, node, artifacts.get("input")).await?)
+        } else {
+            None
+        };
         let release = match artifacts.get("release").map(|artifact| &artifact.value) {
             Some(ArtifactValue::Release(reference)) => Some(&reference.release),
-            _ => None,
+            _ => managed.as_ref(),
         };
         let checkout_id = if let Some(unit) = &unit {
             unit.checkout_id.clone()

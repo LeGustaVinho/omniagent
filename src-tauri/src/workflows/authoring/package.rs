@@ -350,7 +350,7 @@ impl Store {
                     let document: PackageDocument = open(&bytes)?;
                     let members = &document.package.members;
                     let standalone_pipeline = match members.as_slice() {
-                        [member] if matches!(member.body, PackageArtifactBody::Pipeline { .. }) => true,
+                        members if members.iter().filter(|member| matches!(member.body, PackageArtifactBody::Pipeline { .. })).count() == 1 => true,
                         _ => {
                             // Drafts started on the canvas can gain reusable artifacts as they evolve.
                             let (initial, authored): (Vec<u8>, bool) = db.query_row(

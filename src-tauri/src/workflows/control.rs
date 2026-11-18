@@ -185,6 +185,10 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
             && node.definition.executor == super::Executor::WriteAgent)
     }) {
         let node = step.instance.id.as_str();
+        if super::write_scope::writer(step) {
+            super::write_scope::approval_node(nodes, wires, node)?;
+            continue;
+        }
         let provider = source(node, "release").context("writing node requires a pinned release")?;
         let worktree =
             source(node, "worktree").context("writing node requires a pinned worktree")?;

@@ -89,7 +89,7 @@ pub(crate) use native_goal_qualification::{
 };
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use orchestration::RunOrchestration;
-pub(crate) use pipeline::WorkflowJobLaunch;
+pub(crate) use pipeline::{PipelineReleaseScope, WorkflowJobLaunch, issue_pipeline_release};
 pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,

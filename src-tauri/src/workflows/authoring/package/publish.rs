@@ -1047,6 +1047,10 @@ impl<'a> GraphCompiler<'a> {
             );
         }
         let empty = BTreeMap::new();
+        for node in &graph.nodes {
+            let definition = effective_pins.get_mut(&node.id).context("The node definition is missing")?;
+            crate::workflows::orchestration::define(node, definition)?;
+        }
         let expanded = subflow::expand(
             graph,
             effective_pins,
@@ -1089,8 +1093,9 @@ impl<'a> GraphCompiler<'a> {
                     .workflow
                     .nodes
                     .iter()
-                    .all(|node| node.definition.executor != crate::workflows::Executor::WriteAgent),
-                prompt_card::WORKFLOW_WRITE_UNAVAILABLE
+                    .all(|node| node.definition.executor != crate::workflows::Executor::WriteAgent
+                        || crate::workflows::write_scope::writer(node)),
+                "Republish the writing AI Node Agent to use Human approval"
             );
             return Ok(BoundSubflow {
                 name: artifact.name.clone(),

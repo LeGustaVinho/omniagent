@@ -182,6 +182,167 @@ async fn opens_an_archived_function_for_repair_without_publishing_retired_nodes(
 }
 
 #[tokio::test]
+async fn bundled_development_pipeline_publishes_through_the_native_compiler() -> Result<()> {
+    use std::process::Command;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().context("Find the workspace")?;
+    let encoded = Command::new("node")
+        .current_dir(root)
+        .args(["--input-type=module", "-e", r#"
+            import { registerHooks } from "node:module";
+            registerHooks({ resolve(specifier, context, nextResolve) {
+              const target = specifier.startsWith("@/")
+                ? new URL("./src/" + specifier.slice(2) + ".ts", import.meta.url).href
+                : specifier;
+              return nextResolve(target, context);
+            } });
+            const { developmentPipelinePackage } = await import("./src/development-pipeline.ts");
+            process.stdout.write(JSON.stringify(developmentPipelinePackage({
+              provider: "codex", profileId: "fixture", modelId: "reviewer",
+            })));
+        "#])
+        .output()?;
+    ensure!(encoded.status.success(), "Serialize the built-in template: {}", String::from_utf8_lossy(&encoded.stderr));
+    let package: WorkflowPackage = serde_json::from_slice(&encoded.stdout)?;
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("development-template.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id;
+    let draft = store.create_workflow_package(project.clone(), None, package).await?;
+    let published = commit(&store, &project, &draft).await?;
+    let version = &artifact(&published, "pipeline").version;
+    let selected = crate::workflows::WorkflowRevision { id: version.id.clone(), revision: version.revision.clone() };
+    store.execute(move |db| {
+        let definition = crate::workflows::load_definition(db, &project, &selected)?
+            .context("The bundled pipeline was not persisted")?;
+        assert!(definition.unsupported_node().is_none());
+        assert!(definition.nodes.iter().any(crate::workflows::write_scope::writer));
+        assert!(definition.nodes.len() <= 4096);
+        Ok(())
+    }).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn human_approval_releases_a_typed_agent_into_its_managed_worktree() -> Result<()> {
+    use crate::{
+        jobs::{AdmissionEnvironment, JobPermission, JobRule, JobWorkspace},
+        workflows::{
+            ArtifactValue, WorkflowLaunchRequest, decision_nodes::WorkflowDecisionSubmission,
+            generic_agent::tests::complete_response,
+        },
+    };
+    use serde_json::json;
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("native-writer.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id.clone();
+    store.set_project_job_rules(project.clone(), Vec::new(), vec![JobRule {
+        role: JobRole::Agent,
+        operation: SessionMode::ApprovedWrite,
+        workspace: JobWorkspace::Project,
+        permission: JobPermission::Allow,
+        requirements: Default::default(),
+    }]).await?;
+
+    let mut writer = role();
+    let PackageArtifactBody::Role { template } = &mut writer else { unreachable!() };
+    template.tool_scope = SessionMode::ApprovedWrite;
+    template.review_policy = TemplateReviewPolicy::Independent;
+    let input = serde_json::from_value(json!({"kind":"schema","fields":[
+        {"name":"task_key","type":"string","required":true},
+        {"name":"tasks","type":"array","required":true,"items":{"type":"object","fields":[
+            {"name":"key","type":"string","required":true},{"name":"title","type":"string","required":true}
+        ]}}
+    ]}))?;
+    let output = serde_json::from_value(json!({"kind":"schema","fields":[
+        {"name":"reply","type":"string","required":true}
+    ]}))?;
+    let mut prompt = member("writer", serde_json::from_value(json!({
+        "kind":"prompt","prompt":{"text":"Implement {{input.task_key}}.","executor":"agent","schemaContract":true,"nodePrefab":true}
+    }))?);
+    prompt.references = BTreeMap::from([
+        ("role".into(), reference("role")), ("input_schema".into(), reference("input")),
+        ("output_schema".into(), reference("output")),
+    ]);
+    let mut pipeline = member("pipeline", serde_json::from_value(json!({
+        "kind":"pipeline","graph":{"name":"Approved writer smoke test","nodes":[
+            {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+            {"id":"approve","kind":"human","configuration":{"kind":"human","interaction":"approval","message":"Authorize writing the task worktree?","fields":[
+                {"id":"authorizeWrites","label":"Authorize worktree writes","required":true,"input":{"kind":"boolean"}}
+            ]}},
+            {"id":"write","kind":"subflow","configuration":{"kind":"none"}},
+            {"id":"end","kind":"end","configuration":{"kind":"end"}}
+        ],"wires":[
+            {"from":{"node":"start","port":"start"},"to":{"node":"approve","port":"ready"}},
+            {"from":{"node":"start","port":"inputs"},"to":{"node":"approve","port":"input"}},
+            {"from":{"node":"approve","port":"approved"},"to":{"node":"write","port":"ready"}},
+            {"from":{"node":"approve","port":"approved_result"},"to":{"node":"write","port":"input"}},
+            {"from":{"node":"write","port":"completed"},"to":{"node":"end","port":"ready"}},
+            {"from":{"node":"write","port":"result"},"to":{"node":"end","port":"result"}}
+        ]}
+    }))?);
+    pipeline.references = BTreeMap::from([
+        ("start:schema".into(), reference("input")), ("write".into(), reference("writer")),
+        ("end:schema".into(), reference("output")),
+    ]);
+    let draft = store.create_workflow_package(project.clone(), None, package(vec![
+        member("role", writer), member("input", input), member("output", output), prompt, pipeline,
+    ])).await?;
+    let publication = commit(&store, &project, &draft).await?;
+    let version = &artifact(&publication, "pipeline").version;
+    let request: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId":project,"checkoutId":repo.checkout_id,"requestId":"native-writer",
+        "workflow":{"id":version.id,"revision":version.revision},
+        "inputs":{"task_key":"TASK-1","tasks":[{"key":"TASK-1","title":"Add an example"}]}
+    }))?;
+    let run = store.launch_workflow_request(request).await?;
+    assert!(store.next_workflow_agent().await?.is_none());
+    let inspection = store.inspect_workflow_execution(project.clone(), run.id.clone()).await?
+        .context("The workflow was not launched")?;
+    let decision = inspection.pending_decisions.first().context("Expected write approval")?;
+    let input: WorkflowDecisionSubmission = serde_json::from_value(json!({
+        "projectId":project,"runId":run.id,"requestId":decision.request_id,
+        "decision":{"kind":"human_approval","approved":true,"values":{"authorizeWrites":true}}
+    }))?;
+    store.resolve_workflow_stage_decision(input).await?;
+    let stage = store.next_workflow_agent().await?.context("The approved writer is not ready")?;
+    let first = stage.fixture_submission(&store).await?;
+    let second = stage.fixture_submission(&store).await?;
+    assert_eq!(first.dispatch.release_id, second.dispatch.release_id);
+    let release = first.dispatch.release_id.clone().context("Missing approved release")?;
+    assert_ne!(first.request.checkout_id.as_deref(), Some(repo.checkout_id.as_str()));
+    assert!(first.request.task_id.is_some());
+    assert_eq!(first.scope.mode, SessionMode::ApprovedWrite);
+    let worktree = first.scope.checkout.clone();
+    let mut invalid = stage.fixture_submission(&store).await?;
+    invalid.request.task_id = Some("other-task".into());
+    assert!(store.submit_workflow_agent(invalid).await.is_err());
+    stage.enqueue(&store, first).await?;
+    let attempt = store.claim_next_job(AdmissionEnvironment {
+        runner: "fixture-runner".into(), bridge_available: false,
+    }).await?.context("The write job was not admitted")?;
+    assert_eq!(attempt.scope.checkout, worktree);
+    assert!(attempt.input[0].text.contains("Implement TASK-1."));
+    fs::write(worktree.join("first.txt"), "approved candidate\n")?;
+    assert_eq!(fs::read_to_string(Path::new(&repo.checkout_root).join("first.txt"))?, "original first\n");
+    complete_response(&store, &attempt, r#"{"reply":"changed first.txt"}"#, None).await?;
+    let settled = store.inspect_workflow_execution(project.clone(), run.id.clone()).await?
+        .context("The workflow execution disappeared")?;
+    assert!(settled.outputs.iter().any(|output| {
+        output.current && output.artifact.node_instance_id == "end"
+            && matches!(&output.artifact.value, ArtifactValue::JsonObject(value)
+                if value.get("reply") == Some(&json!("changed first.txt")))
+    }));
+    let approved = settled.outputs.iter().find(|output| output.artifact.node_instance_id == "approve"
+        && output.artifact.port == "approved_result").context("Missing approved input")?;
+    store.revoke_job_pipeline_release(project.clone(), release).await?;
+    let error = store.prepare_human_write_scope(&project, &run.id, "write::execute", Some(&approved.artifact))
+        .await.unwrap_err();
+    assert!(error.to_string().contains("revoked"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
     use crate::{
         conversations::ConversationPipelineChoice,
