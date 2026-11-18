@@ -11,6 +11,9 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { useWorkspaceSize } from "@/workbench-panel";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, isSupportedWorkflowNode, wireKey } from "@/workflow-graph-model";
+import { WorkflowNodeBadge, workflowNodeTypeLabel } from "@/workflow-node-type";
+import { nativeWorkflowNodeAppearance, reusableWorkflowNodeAppearance, useWorkflowNodeArtifacts, workflowNodeUsesAI, workflowNodeVersionKey,
+  type WorkflowNodeAppearance } from "@/workflow-node-type-model";
 import { RecordedInputs, WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowStageDecisionForm } from "@/workflow-stage-decisions";
@@ -22,14 +25,14 @@ import {
   type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
 
-type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
+type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState; appearance: WorkflowNodeAppearance }, "execution">;
 type ExecutionTarget = { kind: "node" | "edge"; id: string };
 type ExecutionLocation = { path: string; selected: string; unit?: string; focus?: string; scrollTop?: number };
 
 function ExecutionNodeCard({ data, selected }: NodeProps<ExecutionNode>) {
   const node = data.pinned;
   return <WorkflowGraphNodeCard title={node.definition.title} inputs={node.definition.inputs} outputs={node.definition.outputs}
-    selected={selected} readOnly headerContent={<WorkflowExecutionStateBadge status={data.status} />} />;
+    appearance={data.appearance} selected={selected} readOnly headerContent={<WorkflowExecutionStateBadge status={data.status} />} />;
 }
 
 const executionNodeTypes = { execution: ExecutionNodeCard };
@@ -166,14 +169,23 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
       return { node, detail, pending };
     });
   const staged = new Map(concreteStages.map((entry) => [entry.node.instance.id, entry]));
+  const artifacts = useWorkflowNodeArtifacts(run.projectId, graph.nodes.flatMap(({ instance }) => {
+    const group = graph.subflows.get(instance.id);
+    return group && instance.kind !== "loop" ? [group.version] : [];
+  }));
   const stages = graph.nodes.map((node) => {
     const group = graph.subflows.get(node.instance.id);
-    if (!group) return { ...staged.get(node.instance.id)!, group: undefined };
+    if (!group) return { ...staged.get(node.instance.id)!, group: undefined,
+      appearance: nativeWorkflowNodeAppearance(node.instance.kind, node.definition) };
     const descendants = group.nodes.flatMap((id) => {
       const stage = staged.get(id);
-      return stage ? [stage.detail] : [];
+      return stage ? [stage] : [];
     });
-    return { node, detail: subflowPresentation(snapshot, group, descendants, unit), group, pending: undefined };
+    const usesAI = descendants.some(({ node: pinned }) => workflowNodeUsesAI(pinned.instance.kind, pinned.definition));
+    const appearance: WorkflowNodeAppearance = node.instance.kind === "loop" ? { type: "loop", usesAI }
+      : reusableWorkflowNodeAppearance(artifacts.get(workflowNodeVersionKey(group.version))?.body, usesAI);
+    return { node, detail: subflowPresentation(snapshot, group, descendants.map(({ detail }) => detail), unit),
+      group, pending: undefined, appearance };
   });
   const positions = useMemo(() => initialNodePositions({
     nodes: graph.nodes.map(({ instance }) => instance),
@@ -188,9 +200,10 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     ?? waitingStages.find(({ detail }) => !detail.missing)
     ?? waitingStages[0];
   const failed = scopedStages.find(({ detail }) => detail.status === "failed" || detail.status === "interrupted");
-  const nodes: ExecutionNode[] = stages.map(({ node, detail }) => ({
+  const nodes: ExecutionNode[] = stages.map(({ node, detail, appearance }) => ({
     id: node.instance.id, position: snapshot.layout?.[node.instance.id] ?? positions[node.instance.id]!, type: "execution", selected: node.instance.id === selected,
-    ariaLabel: `${node.definition.title} · ${workflowExecutionStateLabel[detail.status]}`, data: { pinned: node, status: detail.status },
+    ariaLabel: `${node.definition.title} · ${workflowExecutionStateLabel[detail.status]} · ${workflowNodeTypeLabel(appearance)}`,
+    data: { pinned: node, status: detail.status, appearance },
   }));
   const edges: Edge[] = graph.wires.map((wire) => {
     const output = graph.nodes.find(({ instance }) => instance.id === wire.from.node)?.definition.outputs.find(({ name }) => name === wire.from.port);
@@ -332,6 +345,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
         fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} /></div>}
       inspector={<>
         <PipelineInspectorHeader detail="Execution details" title={active?.node.definition.title ?? "No stage selected"}>
+          {active && <WorkflowNodeBadge appearance={active.appearance} />}
           <label className="workflow-execution-field">Inspect execution node
             <select value={selected} onChange={(event) => setSelected(event.currentTarget.value)}>
               {stages.map(({ node, detail }) => <option key={node.instance.id} value={node.instance.id}>{node.definition.title} · {workflowExecutionStateLabel[detail.status]}</option>)}

@@ -13,6 +13,8 @@ import { WorkflowSchemaEditor } from "@/workflow-schema-editor";
 import { objectSchema, type JsonSchema, type SchemaField } from "@/workflow-schema-model";
 import type { InputField } from "@/workflow-decision-editor";
 import { builderNodeKinds, WorkflowNodePicker, type WorkflowCatalogItem } from "@/workflow-node-picker";
+import { publishedWorkflowNodeVersions, resolveWorkflowNodeTypes, useWorkflowNodeArtifacts, workflowNodeVersionKey,
+  type WorkflowNodeSource } from "@/workflow-node-type-model";
 import { TypedPromptInspector, WorkflowReferenceField, type PromptSlot, type RoleSnapshot } from "@/workflow-typed-prompt";
 import { promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename,
   type PromptRoleChoice } from "@/workflow-prompt-model";
@@ -432,6 +434,21 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     const loaded = queries[index]?.data;
     return loaded ? [[id, loaded] as const] : [];
   }));
+  const draftNodeSources = new Map<string, WorkflowNodeSource>();
+  for (const member of graphs) {
+    draftNodeSources.set(member.key, {
+      body: { kind: member.kind ?? "pipeline", graph: member.graph }, references: member.references,
+      definitions: previewMembers.find(({ key }) => key === member.key)?.graphDefinitions,
+    });
+  }
+  for (const member of promptMembers) draftNodeSources.set(member.key, member);
+  const nodeArtifacts = useWorkflowNodeArtifacts(projectId, publishedWorkflowNodeVersions(graph, references, draftNodeSources), true);
+  const publishedNodeSources = new Map<string, WorkflowNodeSource>(nodeArtifacts);
+  for (const { artifact, graphDefinitions } of reusable.values()) {
+    const key = workflowNodeVersionKey(artifact.version);
+    if (!publishedNodeSources.has(key)) publishedNodeSources.set(key, { ...artifact, definitions: graphDefinitions });
+  }
+  const nodeTypes = resolveWorkflowNodeTypes(publishedNodeSources, draftNodeSources, catalog);
   const bindings = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<WorkflowCatalogItem[]>("workflow_package_catalog", { projectId }),
@@ -553,6 +570,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
       typed ? { input: typed.input, output: typed.output } : undefined);
   }
   propagateSchemas(graph, definitions);
+  const nodeAppearances = new Map(graph.nodes.map((node) => [node.id, nodeTypes.node(node, definitions[node.id], references[node.id])]));
   const rolesByNode = Object.fromEntries([...promptsByNode.entries()].map(([id, member]) => {
     const role = references[id + ":role"] ?? member.references?.role;
     return [id, choices.find(({ reference }) => promptReferenceValue(reference) === promptReferenceValue(role))?.name
@@ -639,7 +657,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
         const member = promptMembers.find((prompt) => prompt.key === key);
         return member?.body.prompt.schemaContract && !member.body.prompt.nodePrefab ? { ...binding, reference: newPrompt(member) } : binding;
       } : undefined}
-      promptRoles={rolesByNode}
+      nodeAppearances={nodeAppearances} promptRoles={rolesByNode}
       inspectPrompt={(id) => {
         const member = promptsByNode.get(id);
         if (!member) return null;

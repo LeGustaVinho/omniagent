@@ -69,11 +69,19 @@ it("refreshes a conversation run between job completion and the End result", () 
   expect(needsExecutionRefresh({ ...snapshot, conversationTurnActive: false })).toBe(false);
 });
 
-it("shows a Function as one live graph node with its published result and internal graph", async () => {
+it.each([
+  { body: { kind: "subflow" }, label: "Function · AI" },
+  { body: { kind: "prompt", prompt: { nodePrefab: true } }, label: "Prefab · AI" },
+  { body: null, label: "Reusable node · AI" },
+])("shows a pinned $label with its published result and internal graph", async ({ body, label }) => {
   const start = node("start", "Start", [], [control("start")]);
   const inner = node("summarize::execute", "AI Node Agent", [control("ready")],
     [control("completed"), port("result", "json_object")]);
+  inner.instance.kind = inner.definition.kind = "agent";
+  inner.definition.executor = "write_agent";
+  inner.definition.effect = "write_repository";
   const end = node("end", "End", [control("ready"), port("result", "json_object")]);
+  const reusableVersion = { id: "summary", revision: "published-summary", kind: "subflow", destination: "project" } as const;
   const snapshot: WorkflowExecutionSnapshot = {
     run: { id: runId, projectId, version, planRevision: null },
     definition: {
@@ -84,7 +92,7 @@ it("shows a Function as one live graph node with its published result and intern
       ],
       subflows: [{
         path: "summarize", name: "Summarize request",
-        version: { id: "summary", revision: "published-summary", kind: "subflow", destination: "project" },
+        version: reusableVersion,
         nodes: [inner.instance.id],
         inputs: { begin: [{ node: inner.instance.id, port: "ready" }] },
         outputs: {
@@ -102,20 +110,24 @@ it("shows a Function as one live graph node with its published result and intern
     { from: { node: "summarize", port: "completed" }, to: { node: "end", port: "ready" } },
     { from: { node: "summarize", port: "reply" }, to: { node: "end", port: "result" } },
   ]);
-  vi.mocked(invoke).mockImplementation(async (command) => {
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
     if (command === "list_repository_deliveries") return [snapshot.run];
     if (command === "inspect_workflow_execution") return snapshot;
+    if (command === "read_published_workflow_package_artifact") {
+      expect(input).toEqual({ projectId, version: reusableVersion });
+      return body ? { version: reusableVersion, body, references: {} } : null;
+    }
     throw new Error(command);
   });
   render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={testCheckout}
     target={`run:${runId}`} openWorkspace={vi.fn()}
     openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Summarize request · Completed" }));
-  expect(screen.queryByRole("button", { name: "AI Node Agent · Completed" })).toBeNull();
+  await user.click(await screen.findByRole("button", { name: `Summarize request · Completed · ${label}` }));
+  expect(screen.queryByRole("button", { name: "AI Node Agent · Completed · AI" })).toBeNull();
   expect(within(screen.getByRole("region", { name: "Result on reply" })).getByText(/A structured summary/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Open internal graph" }));
-  expect(screen.getByRole("button", { name: "AI Node Agent · Completed" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "AI Node Agent · Completed · AI" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Voltar" }));
   expect(screen.getByRole("combobox", { name: "Inspect execution node" })).toHaveProperty("value", "summarize");
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open internal graph" })));
@@ -175,7 +187,7 @@ it.each([true, false])("opens the waiting Loop iteration with a root End: %s", a
   render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={testCheckout}
     target={`run:${runId}`} openWorkspace={vi.fn()}
     openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
-  expect(await screen.findByRole("button", { name: "Loop Pause · Waiting" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Loop Pause · Waiting · No AI" })).toBeTruthy();
 
   await userEvent.setup().click(screen.getByRole("button", { name: "View waiting stage" }));
   const scope = screen.getByRole<HTMLSelectElement>("combobox", { name: "Pinned subflow" });
@@ -463,25 +475,25 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(screen.getByText("trigger-item")).toBeTruthy();
   expect(screen.getByText(/Revision 4 · Checked/)).toBeTruthy();
   const graph = within(screen.getByLabelText("Workflow execution graph"));
-  expect(graph.getByRole("button", { name: "Pinned source · Completed" })).toBeTruthy();
-  expect(graph.getByRole("button", { name: "Queued command · Queued" })).toBeTruthy();
-  expect(graph.getByRole("button", { name: "Active command · Running" })).toBeTruthy();
-  expect(graph.getByRole("button", { name: "User question · Waiting" })).toBeTruthy();
+  expect(graph.getByRole("button", { name: /^Pinned source · Completed · / })).toBeTruthy();
+  expect(graph.getByRole("button", { name: /^Queued command · Queued · / })).toBeTruthy();
+  expect(graph.getByRole("button", { name: /^Active command · Running · / })).toBeTruthy();
+  expect(graph.getByRole("button", { name: /^User question · Waiting · / })).toBeTruthy();
   const inspector = within(screen.getByRole("complementary", { name: "Execution node evidence" }));
-  await user.click(graph.getByRole("button", { name: "Review pinned plan · Waiting" }));
+  await user.click(graph.getByRole("button", { name: /^Review pinned plan · Waiting · / }));
   const role = within(inspector.getByRole("region", { name: "Pinned role template" }));
   expect(role.getByText(/Historical reviewer/)).toBeTruthy();
   expect(role.getByText("saved-role-revision")).toBeTruthy();
   expect(inspector.getByText("plan needs planner.plan")).toBeTruthy();
   await user.click(inspector.getByText(/Earlier control decision · skipped/));
   expect(inspector.getByText("Earlier revision outcome")).toBeTruthy();
-  fireEvent.contextMenu(graph.getByRole("button", { name: "Historical plan · Failed" }));
+  fireEvent.contextMenu(graph.getByRole("button", { name: /^Historical plan · Failed · / }));
   const attemptActions = await screen.findByRole("menuitem", { name: "Inspect attempt" });
   attemptActions.focus();
   await user.keyboard("{ArrowRight}");
   await user.click(await screen.findByRole("menuitem", { name: "Attempt 2 · attempt-retry" }));
   expect(props.openActivity).toHaveBeenCalledWith("attempt-retry", "retry-conversation");
-  await user.click(graph.getByRole("button", { name: "Historical plan · Failed" }));
+  await user.click(graph.getByRole("button", { name: /^Historical plan · Failed · / }));
   expect(await inspector.findByText(/Permitted recovery · Retry saved input/)).toBeTruthy();
   await waitFor(() => expect(inspector.getAllByText("The structured result failed validation.")).toHaveLength(2));
   await user.click(inspector.getByText("Job inputs"));
@@ -491,20 +503,20 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(props.openActivity).toHaveBeenCalledWith("attempt-first", "original-conversation");
   await user.click(inspector.getByRole("button", { name: "Open queue job" }));
   expect(props.openQueueJob).toHaveBeenCalledWith("job-planner");
-  await user.click(graph.getByRole("button", { name: "Saved plan approval · Completed" }));
+  await user.click(graph.getByRole("button", { name: /^Saved plan approval · Completed · / }));
   expect(screen.getByText("This run uses retired nodes. Its recorded evidence is available here.")).toBeTruthy();
   expect(inspector.getByText("rule-reviewed")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open Agile work" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("tasks", "linked-task");
-  await user.click(graph.getByRole("button", { name: "Verified Git · Completed" }));
+  await user.click(graph.getByRole("button", { name: /^Verified Git · Completed · / }));
   expect(await inspector.findByText("fixed-sha")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open saved diff" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("git", "attempt:frozen-git-attempt");
-  await user.click(graph.getByRole("button", { name: "Saved command · Completed" }));
+  await user.click(graph.getByRole("button", { name: /^Saved command · Completed · / }));
   expect(inspector.getByText("command-receipt")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open command output and logs" }));
   expect(props.openActivity).toHaveBeenCalledWith("command-saved");
-  await user.click(graph.getByRole("button", { name: "Invalid command · Failed" }));
+  await user.click(graph.getByRole("button", { name: /^Invalid command · Failed · / }));
   expect(await inspector.findByText("No recovery action is currently available.")).toBeTruthy();
   expect(await inspector.findByText("The structured result failed validation.")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open command logs" }));
@@ -512,15 +524,15 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(inspector.getByText("Selected ports · failed")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open triggering attempt" }));
   expect(props.openActivity).toHaveBeenLastCalledWith("command-invalid", undefined);
-  await user.click(graph.getByRole("button", { name: "Remediation · Waiting" }));
+  await user.click(graph.getByRole("button", { name: /^Remediation · Waiting · / }));
   expect(inspector.queryByLabelText("Waiting for dependencies")).toBeNull();
-  await user.click(graph.getByRole("button", { name: "Success branch · Skipped" }));
+  await user.click(graph.getByRole("button", { name: /^Success branch · Skipped · / }));
   expect(inspector.getByText("No execution reaches this stage through the selected branches")).toBeTruthy();
   expect(inspector.getByText("ready · command-failed.completed · Skipped input")).toBeTruthy();
   await user.selectOptions(screen.getByRole("combobox", { name: "Pinned subflow" }), "quality");
   const internal = within(screen.getByRole("region", { name: "Workflow execution graph" }));
-  expect(internal.queryByRole("button", { name: "Pinned source · Completed" })).toBeNull();
-  expect(internal.getByRole("button", { name: "Saved command · Completed" })).toBeTruthy();
+  expect(internal.queryByRole("button", { name: /^Pinned source · Completed · / })).toBeNull();
+  expect(internal.getByRole("button", { name: /^Saved command · Completed · / })).toBeTruthy();
   await user.click(screen.getByText("Pinned subflow outputs"));
   expect(screen.getByText("quality-revision")).toBeTruthy();
   await user.click(within(screen.getByRole("complementary", { name: "Execution node evidence" }))
@@ -581,6 +593,6 @@ it("shows a pending decision only for the pinned node in the current plan and se
   expect(evidence.queryByRole("button", { name: "Approve" })).toBeNull();
   await user.selectOptions(screen.getByRole("combobox", { name: "Logical unit" }), screen.getByRole("option", { name: new RegExp(logical.unit.purpose) }));
   await user.click(evidence.getByRole("button", { name: "Approve" }));
-  expect(await screen.findByRole("button", { name: "Release decision · Completed" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /^Release decision · Completed · / })).toBeTruthy();
   expect(evidence.queryByRole("button", { name: "Approve" })).toBeNull();
 });

@@ -88,13 +88,21 @@
 .workflow-node-card[data-compact] > header { border-bottom: 0; }
 .workflow-node-card[data-compact] > .react-flow__handle { background: var(--primary); border-color: var(--card); }
 .workflow-node-card[data-selected] { outline: 2px solid var(--primary); }
-.workflow-node-card[data-problem] { border-color: var(--destructive); }
-.workflow-node-card header { display: grid; padding: .6rem .7rem; border-bottom: 1px solid var(--border); gap: .15rem; }
-.workflow-node-card header strong { overflow-wrap: anywhere; }
-.workflow-graph[data-full-height] .workflow-node-card > header {
-  border-radius: .52rem .52rem 0 0; background: color-mix(in srgb, var(--primary) 7%, var(--card));
+.workflow-node-card[data-problem] { border-color: var(--danger); }
+.workflow-node-card > header {
+  display: grid;
+  gap: .15rem;
+  padding: .6rem .7rem;
+  border-bottom: 1px solid var(--border);
+  border-radius: .52rem .52rem 0 0;
+  background: color-mix(in srgb, var(--workflow-node-accent) 10%, var(--card));
+  box-shadow: inset 3px 0 var(--workflow-node-accent);
 }
-.workflow-graph[data-full-height] .workflow-node-card > header strong { font-size: .84rem; }
+.workflow-node-card > header strong { font-size: .84rem; overflow-wrap: anywhere; }
+.workflow-node-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: .2rem .45rem; min-width: 0; }
+.workflow-node-metadata > small { flex: 1; min-width: 2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-node-metadata > code { flex: 1; min-width: 2rem; }
+.workflow-node-metadata > .workflow-execution-state { margin-inline-start: auto; }
 .workflow-node-card header small, .workflow-port-column small { color: var(--muted-foreground); }
 .workflow-node-ports { display: grid; grid-template-columns: 1fr 1fr; }
 .workflow-port-column { display: grid; align-content: start; }

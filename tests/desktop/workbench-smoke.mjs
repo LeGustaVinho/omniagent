@@ -1858,7 +1858,7 @@ test("authors, reviews and runs a pipeline of Prompt cards on Windows", { timeou
     const checkout = await invoke(browser, "register_project", { directory: repo });
     await selectCheckout(browser, checkout);
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
-    await verifyVisualPromptBuilder({ browser, checkout, invoke, capture });
+    await verifyVisualPromptBuilder({ browser, checkout, invoke, capture, emulateDisplay });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

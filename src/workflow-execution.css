@@ -28,7 +28,7 @@
 .workflow-execution-field { display: grid; gap: .25rem; font-weight: 500; }
 .workflow-execution-field select { width: 100%; min-width: 0; padding: .35rem .5rem; border: 1px solid var(--border); border-radius: .4rem; background: var(--background); }
 .workflow-execution-state { width: max-content; padding: .12rem .4rem; border-radius: .35rem; font-size: .75rem; background: var(--muted); color: var(--muted-foreground); }
-.workflow-execution-state[data-status="failed"], .workflow-execution-state[data-status="interrupted"] { color: var(--destructive); }
+.workflow-execution-state[data-status="failed"], .workflow-execution-state[data-status="interrupted"] { color: var(--danger); }
 .workflow-execution-state[data-status="waiting"] { color: var(--warning); }
 .workflow-execution-state[data-status="running"] { color: var(--primary); }
 .workflow-execution-state[data-status="completed"] { color: var(--success); }

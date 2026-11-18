@@ -157,7 +157,7 @@ async function setWindow(browser, invoke, width, height) {
   { timeout, timeoutMsg: `Window did not reach ${width}×${height}` });
 }
 
-async function fitGraph(browser, surface) {
+async function fitGraph(browser, surface, ids = [start, wait, end]) {
   await browser.execute((selector) => document.querySelector(selector)?.scrollIntoView({ block: "center", inline: "nearest" }), surface);
   await click(browser.$(`${surface} .react-flow__controls-fitview`));
   let cards;
@@ -176,11 +176,11 @@ async function fitGraph(browser, surface) {
           return { id, visible: header.contains(hit), x, y, graphTop: graphRect.top, graphHeight: graphRect.height,
             topElement: hit?.className?.toString() };
         });
-      }, surface, [start, wait, end]);
+      }, surface, ids);
       return cards.every(({ visible }) => visible);
     }, { timeout });
   } catch (error) {
-    throw new Error(`Fit view did not reveal all three cards in ${surface}: ${JSON.stringify(cards)}`, { cause: error });
+    throw new Error(`Fit view did not reveal the expected cards in ${surface}: ${JSON.stringify(cards)}`, { cause: error });
   }
 }
 
@@ -752,7 +752,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   return browser;
 }
 
-export async function verifyVisualPromptBuilder({ browser, checkout, invoke, capture }) {
+export async function verifyVisualPromptBuilder({ browser, checkout, invoke, capture, emulateDisplay }) {
   const { projectId, checkoutId } = checkout;
   const title = "Typed AI pipeline " + randomUUID().slice(0, 8);
   const models = (await invoke(browser, "conversation_models", { provider: "codex" }))
@@ -991,9 +991,11 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
     await click(dialog.$("button=Cancel"));
   }
   await browser.keys("Escape");
-  await verifyArtifactEditors(browser, invoke, capture, {
+  const pureFunction = await verifyArtifactEditors(browser, invoke, capture, {
     projectId, checkoutId, title, prefabName, pipeline, role: packageDocument.members.find(({ key }) => key === "fixture-role").body.template,
   });
+  await verifyVisualNodeTypes({ browser, invoke, capture, emulateDisplay, projectId, checkoutId,
+    pureFunction, prefabVersion, publication });
 }
 
 async function verifyArtifactEditors(browser, invoke, capture, { projectId, checkoutId, title, prefabName, pipeline, role }) {
@@ -1120,4 +1122,138 @@ async function verifyArtifactEditors(browser, invoke, capture, { projectId, chec
   await review("library-authoring-request");
   await click(legacyEditor.$("button=Voltar"));
   await requests.$("button=Open draft").waitForDisplayed({ timeout });
+  return published.publication.members[0].artifact.version;
+}
+
+async function verifyVisualNodeTypes({ browser, invoke, capture, emulateDisplay, projectId, checkoutId, pureFunction, prefabVersion, publication }) {
+  const title = "Workflow with mixed node types";
+  const relay = "relay", review = "review", prefab = "prefab", agent = "agent";
+  const subflow = (id) => ({ id, kind: "subflow", configuration: { kind: "none" } });
+  const pinned = (version) => ({ source: "published", version });
+  const savedArtifact = (key) => pinned(publication.members.find((member) => member.key === key).artifact.version);
+  const enter = { id: start, kind: "start", configuration: { kind: "subflow_entry", outputs: [
+    { name: "ready", value: { kind: "control" } }, { name: "inputs", value: { kind: "data", artifact: "json_object" } },
+  ] } };
+  const finish = (id) => ({ id, kind: "end", configuration: { kind: "end" } });
+  const packageDocument = { name: title, members: [
+    { key: "pipeline", name: title, references: {
+      "start:schema": savedArtifact("request"), "end:schema": savedArtifact("reply"), [relay]: pinned(pureFunction),
+      [review]: { source: "draft", key: "review-function" }, [prefab]: pinned(prefabVersion), [agent]: savedArtifact("second-agent"),
+    }, body: { kind: "pipeline", graph: { name: title, nodes: [
+      { id: start, kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+      { id: wait, kind: "wait", configuration: { kind: "wait", until: { kind: "delay", seconds: 1 } } },
+      subflow(relay), subflow(review), subflow(prefab), subflow(agent), finish(end),
+    ], wires: [
+      makeWire(start, "start", wait, "ready"), makeWire(start, "inputs", wait, "input"),
+      makeWire(wait, "completed", relay, "ready"), makeWire(wait, "result", relay, "input"),
+      makeWire(relay, "completed", review, "ready"), makeWire(start, "inputs", review, "input"),
+      makeWire(review, "completed", prefab, "ready"), makeWire(start, "inputs", prefab, "input"),
+      makeWire(prefab, "completed", agent, "ready"), makeWire(prefab, "result", agent, "input"),
+      makeWire(agent, "completed", end, "ready"), makeWire(agent, "result", end, "result"),
+    ] } } },
+    { key: "review-function", name: "Review inputs", references: {
+      "start:schema": savedArtifact("request"), "return:schema": savedArtifact("summary"), evaluate: savedArtifact("first-agent"),
+    }, body: {
+      kind: "subflow", graph: { name: "Review inputs", nodes: [enter, subflow("evaluate"), finish("return")], wires: [
+        makeWire(start, "ready", "evaluate", "ready"), makeWire(start, "inputs", "evaluate", "input"),
+        makeWire("evaluate", "completed", "return", "ready"), makeWire("evaluate", "result", "return", "result"),
+      ] },
+      inputs: { ready: { node: start, port: "ready" }, input: { node: start, port: "inputs" } },
+      outputs: { completed: { node: "return", port: "completed" }, result: { node: "return", port: "result" } },
+    } },
+  ] };
+  const { id, revision } = await invoke(browser, "create_workflow_package", { projectId, conversationId: null, package: packageDocument });
+  const layout = { [start]: { x: 0, y: 0 }, [wait]: { x: 300, y: 0 }, [relay]: { x: 600, y: 0 }, [review]: { x: 900, y: 0 },
+    [prefab]: { x: 900, y: 350 }, [agent]: { x: 600, y: 350 }, [end]: { x: 300, y: 350 } };
+  const saved = await invoke(browser, "save_workflow_package", { projectId, draftId: id, expectedRevision: revision, package: packageDocument,
+    canvasByMember: { pipeline: { layout, updateDefinitions: {} } },
+  });
+
+  const expected = [[wait, "no-ai", false], [relay, "function", false], [review, "function", true], [prefab, "prefab", true], [agent, "ai", false]];
+  const colors = {
+    dark: { "no-ai": "#b6c3d6", function: "#5eead4", prefab: "#93c5fd", ai: "#c4a0ff" },
+    light: { "no-ai": "#475569", function: "#0f766e", prefab: "#1d4ed8", ai: "#6d28d9" },
+  };
+  const assertGraph = async (surface, theme, hasStatus) => {
+    await browser.waitUntil(async () => await browser.execute((selector, expected, accents, hasStatus) =>
+      expected.every(([id, type, hasAIBadge]) => {
+        const card = document.querySelector(`${selector} .react-flow__node[data-id="${id}"] .workflow-node-card`);
+        if (!card || card.dataset.nodeType !== type || Boolean(card.querySelector(".workflow-node-ai-badge")) !== hasAIBadge) return false;
+        const status = card.querySelector(".workflow-execution-state");
+        const ports = card.querySelector(".workflow-node-ports");
+        return card.querySelector(".workflow-node-type-label svg") && Boolean(status) === hasStatus &&
+          (!accents || getComputedStyle(card).getPropertyValue("--workflow-node-accent").trim() === accents[type]) &&
+          (!ports || ports.getBoundingClientRect().top >= card.querySelector("header").getBoundingClientRect().bottom - 1);
+      }), surface, expected, colors[theme] ?? null, hasStatus), { timeout, timeoutMsg: `Node types or layout do not match in ${surface} (${theme})` });
+  };
+  const verifySurface = async (name, surface, hasStatus = false) => {
+    try {
+      for (const theme of ["dark", "light", "high-contrast"]) {
+        if (theme === "high-contrast") {
+          await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+          assert.equal(await browser.execute(() => matchMedia("(forced-colors: active)").matches), true);
+        } else {
+          await setTheme(browser, invoke, theme);
+        }
+        for (const [width, height] of [[1440, 900], [640, 440]]) {
+          await setWindow(browser, invoke, width, height);
+          await assertGraph(surface, theme, hasStatus);
+          await fitGraph(browser, surface, expected.map(([id]) => id));
+          await capture?.(browser, `node-types-${name}-${theme}-${width}x${height}`);
+        }
+        if (theme === "high-contrast") {
+          const legendTrigger = `${surface} button[aria-label="Node types"]`;
+          await pressEnter(browser, legendTrigger);
+          const legend = browser.$('[role="dialog"][aria-label="Node types"]');
+          for (const label of ["AI", "No AI", "Function", "Prefab"]) await textIsVisible(browser, legend, label);
+          await capture?.(browser, `node-types-${name}-legend`);
+          await browser.keys("Escape");
+          await legend.waitForDisplayed({ timeout, reverse: true });
+          await browser.waitUntil(() => browser.execute((selector) => document.activeElement?.matches(selector), legendTrigger), { timeout });
+        }
+      }
+    } finally {
+      await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [] });
+    }
+    await setWindow(browser, invoke, 1440, 900);
+  };
+
+  await setWindow(browser, invoke, 1440, 900);
+  await openBuilder(browser);
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open draft']`));
+  const editor = browser.$(builder);
+  const inspector = editor.$('[aria-label="Node configuration"]');
+  await select(inspector, "Inspect node", review);
+  await textIsVisible(browser, inspector.$('[data-node-type="function"]'), "AI");
+  await click(editor.$("button=Add node"));
+  const picker = browser.$('.workflow-builder-dialog[role="dialog"]');
+  assert.equal(await picker.$("button=Wait").getAttribute("data-node-type"), "no-ai");
+  const prefabChoice = picker.$(".//button[starts-with(normalize-space(.), 'Reusable desktop evaluator')]");
+  await textIsVisible(browser, prefabChoice.$('[data-node-type="prefab"]'), "AI");
+  await capture?.(browser, "node-types-picker");
+  await browser.keys("Escape");
+  await verifySurface("builder", canvas);
+
+  const published = await invoke(browser, "publish_reviewed_workflow_package", { projectId, draftId: id, reviewedRevision: saved.revision });
+  assert.equal(published.status, "published");
+  const { id: workflowId, revision: workflowRevision } = published.publication.members.find(({ key }) => key === "pipeline").artifact.version;
+  const launched = await invoke(browser, "launch_workflow_manual", { request: {
+    projectId, checkoutId, workflow: { id: workflowId, revision: workflowRevision }, requestId: randomUUID(),
+    documentRevisionId: null, workId: null, inputs: {},
+  } });
+  await click(browser.$('[aria-label="Pipelines views"]').$("button=Runs"));
+  const runs = browser.$('[aria-label="Workflow runs"]');
+  await runs.$(`select option[value="${launched.id}"]`).waitForExist({ timeout });
+  await select(runs, "Saved workflow run", launched.id);
+  const execution = browser.$('[aria-label="Pinned workflow execution"]');
+  await execution.waitForDisplayed({ timeout });
+  const evidence = execution.$('[aria-label="Execution node evidence"]');
+  await select(evidence, "Inspect execution node", prefab);
+  await textIsVisible(browser, evidence.$('[data-node-type="prefab"]'), "AI");
+  await verifySurface("runs", '[aria-label="Workflow execution graph"]', true);
+
+  await click(browser.$('[aria-label="Pipelines views"]').$("button=Library"));
+  await click(browser.$('[aria-label="Library views"]').$("button=Pipeline"));
+  await click(browser.$(`[aria-label="Workflow library"] button[aria-label=${JSON.stringify("View " + title)}]`));
+  await verifySurface("library", '[aria-label="Artifact preview"] ' + canvas);
 }

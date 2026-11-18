@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { Handle, MarkerType, MiniMap, Position, useUpdateNodeInternals,
   type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance, type Viewport, type XYPosition } from "@xyflow/react";
-import { ChevronRight, CircleAlert, Focus, GitBranch, MessageSquareText, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
+import { ChevronRight, CircleAlert, Focus, GitBranch, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
@@ -12,6 +12,8 @@ import { StartInputFields } from "@/workflow-node-fields";
 import { AgentRoleFields } from "@/workflow-stage-model";
 import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import type { ReusableReference } from "@/workflow-reusable";
+import { WorkflowNodeBadge, workflowNodeTypeLabel } from "@/workflow-node-type";
+import { nativeWorkflowNodeAppearance, type WorkflowNodeAppearance } from "@/workflow-node-type-model";
 import {
   changedPorts, configurationProblem, configuredBranches, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, isPresetEligible, isStartNode, isSupportedWorkflowNode, outputPort, portType, readableGraphViewport, wireKey,
@@ -82,25 +84,37 @@ type PortActions = {
   activeOutput?: WorkflowEndpoint;
   activate: (side: PortSide, name: string) => void;
 };
-type CanvasNode = Node<{ definition?: WorkflowDefinition; promptRole?: string; problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions }, "workflow">;
+type CanvasNode = Node<{
+  definition?: WorkflowDefinition; appearance: WorkflowNodeAppearance; promptRole?: string;
+  problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions;
+}, "workflow">;
 
 function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   const update = useUpdateNodeInternals();
-  const definition = data.definition;
-  useEffect(() => { update(id); }, [definition, id, update]);
-  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable or retired node"} detail={data.promptRole ?? id} prompt={data.promptRole !== undefined}
+  const { definition, appearance } = data;
+  useEffect(() => { update(id); }, [definition, appearance.type, appearance.usesAI, id, update]);
+  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable or retired node"} detail={data.promptRole ?? id}
+    appearance={appearance} prompt={data.promptRole !== undefined}
     selected={selected || data.inspected}
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
 
-export function WorkflowGraphNodeCard({ title, detail, inputs = [], outputs = [], selected, problem, readOnly, headerContent, portActions, compact, handles, prompt }: {
-  title: string; detail?: string; inputs?: WorkflowPort[]; outputs?: WorkflowPort[]; selected?: boolean;
+export function WorkflowGraphNodeCard({ title, appearance, detail, inputs = [], outputs = [], selected, problem, readOnly, headerContent, portActions, compact, handles, prompt }: {
+  title: string; appearance: WorkflowNodeAppearance; detail?: string; inputs?: WorkflowPort[]; outputs?: WorkflowPort[]; selected?: boolean;
   problem?: boolean; readOnly?: boolean; headerContent?: ReactNode; portActions?: PortActions;
   compact?: boolean; handles?: ReactNode; prompt?: boolean;
 }) {
-  return <article className="workflow-node-card" data-compact={compact || undefined} data-selected={selected || undefined} data-problem={problem || undefined} data-prompt={prompt || undefined}>
+  return <article className="workflow-node-card" data-node-type={appearance.type} data-compact={compact || undefined}
+    data-selected={selected || undefined} data-problem={problem || undefined} data-prompt={prompt || undefined}>
     {handles}
-    <header><strong>{prompt && <MessageSquareText size={14} aria-hidden />}{title}</strong>{detail && <small>{detail}</small>}{headerContent}</header>
+    <header>
+      <strong>{title}</strong>
+      <div className="workflow-node-metadata">
+        <WorkflowNodeBadge appearance={appearance} />
+        {detail && <small title={detail}>{detail}</small>}
+        {headerContent}
+      </div>
+    </header>
     {(inputs.length > 0 || outputs.length > 0) && <div className="workflow-node-ports">
       <WorkflowPortColumn ports={inputs} side="input" readOnly={readOnly} actions={portActions} />
       <WorkflowPortColumn ports={outputs} side="output" readOnly={readOnly} actions={portActions} />
@@ -183,7 +197,7 @@ export type WorkflowGraphView = { selected?: string; viewport?: Viewport; viewpo
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, view, readOnly,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
   onDerive, deriveDisabled, fullHeight = false, toolbarStart,
-  promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
+  nodeAppearances, promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -203,6 +217,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   fullHeight?: boolean;
   toolbarStart?: ReactNode;
   view?: WorkflowGraphView;
+  nodeAppearances?: ReadonlyMap<string, WorkflowNodeAppearance>;
   promptRoles?: Record<string, string>;
   nameLabel?: string;
   inspectPrompt?: (id: string) => ReactNode;
@@ -235,6 +250,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [previewPositions, setPreviewPositions] = useState<WorkflowLayout>({});
   const node = graph.nodes.find(({ id }) => id === selected);
   const definition = node && definitions[node.id];
+  const activeAppearance = node && (nodeAppearances?.get(node.id) ?? nativeWorkflowNodeAppearance(node.kind, definition));
   const isPrompt = node && !!promptRoles && Object.hasOwn(promptRoles, node.id);
   const dataSuggestions = !disabled && suggestDataFor && graph.wires.some((wire) => wireKey(wire) === wireKey(suggestDataFor))
     ? suggestedDataWires(graph, definitions, suggestDataFor) : [];
@@ -657,8 +673,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
 
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
+    const appearance = nodeAppearances?.get(item.id) ?? nativeWorkflowNodeAppearance(item.kind, defined);
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
-      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, promptRole: promptRoles?.[item.id], readOnly: disabled, inspected: item.id === selected,
+      ariaLabel: `${defined?.title ?? "Node"} ${item.id} · ${workflowNodeTypeLabel(appearance)}`,
+      data: { definition: defined, appearance, promptRole: promptRoles?.[item.id], readOnly: disabled, inspected: item.id === selected,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined)),
         portActions: { nodeId: item.id, activeOutput: pending?.side === "output" ? pending.endpoint : undefined,
           activate: (side, name) => activatePort(item.id, side, name) },
@@ -779,7 +797,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         <header className="workflow-inspector-heading">
           <span className="workflow-inspector-icon"><SlidersHorizontal size={17} aria-hidden /></span>
           <div><h2>{definition?.title ?? "Select a node"}</h2>
-            {node && <code title={node.id}>{node.id}</code>}
+            {node && activeAppearance && <div className="workflow-node-metadata">
+              <WorkflowNodeBadge appearance={activeAppearance} />
+              <code title={node.id}>{node.id}</code>
+            </div>}
           </div>
         </header>
         <div className="workflow-inspector-jump">

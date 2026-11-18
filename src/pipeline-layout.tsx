@@ -6,6 +6,7 @@ import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { ResizablePanel } from "@/panel-resize";
 import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
+import { WorkflowNodeLegend } from "@/workflow-node-type";
 import "@xyflow/react/dist/style.css";
 import "./pipelines-workspace.css";
 import "./pipeline-maintenance.css";
@@ -136,7 +137,9 @@ export function PipelineGraphCanvas<N extends Node, E extends Edge>({ interactiv
 
   return <ReactFlow<N, E> {...props} nodes={measuredNodes} onNodesChange={changeNodes}>
     <Background gap={18} size={1} />
-    <Controls position="bottom-left" orientation={compactControls ? "horizontal" : "vertical"} showInteractive={interactive} />
+    <Controls position="bottom-left" orientation={compactControls ? "horizontal" : "vertical"} showInteractive={interactive}>
+      <WorkflowNodeLegend />
+    </Controls>
     {canvasTools}
   </ReactFlow>;
 }

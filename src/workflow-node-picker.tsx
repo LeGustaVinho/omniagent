@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
-import { Bot, CirclePause, GitFork, GitMerge, Layers3, Plus, Repeat2, Square, UserRoundCheck, Waypoints } from "lucide-react";
+import { Bot, CirclePause, GitFork, GitMerge, Plus, Repeat2, Square, UserRoundCheck } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { reusableNodeQuery, type ReusableDescription, type ReusableVersion } from "@/workflow-reusable";
+import { WorkflowNodeBadge } from "@/workflow-node-type";
+import { resolveWorkflowNodeTypes, useWorkflowNodeArtifacts, workflowNodeVersionKey } from "@/workflow-node-type-model";
 import { invoke } from "@tauri-apps/api/core";
 
 const nodeTypes = [
@@ -34,6 +36,8 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, 
   });
   const reusable = (catalog.data ?? []).filter(({ version, nodePrefab, prompt }) =>
     version.kind === "subflow" && (nodePrefab || !prompt));
+  const artifacts = useWorkflowNodeArtifacts(projectId, open ? reusable.map(({ version }) => version) : [], true);
+  const nodeTypesForArtifacts = resolveWorkflowNodeTypes(artifacts);
   return <WorkflowBuilderDialog title="Add node" description="Choose a node or reuse a published configuration."
     open={open} onOpenChange={(next) => { if (next || !load.isPending) onOpenChange(next); }}
     onCloseAutoFocus={onCloseAutoFocus} trigger={<Button type="button" variant="outline" disabled={disabled}>
@@ -41,7 +45,8 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, 
     </Button>}>
     <div className="workflow-node-picker-list">
       {(terminal ? [...nodeTypes, { kind: "end", label: terminal, icon: Square }] : nodeTypes)
-        .map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" disabled={load.isPending} onClick={() => {
+        .map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" disabled={load.isPending}
+          data-node-type={kind === "subflow" ? "ai" : kind === "loop" ? "loop" : "no-ai"} onClick={() => {
         onAdd(kind);
         onOpenChange(false);
       }}><Icon size={16} aria-hidden /> {label}</Button>)}
@@ -49,12 +54,16 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, 
     {catalog.isLoading && <p role="status">Loading reusable nodes…</p>}
     {reusable.length > 0 && <fieldset className="pipeline-stack">
       <legend>Reusable nodes</legend>
-      {reusable.map(({ name, version, nodePrefab, blockers }) => <Button key={JSON.stringify(version)} type="button"
-        variant="outline" className="justify-start" disabled={load.isPending || !!blockers.length}
-        title={blockers.join(" ") || undefined} onClick={() => load.mutate(version)}>
-        {nodePrefab ? <Layers3 size={16} aria-hidden /> : <Waypoints size={16} aria-hidden />}
-        {name}<span className="text-muted-foreground">{nodePrefab ? "Node Prefab" : "Function"}</span>
-      </Button>)}
+      {reusable.map(({ name, version, nodePrefab, blockers }) => {
+        const key = workflowNodeVersionKey(version);
+        const artifact = artifacts.get(key);
+        const appearance = artifact ? nodeTypesForArtifacts.artifact(artifact)
+          : nodePrefab ? { type: "prefab", usesAI: true } as const : { type: "function" } as const;
+        return <Button key={key} type="button" variant="outline" className="workflow-reusable-node-choice"
+          disabled={load.isPending || !!blockers.length} title={blockers.join(" ") || undefined} onClick={() => load.mutate(version)}>
+          <span>{name}</span><WorkflowNodeBadge appearance={appearance} />
+        </Button>;
+      })}
     </fieldset>}
     {(catalog.error ?? load.error) && <p role="alert">{String(catalog.error ?? load.error)}</p>}
     {canvasActions}
