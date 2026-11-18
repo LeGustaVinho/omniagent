@@ -16,7 +16,7 @@ use crate::{
         queue_conversation_continuation,
     },
     protection,
-    providers::{SessionMode, composer_customizations::contains_skill_token},
+    providers::composer_customizations::contains_skill_token,
     store::Store,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -854,10 +854,6 @@ fn validate_scope(scope: &SessionScope, root: &Path) -> Result<()> {
     ensure!(
         scope.checkout == root,
         "The selected profile is outside the conversation checkout"
-    );
-    ensure!(
-        matches!(scope.mode, SessionMode::ReadOnly | SessionMode::Plan),
-        "Conversation continuation requires a read-only or planning profile"
     );
     ensure!(
         scope.executable.is_absolute() && !scope.runner.is_empty(),

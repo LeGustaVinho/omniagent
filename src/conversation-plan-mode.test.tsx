@@ -95,3 +95,62 @@ it("submits Plan Mode from the conversation and answers an identified planning f
     ...scope, requestId: 42, answer: { action: "accept", values: { format: "md", note: "Use the saved brief" } },
   });
 });
+
+it("sends Approved write and carries the selected mode through a continuation review", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  const conversationId = "direct-chat";
+  const selection = { provider: "codex", profileId: "writer", modelId: "coding-model" };
+  const text = "Implement the reviewed change";
+  const contextId = "saved-history";
+  const job = { kind: "agent", id: "write-job", queueState: "queued", mode: "approved_write" };
+  const blockers = [{ type: "approval", approvalId: "write-approval" }];
+  let queued = false;
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    switch (command) {
+      case "conversation_draft": return text;
+      case "conversation_history": return { contextId, messages: [] };
+      case "conversation_models": return [{ option: { name: "Coding model", selection, selectable: true }, efforts: [] }];
+      case "latest_conversation_job": return queued ? { job, blockers, recoveryActions: [] } : null;
+      case "latest_conversation_run": return null;
+      case "pending_conversation_instructions": return queued ? [{
+        id: job.id, revisionId: "queued-message", text, checkoutId: "managed-worktree", contextId,
+        provider: selection.provider, model: selection.modelId, mode: job.mode, attachments: [], delivery: "queued",
+        editable: true, runId: null, recordedContext: false, blockers,
+      }] : [];
+      case "conversation_side_requests":
+      case "saved_conversation_questions": return [];
+      case "composer_suggestion_mode": return "off";
+      case "save_conversation_draft": return;
+      case "submit_conversation_continuation": return {
+        status: "review_required", previewId: "reviewed-write", contextId, reason: "profile_changed",
+        settings: { projectDefault: "same_tab", conversationOverride: null, effective: "same_tab" }, seed: [],
+      };
+      case "confirm_conversation_continuation":
+        queued = true;
+        return { conversation: { id: conversationId, checkoutId: "managed-worktree" }, job };
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+
+  const props = {
+    params: { conversationId, title: "Direct conversation" },
+    api: { isVisible: true, renderer: "always", onDidVisibilityChange: () => ({ dispose() {} }) },
+  } as unknown as ComponentProps<typeof ConversationPanel>;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><ConversationPanel {...props} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Coding model" }));
+  const modes = screen.getByRole<HTMLSelectElement>("combobox", { name: "Conversation mode" });
+  expect(modes.value).toBe("read_only");
+  await user.selectOptions(modes, within(modes).getByRole("option", { name: "Approved write" }));
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  const scope = { conversationId, selection, effort: null, mode: "approved_write", text };
+  expect(invoke).toHaveBeenCalledWith("submit_conversation_continuation", { ...scope, expectedContextId: contextId });
+
+  const review = within(await screen.findByRole("dialog", { name: "Choose how to continue" }));
+  await user.click(review.getByRole("button", { name: "Continue and send" }));
+  expect(invoke).toHaveBeenCalledWith("confirm_conversation_continuation", {
+    ...scope, previewId: "reviewed-write", choice: "same_tab",
+  });
+  expect(await screen.findByText("Waiting for approval write-approval.")).toBeTruthy();
+});

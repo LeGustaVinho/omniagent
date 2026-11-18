@@ -283,10 +283,6 @@ pub async fn start_conversation_turn(
     expected_context_id: Option<String>,
 ) -> Result<Job, String> {
     async {
-        ensure!(
-            matches!(mode, SessionMode::ReadOnly | SessionMode::Plan),
-            "Direct conversation turns require a read-only or planning profile"
-        );
         let conversation = store.conversation(conversation_id.clone()).await?;
         conversation.require_direct_turn()?;
         let scope =

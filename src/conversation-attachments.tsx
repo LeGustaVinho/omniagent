@@ -6,6 +6,8 @@ import { Paperclip, X } from "lucide-react";
 import { ContextActions } from "@/components/ui/context-actions";
 import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { SessionMode } from "@/bindings/SessionMode";
+import type { ConversationMode } from "@/conversation-mode";
 import { useAttachmentActions } from "@/conversation-attachment-actions";
 import { SafeAttachmentMedia } from "@/repository-note-media";
 
@@ -44,7 +46,7 @@ type Review = {
   estimatedContextInputTokens: number | null;
 };
 type ReviewInput = {
-  conversationId: string; expectedRevision: string; selection: ModelSelection; effort: string | null; mode: "read_only" | "plan"; text: string;
+  conversationId: string; expectedRevision: string; selection: ModelSelection; effort: string | null; mode: SessionMode; text: string;
   targetCheckoutId?: string;
 };
 
@@ -128,7 +130,7 @@ export function useConversationAttachments(conversationId: string, enabled: bool
 
 export function useConversationAttachmentReview({ conversationId, revision, contextId, selection, effort, text, mode, enabled, targetCheckoutId }: {
   conversationId: string; revision: string | null; contextId?: string; selection: ModelSelection | null;
-  effort: string | null; text: string; mode: "read_only" | "plan" | "goal"; enabled: boolean; targetCheckoutId?: string;
+  effort: string | null; text: string; mode: ConversationMode; enabled: boolean; targetCheckoutId?: string;
 }) {
   const key = enabled && revision && contextId && selection && mode !== "goal"
     ? JSON.stringify([revision, contextId, selection.provider, selection.profileId, selection.modelId, effort, mode, text, targetCheckoutId]) : null;

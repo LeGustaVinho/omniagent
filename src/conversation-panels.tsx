@@ -14,6 +14,7 @@ import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { RunRecord } from "@/bindings/RunRecord";
+import type { SessionMode } from "@/bindings/SessionMode";
 import { ModelPicker } from "@/components/model-picker";
 import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect } from "@/components/effort-select";
@@ -254,7 +255,7 @@ type ReviewedContinuation = {
   review: ConversationContinuationReview;
   selection: ModelSelection;
   effort: string | null;
-  mode: "read_only" | "plan";
+  mode: SessionMode;
   text: string;
   pipelineRestriction?: string;
 };
@@ -571,11 +572,12 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
     mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
   });
+  const sideMode = mode === "plan" ? "plan" : "read_only";
   const askSide = useMutation({
     mutationFn: (submitted: string) => invoke<SideSubmission>("enqueue_conversation_side_request", {
       conversationId, expectedContextId: history.data?.contextId, selection,
       effort: efforts?.efforts.includes(effort) ? effort : null,
-      mode: mode === "goal" ? "read_only" : mode,
+      mode: sideMode,
       purpose: "question", question: sideQuestionCommand(submitted) ?? "",
     }),
     onSuccess: (outcome, submitted) => {
@@ -586,7 +588,6 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
     },
   });
   const sideEffort = efforts?.efforts.includes(effort) ? effort : null;
-  const sideMode = mode === "goal" ? "read_only" : mode;
   const validateSide = useMutation({
     mutationFn: () => invoke<SideSubmission>("enqueue_conversation_side_request", {
       conversationId, expectedContextId: history.data?.contextId, selection,
@@ -1157,7 +1158,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
                     else setInspectedRun(run.id);
                   } : undefined} />}
                 selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
-              {pipelineIsDirect ? <ConversationModeSelect mode={mode} onChange={setMode} />
+              {pipelineIsDirect ? <ConversationModeSelect mode={mode} onChange={setMode} allowWrite />
                 : <Button type="button" variant="ghost" disabled={pipelineTurns.request.isPending || !pipelineTurns.schema.data}
                   onClick={() => openPipelineSetup("edit")}>Pipeline inputs</Button>}
               {compactionEnabled && <ConversationCompactionControl compaction={compaction} contextId={history.data?.contextId}

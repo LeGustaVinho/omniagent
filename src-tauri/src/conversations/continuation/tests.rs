@@ -12,8 +12,143 @@ use crate::{
         AdmissionBlocker, AdmissionEnvironment, GoalControlState, GoalDefinition, GoalStopAction,
         JobContext,
     },
-    providers::SessionIntent,
+    providers::{SessionIntent, SessionMode},
 };
+
+#[tokio::test]
+async fn approved_write_continuation_forks_into_its_managed_worktree_and_waits_for_approval()
+-> Result<()> {
+    let (_source_dir, store, source, scope) = setup().await?;
+    let worktree_dir = tempfile::tempdir()?;
+    std::fs::write(&scope.executable, b"fixture")?;
+    let text = "Implement the reviewed change";
+    let mut writer_scope = SessionScope {
+        mode: SessionMode::ApprovedWrite,
+        ..scope.clone()
+    };
+
+    store
+        .save_conversation_draft(source.id.clone(), text.into())
+        .await?;
+    let denied = store
+        .submit_conversation_continuation(
+            source.id.clone(),
+            source.context_id,
+            writer_scope.clone(),
+            text.into(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        denied
+            .to_string()
+            .contains("requires a managed task worktree")
+    );
+    assert_eq!(store.conversation_draft(source.id.clone()).await?, text);
+    assert!(store.claim_next_job(environment(&scope)).await?.is_none());
+
+    let git = std::process::Command::new("git.exe")
+        .current_dir(&scope.checkout)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--no-gpg-sign",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Base",
+        ])
+        .status()?;
+    ensure!(git.success(), "could not create the fixture base commit");
+    let project = crate::repository::register(&store, scope.checkout.clone())
+        .await?
+        .project_id;
+    let task = store
+        .create_project_task(project.clone(), "Reviewed change".into())
+        .await?;
+    let worktree = crate::repository::provision_task_worktree(
+        &store,
+        worktree_dir.path().to_owned(),
+        project.clone(),
+        task.id.clone(),
+        source.checkout_id.clone(),
+    )
+    .await?;
+    writer_scope.checkout = worktree.root;
+
+    confirm(
+        &store,
+        &prepare(&store, &source.id, scope, "Inspect the change").await?,
+    )
+    .await?;
+    let current = store.conversation(source.id.clone()).await?;
+    let ContinuationInspection::ReviewRequired {
+        preview_id,
+        reason: ContinuationReason::CheckoutChanged,
+        ..
+    } = store
+        .submit_conversation_with_files_at_checkout(
+            current.id.clone(),
+            current.context_id,
+            writer_scope.clone(),
+            text.into(),
+            Vec::new(),
+            None,
+            Some(worktree.checkout_id.clone()),
+        )
+        .await?
+    else {
+        bail!("expected a reviewed checkout change");
+    };
+    let continued = store
+        .confirm_conversation_continuation(
+            current.id.clone(),
+            preview_id,
+            ContinuationChoice::ForkWithContext,
+            writer_scope.clone(),
+            text.into(),
+        )
+        .await?;
+    assert_ne!(continued.conversation.id, current.id);
+    assert_eq!(
+        store.conversation(current.id).await?.checkout_id,
+        source.checkout_id
+    );
+    assert_eq!(continued.conversation.checkout_id, worktree.checkout_id);
+    let job = continued.job;
+    assert_eq!(job.mode, SessionMode::ApprovedWrite);
+    assert_eq!(job.checkout_id, worktree.checkout_id);
+    assert_eq!(job.task_id.as_deref(), Some(task.id.as_str()));
+    let environment = environment(&writer_scope);
+    let inspection = store
+        .inspect_job(project.clone(), job.id, environment.clone())
+        .await?
+        .context("queued writer is unavailable")?;
+    let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
+        bail!("expected a write approval, got {:?}", inspection.blockers);
+    };
+    assert!(store.claim_next_job(environment.clone()).await?.is_none());
+    store
+        .decide_job_approval(project, approval_id.clone(), true)
+        .await?;
+    let attempt = store
+        .claim_next_job(environment)
+        .await?
+        .context("approved writer was not admitted")?;
+    assert_eq!(attempt.conversation_id, continued.conversation.id);
+    assert_eq!(attempt.run.checkout_id, worktree.checkout_id);
+    assert!(attempt.scope == writer_scope);
+    assert!(
+        attempt
+            .input
+            .iter()
+            .any(|message| message.text == "Inspect the change")
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn fresh_pipeline_continuation_transfers_the_exact_draft_and_reference_without_dispatch()

@@ -182,9 +182,22 @@ fn queue_conversation_instruction(
     text: &str,
     attachments: Option<&instructions::FrozenAttachments>,
 ) -> Result<Job> {
+    let task_id = if scope.mode == SessionMode::ApprovedWrite {
+        Some(
+            db.query_row(
+                "SELECT task_id FROM managed_task_worktrees WHERE project_id = ?1 AND checkout_id = ?2",
+                params![project, checkout_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("Approved write requires a managed task worktree. Choose one under Continuation → Checkout for next send.")?,
+        )
+    } else {
+        None
+    };
     let mut request = JobRequest {
         checkout_id: Some(checkout_id.into()),
-        task_id: None,
+        task_id,
         mode: scope.mode,
         instructions: text.into(),
         dependencies: Vec::new(),
@@ -280,10 +293,6 @@ impl Store {
         text: String,
         previews: Vec<AttachmentPreview>,
     ) -> Result<Job> {
-        ensure!(
-            matches!(scope.mode, SessionMode::ReadOnly | SessionMode::Plan),
-            "conversation turns require a read-only or planning profile"
-        );
         ensure!(
             scope.executable.is_absolute() && !scope.runner.is_empty(),
             "invalid CLI profile"

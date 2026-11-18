@@ -158,6 +158,12 @@ export function ConversationPreviousRevisions({ conversationId, openConversation
 }
 
 type InstructionPreview = { sources: { path: string; selection: string }[]; unresolved: string[] };
+const promptModeLabels: Record<ConversationMode, string> = {
+  read_only: "Assistant · Read-only",
+  plan: "Planning assistant · Plan Mode",
+  approved_write: "Assistant · Approved write",
+  goal: "Goal Mode",
+};
 
 function NextPromptScope({ conversationId, mode, selection, effort }: Pick<HistoryProps, "conversationId" | "mode" | "selection" | "effort">) {
   const inspection = useHistoryInspection(conversationId);
@@ -169,7 +175,7 @@ function NextPromptScope({ conversationId, mode, selection, effort }: Pick<Histo
   return <section aria-label="Next prompt scope" className="grid gap-2">
     <h3 className="font-medium">Next prompt scope</h3>
     <dl className="grid gap-1">
-      <div><dt className="inline font-medium">Role and mode </dt><dd className="inline">{mode === "goal" ? "Goal Mode" : mode === "plan" ? "Planning assistant · Plan Mode" : "Assistant · Read-only"}</dd></div>
+      <div><dt className="inline font-medium">Role and mode </dt><dd className="inline">{promptModeLabels[mode]}</dd></div>
       {selection && <div><dt className="inline font-medium">Selected model </dt><dd className="inline">{selection.modelId}</dd></div>}
     </dl>
     <div><h4 className="font-medium">Instruction files</h4>

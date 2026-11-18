@@ -9,6 +9,7 @@ import type { ConversationPipelineOption } from "@/bindings/ConversationPipeline
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { SessionMode } from "@/bindings/SessionMode";
 import { GoalCheckpointSummary, GoalExecutionScope, type GoalTransitionReview, type GoalTransitionScope } from "@/conversation-goal";
 import { ConversationPipelineOptions, conversationPipelineKey, directConversationChoice } from "@/conversation-pipeline-picker";
 
@@ -18,7 +19,7 @@ type ContinuationScope = {
   conversationId: string;
   selection: ModelSelection;
   effort: string | null;
-  mode: "read_only" | "plan";
+  mode: SessionMode;
 };
 
 export type ConversationContinuationReview = {
