@@ -182,6 +182,14 @@ impl WorkflowDefinition {
     }
 
     fn normalize_legacy_prompt_nodes(&mut self) {
+        if !self.nodes.iter().any(|node| {
+            matches!(
+                node.instance.kind,
+                BuiltinNode::Archived(ArchivedNode::Join | ArchivedNode::Condition)
+            )
+        }) {
+            return;
+        }
         let generated_joins = self
             .subflows
             .iter()

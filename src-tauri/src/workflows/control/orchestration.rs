@@ -87,6 +87,7 @@ impl Evaluation<'_> {
         let mut changed = false;
         for scope in &self.forks {
             if self.unit_nodes.contains(scope.fork) != unit.is_some()
+                || !self.receipt(scope.fork, unit).is_some_and(|receipt| receipt.state == ControlStageState::Completed)
                 || self.branch_cancelled(scope.fork, unit)?
             {
                 continue;
@@ -138,10 +139,12 @@ impl Evaluation<'_> {
         if let Some(join) = scope.join {
             let port = flow::branch_port(branch);
             let completion = self
-                .definition
-                .wires
-                .iter()
-                .find(|wire| wire.to.node == join && wire.to.port == port)
+                .incoming
+                .get(join)
+                .into_iter()
+                .flatten()
+                .copied()
+                .find(|wire| wire.to.port == port)
                 .context("A Fork branch lost its Join completion path")?;
             let outcome = self.observe_branch_completion(
                 completion,
@@ -151,10 +154,12 @@ impl Evaluation<'_> {
             if outcome == BranchState::Completed {
                 let result_port = flow::result_port(branch);
                 if let Some(wire) = self
-                    .definition
-                    .wires
-                    .iter()
-                    .find(|wire| wire.to.node == join && wire.to.port == result_port)
+                    .incoming
+                    .get(join)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .find(|wire| wire.to.port == result_port)
                 {
                     match self.dependency(wire, unit)? {
                         Arrival::Selected(Some(_)) => {}
@@ -216,28 +221,20 @@ impl Evaluation<'_> {
 
     pub(super) fn branch_gate(&self, node: &str, unit: Option<&str>) -> Result<Arrival> {
         let mut waiting = false;
-        for scope in &self.forks {
-            let scope_unit = self
-                .unit_nodes
-                .contains(scope.fork)
-                .then_some(unit)
-                .flatten();
-            for (branch, nodes) in &scope.branches {
-                if !nodes.contains(node) {
-                    continue;
+        for &(fork, branch) in self.memberships.get(node).into_iter().flatten() {
+            let scope_unit = self.unit_nodes.contains(fork).then_some(unit).flatten();
+            let Some(receipt) = self.receipt(fork, scope_unit) else {
+                waiting = true;
+                continue;
+            };
+            match flow::branch_state(self.db, self.run, fork, scope_unit, branch)? {
+                Some((BranchState::Cancelled, _)) => return Ok(Arrival::Ignored),
+                Some((BranchState::Queued, _)) => waiting = true,
+                None if receipt.state == ControlStageState::Skipped => {
+                    return Ok(Arrival::Ignored);
                 }
-                match flow::branch_state(self.db, self.run, scope.fork, scope_unit, branch)? {
-                    Some((BranchState::Cancelled, _)) => return Ok(Arrival::Ignored),
-                    Some((BranchState::Queued, _)) => waiting = true,
-                    None if self
-                        .receipt(scope.fork, scope_unit)
-                        .is_some_and(|value| value.state == ControlStageState::Skipped) =>
-                    {
-                        return Ok(Arrival::Ignored);
-                    }
-                    None => waiting = true,
-                    _ => {}
-                }
+                None => waiting = true,
+                _ => {}
             }
         }
         Ok(if waiting {
@@ -248,19 +245,13 @@ impl Evaluation<'_> {
     }
 
     pub(super) fn branch_cancelled(&self, node: &str, unit: Option<&str>) -> Result<bool> {
-        for scope in &self.forks {
-            let scope_unit = self
-                .unit_nodes
-                .contains(scope.fork)
-                .then_some(unit)
-                .flatten();
-            for (branch, nodes) in &scope.branches {
-                if nodes.contains(node)
-                    && flow::branch_state(self.db, self.run, scope.fork, scope_unit, branch)?
-                        .is_some_and(|(state, _)| state == BranchState::Cancelled)
-                {
-                    return Ok(true);
-                }
+        for &(fork, branch) in self.memberships.get(node).into_iter().flatten() {
+            let scope_unit = self.unit_nodes.contains(fork).then_some(unit).flatten();
+            if self.receipt(fork, scope_unit).is_some()
+                && flow::branch_state(self.db, self.run, fork, scope_unit, branch)?
+                    .is_some_and(|(state, _)| state == BranchState::Cancelled)
+            {
+                return Ok(true);
             }
         }
         Ok(false)

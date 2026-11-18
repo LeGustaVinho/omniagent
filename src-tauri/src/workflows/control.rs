@@ -523,8 +523,10 @@ struct Evaluation<'a> {
     run: &'a WorkflowRun,
     unit_nodes: HashSet<&'a str>,
     nodes: HashMap<&'a str, &'a PinnedNode>,
+    incoming: HashMap<&'a str, Vec<&'a Wire>>,
     receipts: HashMap<(String, Option<String>), ControlStageReceipt>,
     forks: Vec<super::orchestration::ForkScope<'a>>,
+    memberships: HashMap<&'a str, Vec<(&'a str, &'a str)>>,
 }
 
 impl<'a> Evaluation<'a> {
@@ -538,13 +540,28 @@ impl<'a> Evaluation<'a> {
             .filter(|receipt| receipt.plan_revision == run.plan_revision)
             .map(|receipt| ((receipt.node_id.clone(), receipt.unit_id.clone()), receipt))
             .collect();
+        let mut incoming = HashMap::<&str, Vec<&Wire>>::new();
+        for wire in &definition.wires {
+            incoming.entry(&wire.to.node).or_default().push(wire);
+        }
+        let forks = super::orchestration::fork_scopes(&definition.nodes, &definition.wires)?;
+        let mut memberships = HashMap::<&str, Vec<(&str, &str)>>::new();
+        for scope in &forks {
+            for (&branch, nodes) in &scope.branches {
+                for &node in nodes {
+                    memberships.entry(node).or_default().push((scope.fork, branch));
+                }
+            }
+        }
         Ok(Self {
             db,
             definition,
             run,
             unit_nodes: unit_nodes(definition),
+            incoming,
             receipts,
-            forks: super::orchestration::fork_scopes(&definition.nodes, &definition.wires)?,
+            forks,
+            memberships,
             nodes: definition
                 .nodes
                 .iter()
@@ -632,12 +649,7 @@ impl<'a> Evaluation<'a> {
         }
         let (mut ready, mut plan, mut task) = (false, None, None);
         let mut waiting = None;
-        for wire in self
-            .definition
-            .wires
-            .iter()
-            .filter(|wire| wire.to.node == node.instance.id)
-        {
+        for &wire in self.incoming.get(node.instance.id.as_str()).into_iter().flatten() {
             let artifact = match self.dependency(wire, None)? {
                 Arrival::Ignored => {
                     return Ok(ApprovalSelection::Skipped {
@@ -712,12 +724,8 @@ impl<'a> Evaluation<'a> {
             }
             Arrival::Selected(_) => {}
         }
-        let dependencies = self
-            .definition
-            .wires
-            .iter()
-            .filter(|wire| wire.to.node == node_id)
-            .map(|wire| Ok((wire, self.dependency(wire, unit)?)))
+        let dependencies = self.incoming.get(node_id).into_iter().flatten()
+            .map(|&wire| Ok((wire, self.dependency(wire, unit)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         if matches!(
             node.instance.configuration,
@@ -1106,7 +1114,7 @@ impl<'a> Evaluation<'a> {
         unit: Option<&str>,
         control: bool,
     ) -> Result<Option<WorkflowArtifact>> {
-        let mut statement = self.db.prepare(
+        let mut statement = self.db.prepare_cached(
             "SELECT a.payload, h.execution_key, EXISTS (
                  SELECT 1 FROM workflow_completion_inputs i WHERE i.output_artifact_id = a.id
                    AND i.execution_key = ?5) AS exact_receipt, EXISTS (

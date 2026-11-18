@@ -422,8 +422,10 @@ pub(super) fn fork_scopes<'a>(
         }
     }
     let mut outgoing: HashMap<&str, Vec<&Wire>> = HashMap::new();
+    let mut incoming: HashMap<&str, Vec<&Wire>> = HashMap::new();
     for wire in wires {
         outgoing.entry(&wire.from.node).or_default().push(wire);
+        incoming.entry(&wire.to.node).or_default().push(wire);
     }
     let mut scopes = Vec::new();
     for node in nodes {
@@ -486,11 +488,13 @@ pub(super) fn fork_scopes<'a>(
                 "Branches of Fork {fork} can only meet at its paired Join"
             );
             if let Some(join_id) = stop {
-                let count = wires
+                let incoming = incoming.get(join_id).map(Vec::as_slice).unwrap_or_default();
+                let completion = branch_port(branch);
+                let result = result_port(branch);
+                let count = incoming
                     .iter()
                     .filter(|wire| {
-                        wire.to.node == join_id
-                            && wire.to.port == branch_port(branch)
+                        wire.to.port == completion
                             && branch_nodes.contains(wire.from.node.as_str())
                     })
                     .count();
@@ -498,10 +502,7 @@ pub(super) fn fork_scopes<'a>(
                     count == 1,
                     "Connect the completion of Fork branch {branch} to its paired Join port"
                 );
-                for wire in wires
-                    .iter()
-                    .filter(|wire| wire.to.node == join_id && wire.to.port == result_port(branch))
-                {
+                for wire in incoming.iter().filter(|wire| wire.to.port == result) {
                     ensure!(
                         branch_nodes.contains(wire.from.node.as_str()),
                         "Connect the result from the corresponding Fork branch {branch}"
@@ -583,9 +584,10 @@ pub(super) fn branch_state(
     unit: Option<&str>,
     branch: &str,
 ) -> Result<Option<(BranchState, Option<i64>)>> {
-    let row = db.query_row(
+    let row = db.prepare_cached(
         "SELECT state, settled_order FROM workflow_fork_branches
          WHERE pipeline_run_id = ?1 AND fork_id = ?2 AND plan_key = ?3 AND unit_key = ?4 AND branch = ?5",
+    )?.query_row(
         params![run.id, fork, run.plan_revision.as_deref().unwrap_or(""), unit.unwrap_or(""), branch],
         |row| Ok((row.get::<_, String>(0)?, row.get(1)?)),
     ).optional()?;

@@ -50,10 +50,9 @@ export const developmentSchemas = {
   ],
   "Execution Report": [
     ...text("task_key", "base_sha", "status"),
-    ...["tree", "head_sha", "integration_sha", "pr_url", "diagnostic"].map((name) => field(name, string, false)),
+    ...["tree", "worktree_path", "head_sha", "integration_sha", "pr_url", "diagnostic"].map((name) => field(name, string, false)),
     field("checks", list(check)),
   ],
-  "Gate Result": [field("approved", boolean), field("subject"), ...strings("evidence", "diagnostics")],
   "Delivery Round": [
     field("tasks", list(object([
       ...text("key", "status"), field("attempt", integer),
@@ -100,8 +99,8 @@ export const developmentPrompts = {
   consistency: "Cross-check the artifacts for contradictions, missing dependencies, and broken traceability. Identify the artifacts and review findings affected by each proposed correction.",
   backlog: "Create atomic work items with distinct keys, priorities, prerequisites, and observable acceptance criteria. Link each task to the exact requirements and scenarios it implements.",
   dispatch: "Select the highest-priority ready tasks, breaking ties by task key. A prerequisite is satisfied only by a recorded merge. Preserve work already pending checks, task identity, and attempt count, and allocate independent work to separate slots.",
-  red: "Use the authorized worktree and inspect its base. Run the baseline, add focused tests, and reproduce each expected assertion failure before changing production code. Record the test IDs, changed test paths, commands, and failure reasons. Report a blocker for infrastructure failures or unexpected results.",
-  implement: "Implement the assigned task in the authorized worktree and address the supplied failure evidence. Refactor and run focused checks. Report the exact Git tree for independent validation.",
+  red: "Use the authorized worktree. Fetch the configured destination and verify that the candidate starts from its current revision. Preserve existing task changes when updating the base and revalidate Red after a base change. Run the baseline, add focused tests, and reproduce each expected assertion failure before changing production code. Record the absolute worktree path, base SHA, test IDs, changed test paths, commands, and failure reasons. Report a blocker for infrastructure failures or unexpected results.",
+  implement: "Implement the assigned task in the authorized worktree and address the supplied failure evidence. Refactor and run focused checks. Report its absolute worktree_path, base_sha, and exact Git tree for independent validation.",
   verify: "Run the assigned checks on an isolated copy of the exact candidate tree. Record observed exit codes, test IDs, and evidence locations. Report missing, failed, or inapplicable checks with their reasons.",
   buildAndPull: "Build the verified candidate before creating its scoped atomic commit. Include the task key and requirement IDs in the commit. Confirm the resulting tree. Find or update the existing pull request by its task branch and head, and record the actual head and pull request URL. Return retry on a failed build before publishing the candidate.",
   ci: "Read each required check for the exact pull request head. Record the pull request, head, base, and pending, failed, or passed status. Treat an unknown risk classification as high risk.",

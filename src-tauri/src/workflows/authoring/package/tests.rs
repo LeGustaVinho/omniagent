@@ -15,6 +15,8 @@ use crate::{
 use super::super::tests::finish_background_authoring_job;
 use super::*;
 
+mod development_pipeline;
+
 fn graph() -> WorkflowGraph {
     WorkflowGraph {
         name: "Review pipeline".into(),
@@ -182,50 +184,10 @@ async fn opens_an_archived_function_for_repair_without_publishing_retired_nodes(
 }
 
 #[tokio::test]
-async fn bundled_development_pipeline_publishes_through_the_native_compiler() -> Result<()> {
-    use std::process::Command;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().context("Find the workspace")?;
-    let encoded = Command::new("node")
-        .current_dir(root)
-        .args(["--input-type=module", "-e", r#"
-            import { registerHooks } from "node:module";
-            registerHooks({ resolve(specifier, context, nextResolve) {
-              const target = specifier.startsWith("@/")
-                ? new URL("./src/" + specifier.slice(2) + ".ts", import.meta.url).href
-                : specifier;
-              return nextResolve(target, context);
-            } });
-            const { developmentPipelinePackage } = await import("./src/development-pipeline.ts");
-            process.stdout.write(JSON.stringify(developmentPipelinePackage({
-              provider: "codex", profileId: "fixture", modelId: "reviewer",
-            })));
-        "#])
-        .output()?;
-    ensure!(encoded.status.success(), "Serialize the built-in template: {}", String::from_utf8_lossy(&encoded.stderr));
-    let package: WorkflowPackage = serde_json::from_slice(&encoded.stdout)?;
-    let directory = tempfile::tempdir()?;
-    let store = Store::open(directory.path().join("development-template.sqlite"))?;
-    let repo = approved_delivery_repository(&store, directory.path()).await?;
-    let project = repo.project_id;
-    let draft = store.create_workflow_package(project.clone(), None, package).await?;
-    let published = commit(&store, &project, &draft).await?;
-    let version = &artifact(&published, "pipeline").version;
-    let selected = crate::workflows::WorkflowRevision { id: version.id.clone(), revision: version.revision.clone() };
-    store.execute(move |db| {
-        let definition = crate::workflows::load_definition(db, &project, &selected)?
-            .context("The bundled pipeline was not persisted")?;
-        assert!(definition.unsupported_node().is_none());
-        assert!(definition.nodes.iter().any(crate::workflows::write_scope::writer));
-        assert!(definition.nodes.len() <= 4096);
-        Ok(())
-    }).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn human_approval_releases_a_typed_agent_into_its_managed_worktree() -> Result<()> {
     use crate::{
         jobs::{AdmissionEnvironment, JobPermission, JobRule, JobWorkspace},
+        repository::{capture_worktree_start, save_worktree_candidate},
         workflows::{
             ArtifactValue, WorkflowLaunchRequest, decision_nodes::WorkflowDecisionSubmission,
             generic_agent::tests::complete_response,
@@ -323,8 +285,10 @@ async fn human_approval_releases_a_typed_agent_into_its_managed_worktree() -> Re
     }).await?.context("The write job was not admitted")?;
     assert_eq!(attempt.scope.checkout, worktree);
     assert!(attempt.input[0].text.contains("Implement TASK-1."));
+    assert!(capture_worktree_start(&store, attempt.run.id.clone()).await?);
     fs::write(worktree.join("first.txt"), "approved candidate\n")?;
     assert_eq!(fs::read_to_string(Path::new(&repo.checkout_root).join("first.txt"))?, "original first\n");
+    save_worktree_candidate(&store, attempt.run.id.clone()).await?;
     complete_response(&store, &attempt, r#"{"reply":"changed first.txt"}"#, None).await?;
     let settled = store.inspect_workflow_execution(project.clone(), run.id.clone()).await?
         .context("The workflow execution disappeared")?;

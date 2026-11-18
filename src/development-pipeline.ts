@@ -195,12 +195,13 @@ export function developmentPipelinePackage(model: ModelSelection): { name: strin
   }
 
   function taskSlot(graph: Graph, entry: Flow): Flow {
+    const reviewCandidate = (dimension: string) => `${developmentReview("the frozen candidate", dimension)} Use the supplied absolute worktree_path with git -C. Compare the supplied tree against base_sha and report missing or mismatched evidence as blocking.`;
     return optional(graph, "Candidate Attempt", entry, progress, "candidate", (current, context) => {
         const tests = agent(current, "Baseline and Red", "implementation",
           `${prompts.red} For documentation-only tasks record applicable document checks. On retries reuse the prior Red only after verifying the same base and test tree. Include task instructions and test IDs in context. Set approved only when Red is verified.`,
           context, candidateGate);
         const red = agent(current, "Red Evidence Gate", "review",
-          "Confirm that the recorded baseline passed and each new test failed on the expected assertion. Treat compilation, setup, and missing results as blockers. Check the approved test paths and record the exact test tree. Preserve task scope and evidence and set approved only for a valid Red or documented documentation checks.",
+          "Confirm that the recorded baseline passed and each new test failed on the expected assertion. Inspect the supplied absolute worktree_path with git -C and verify the approved test paths and exact test tree. Treat compilation, setup, and missing results as blockers. Preserve worktree_path, task scope, and evidence and set approved only for a valid Red or documented documentation checks.",
           tests, candidateGate);
         const result = parallel(current, "red-gate", red, {
           red: (input) => delay(current, "red-evidence", input, 0),
@@ -208,11 +209,11 @@ export function developmentPipelinePackage(model: ModelSelection): { name: strin
             const candidate = agent(implementation, "Implement or Fix", "implementation",
               `${prompts.implement} For documentation explicitly apply these instructions. ${prompts.documentation} Run Green, stage the intended task files, and record the tree from git write-tree and command results. Leave the task ready for independent review. Carry the task, spec, Red and test strategy in compact context.`, redContext, progress);
             const checks = parallel(implementation, "independent-validation", candidate, {
-              correctness: (entry) => agent(implementation, "Code Correctness Review", "review", developmentReview("the frozen candidate", "correctness"), entry, schemas["Review Report"]),
-              architecture: (entry) => agent(implementation, "Code Architecture Review", "review", developmentReview("the frozen candidate", "architecture"), entry, schemas["Review Report"]),
-              simplification: (entry) => agent(implementation, "Code Simplification Review", "review", developmentReview("the frozen candidate", "simplicity"), entry, schemas["Review Report"]),
-              efficiency: (entry) => agent(implementation, "Code Efficiency Review", "review", developmentReview("the frozen candidate", "efficiency"), entry, schemas["Review Report"]),
-              security: (entry) => agent(implementation, "Code Security Review", "review", developmentReview("the frozen candidate", "security and mitigations"), entry, schemas["Review Report"]),
+              correctness: (entry) => agent(implementation, "Code Correctness Review", "review", reviewCandidate("correctness"), entry, schemas["Review Report"]),
+              architecture: (entry) => agent(implementation, "Code Architecture Review", "review", reviewCandidate("architecture"), entry, schemas["Review Report"]),
+              simplification: (entry) => agent(implementation, "Code Simplification Review", "review", reviewCandidate("simplicity"), entry, schemas["Review Report"]),
+              efficiency: (entry) => agent(implementation, "Code Efficiency Review", "review", reviewCandidate("efficiency"), entry, schemas["Review Report"]),
+              security: (entry) => agent(implementation, "Code Security Review", "review", reviewCandidate("security and mitigations"), entry, schemas["Review Report"]),
               qa: (entry) => agent(implementation, "Independent QA and Automated Checks", "verification",
                 `${prompts.verify} Run the unit, integration, end-to-end, functional, mutation, static, dependency and regression groups concurrently when their outputs are isolated.`, entry, progress),
               candidate: (entry) => delay(implementation, "capture-candidate", entry, 0),
