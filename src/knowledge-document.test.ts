@@ -3,9 +3,15 @@ import {
   anchorLine, getProperties, headings, markdownNoteLink, noteMarkdownLink, parseReadingAddress, parseWiki, prepareReading, repairWikiAddress,
   resolveWiki, rewriteNoteReferences, updateProperty, wikiLinks,
 } from "@/knowledge-document";
-import { exampleNotes } from "@/ide-knowledge-data";
+import type { ExampleFile } from "@/ide-knowledge-data";
 
-describe("Knowledge example document projection", () => {
+const notes: ExampleFile[] = [
+  { path: "docs/architecture.md", content: "# Scope\nCheckout scope. ^checkout-scope" },
+  { path: "docs/ops/Readme.md", content: "# Operations conventions" },
+  { path: "docs/team/Readme.md", content: "# Team conventions" },
+];
+
+describe("Knowledge document projection", () => {
   it("copies a valid Markdown link to the exact checkout-root note", () => {
     const path = "ops décisões/Ação [QA] (#50%).md";
     const destination = "/ops%20d%C3%A9cis%C3%B5es/A%C3%A7%C3%A3o%20%5BQA%5D%20%28%2350%25%29.md";
@@ -16,11 +22,11 @@ describe("Knowledge example document projection", () => {
   });
 
   it("follows qualified paths, preserves an anchor and surfaces duplicate names", () => {
-    expect(resolveWiki(parseWiki("Readme"), "docs/release.md", exampleNotes)).toHaveLength(2);
-    expect(resolveWiki(parseWiki("ops/Readme"), "docs/release.md", exampleNotes)).toEqual([{ path: "docs/ops/Readme.md", anchor: undefined }]);
-    expect(resolveWiki(parseWiki("architecture#^checkout-scope|checkout"), "docs/runner.md", exampleNotes))
+    expect(resolveWiki(parseWiki("Readme"), "docs/release.md", notes)).toHaveLength(2);
+    expect(resolveWiki(parseWiki("ops/Readme"), "docs/release.md", notes)).toEqual([{ path: "docs/ops/Readme.md", anchor: undefined }]);
+    expect(resolveWiki(parseWiki("architecture#^checkout-scope|checkout"), "docs/runner.md", notes))
       .toEqual([{ path: "docs/architecture.md", anchor: "^checkout-scope" }]);
-    expect(resolveWiki(parseWiki("../../outside"), "docs/release.md", exampleNotes)).toEqual([]);
+    expect(resolveWiki(parseWiki("../../outside"), "docs/release.md", notes)).toEqual([]);
     expect(anchorLine("# One\n\nLine. ^abc\n", "^abc")).toBe(3);
   });
 
@@ -31,7 +37,7 @@ describe("Knowledge example document projection", () => {
       + "%% [[architecture]] %%\r\n" + code + "\r\n" + fence + "\r\n"
       + "![[" + "architecture#Scope|overview" + "]]\r\n";
     expect(wikiLinks(source).map(({ raw }) => raw)).toEqual(["architecture#Scope|overview"]);
-    expect(rewriteNoteReferences(source, "docs/release.md", "docs/architecture.md", "docs/archive/architecture.md", exampleNotes))
+    expect(rewriteNoteReferences(source, "docs/release.md", "docs/architecture.md", "docs/archive/architecture.md", notes))
       .toBe(source.replace("architecture#Scope|overview", "docs/archive/architecture.md#Scope|overview"));
     expect(updateProperty(source, "owner", "Beta")).toBe(source.replace("owner: Alpha", "owner: Beta"));
     expect(getProperties(source)[0]?.value).toBe("Alpha");

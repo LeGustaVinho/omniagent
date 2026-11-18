@@ -14,7 +14,7 @@ it("renders note syntax on the same source while keeping comments and active HTM
     "```js", "const flag = '#inside-fence'", "```", "",
     "```ps1", 'Write-Output "ready"', "```", "", "%% source-only comment %%", "",
     '<script>window.rawMarkup = true</script>', ""].join("\n");
-  const { container } = render(<NoteReading path="Release.md" content={source} files={[]} onLink={vi.fn()} onAttachment={vi.fn()} />);
+  const { container } = render(<NoteReading path="Release.md" content={source} files={[]} onLink={vi.fn()} />);
 
   expect(screen.getByRole("heading", { name: "Release note" }).getAttribute("data-note-anchor")).toBe("release-note");
   expect(screen.getByRole("term").textContent).toBe("status");
@@ -40,14 +40,14 @@ it("maps a source-line jump after frontmatter and an expanded embed to the rende
   const source = "---\r\nstatus: ready\r\n---\r\n# Start\r\n\r\n![[Details]]\r\n\r\nJump here.\r\n\r\nAfter.";
   const { container } = render(<NoteReading path="Release.md" content={source}
     files={[{ path: "Details.md", content: "# Details\n\nEmbedded paragraph." }]}
-    jump={{ line: 8, token: 1 }} onLink={vi.fn()} onAttachment={vi.fn()} />);
+    jump={{ line: 8, token: 1 }} onLink={vi.fn()} />);
 
   expect(container.querySelector("[data-note-line-target]")?.nextElementSibling).toBe(screen.getByText("Jump here."));
 });
 
 it("folds duplicate reading sections independently and reveals a hidden target when navigating", () => {
   const content = "# Release\n\nFirst section.\n\n## Nested\n\nChild section.[^root]\n\n# Release\n\nSecond section.\n\n## Empty\n\n[^root]: Document footnote.";
-  const props = { path: "Release.md", content, files: [], onLink: vi.fn(), onAttachment: vi.fn(), contextActions: () => [] };
+  const props = { path: "Release.md", content, files: [], onLink: vi.fn(), contextActions: () => [] };
   const { rerender } = render(<NoteReading {...props} />);
   const [first, second] = screen.getAllByRole("heading", { name: "Release" });
   if (!first || !second) throw new Error("Both reading headings are required");
@@ -85,7 +85,7 @@ it("keeps embedded links and rendered selections tied to their original note and
   const embedded = "---\nstatus: draft\n---\n# Preparation\n\n## Verify\n\nRead the checklist.\nSee [the handoff](./handoff%20%231.md#Ready).\n";
   const files = [{ path: "ops/Checks.md", content: embedded }, { path: "ops/handoff #1.md", content: "# Ready" }];
   const chosen = vi.fn();
-  render(<NoteReading path="Launch.md" content={source} files={files} onLink={vi.fn()} onAttachment={vi.fn()}
+  render(<NoteReading path="Launch.md" content={source} files={files} onLink={vi.fn()}
     contextActions={(hit) => [[{ label: "Use reading context", run: () => chosen(hit) }]]} />);
   fireEvent.contextMenu(screen.getByRole("button", { name: "the handoff" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Use reading context" }));

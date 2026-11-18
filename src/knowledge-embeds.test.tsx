@@ -52,7 +52,7 @@ it("honors unique names and aliases and reports duplicates and missing note embe
   expect(candidates("Unwritten")).toEqual([]);
 
   const content = "![[Guide|Duplicate note]]\n\n![[Unwritten|Missing note]]";
-  render(<NoteReading path={path} content={content} files={files} onLink={vi.fn()} onAttachment={vi.fn()} sampleAttachments={false} />);
+  render(<NoteReading path={path} content={content} files={files} onLink={vi.fn()} />);
   expect(screen.getByText(/Ambiguous note reference/)).toBeTruthy();
   expect(screen.getByText(/Unresolved note reference/)).toBeTruthy();
   expect(screen.queryByText("Root version")).toBeNull();
@@ -67,7 +67,7 @@ it("renders full notes, a heading with descendants, and an addressed block in Re
     { path: "Runbook.md", content: "# Runbook\n\nIntro excluded.\n\n## Deploy checks\nApproved check.\n\n### Child heading\nNested check.\n\n## Sibling heading\nSibling excluded." },
     { path: "docs/evidence.md", content: "Previous paragraph.\n\nProof started here.\nProof continued here. ^proof\n\nFollowing paragraph." },
   ];
-  render(<NoteReading path={path} content={content} files={files} onLink={vi.fn()} onAttachment={vi.fn()} sampleAttachments={false} />);
+  render(<NoteReading path={path} content={content} files={files} onLink={vi.fn()} />);
   expect(screen.getByRole("heading", { name: "Complete guide" })).toBeTruthy();
   expect(screen.getByText("Full-note body.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Deploy checks" })).toBeTruthy();
@@ -145,7 +145,7 @@ it("keeps a rejected checkout-media embed unavailable and does not open a missin
   vi.mocked(invoke).mockRejectedValue(new Error("select a file inside the current checkout"));
   render(<QueryClientProvider client={client}>
     <NoteReading path="docs/start.md" content={"![[/escape/private.md|Private note]]\n\n![[/escape/private.png|Private image]]"}
-      files={[]} checkoutId="checkout" onLink={vi.fn()} onAttachment={vi.fn()} sampleAttachments={false} />
+      files={[]} checkoutId="checkout" onLink={vi.fn()} />
   </QueryClientProvider>);
   expect(await screen.findByText("Attachment unavailable · Private image")).toBeTruthy();
   expect(screen.getByText(/Unresolved note reference/)).toBeTruthy();

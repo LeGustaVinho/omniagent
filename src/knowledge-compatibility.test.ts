@@ -16,7 +16,6 @@ const utf8 = (source: string) => new TextEncoder().encode(source);
 function mountNote(path: string, original: string, mode: "source" | "live" = "source") {
   const onChange = vi.fn<(source: string) => void>();
   const onLink = vi.fn();
-  const onAttachment = vi.fn();
   let buffer = original;
   function Note() {
     const [source, setSource] = useState(original);
@@ -27,7 +26,7 @@ function mountNote(path: string, original: string, mode: "source" | "live" = "so
         onChange(next);
         setSource(next);
       } }),
-      createElement(NoteReading, { path, content: source, files, onLink, onAttachment, sampleAttachments: false }),
+      createElement(NoteReading, { path, content: source, files, onLink }),
     );
   }
 

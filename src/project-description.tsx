@@ -206,8 +206,8 @@ function DescriptionEditor({ kind, id, links }: { kind: OwnerKind; id: string; l
           </div>
           {(split || mode === "reading") && <ResizablePanel className="agile-description-reading agile-description-reading-expanded"
             edge="left" resizeKey="description-reading" resizeLabel="description reading view">
-            {buffer.content ? <Reading path={path} content={buffer.content} files={files} onLink={openLink} onAttachment={() => undefined}
-              checkoutId={checkoutId} sampleAttachments={false} /> : <p>No description.</p>}
+            {buffer.content ? <Reading path={path} content={buffer.content} files={files} onLink={openLink}
+              checkoutId={checkoutId} /> : <p>No description.</p>}
           </ResizablePanel>}
         </ResizablePanel>
       </Suspense>

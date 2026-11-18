@@ -84,7 +84,7 @@ it("compares independently written Obsidian syntax across Source, Live Preview a
         <button type="button" onClick={() => setMode("live")}>Live Preview</button>
         <MarkdownEditor path={path} source={content} mode={mode} files={files} analyze onLink={() => {}}
           onChange={(next) => { onChange(next); setContent(next); }} />
-        <NoteReading path={path} content={content} files={files} onLink={() => {}} onAttachment={() => {}} sampleAttachments={false} />
+        <NoteReading path={path} content={content} files={files} onLink={() => {}} />
       </>;
     }
 

@@ -57,7 +57,7 @@ it("exposes a fully rendered diagram image and exports that same image to a PNG"
   const path = "notes/diagram.md";
   const contextActions = vi.fn(() => []);
   render(<NoteReading path={path} content={content} files={[{ path, content }]} onLink={() => {}}
-    onAttachment={() => {}} contextActions={contextActions} />);
+    contextActions={contextActions} />);
   const image = await screen.findByRole<HTMLImageElement>("img", { name: "Mermaid diagram from the note" });
   fireEvent.contextMenu(image);
   expect(contextActions.mock.calls).toHaveLength(1);
