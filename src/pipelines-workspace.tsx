@@ -9,6 +9,7 @@ import { type WorkflowExecutionFocus } from "@/workflow-execution-model";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
 import { PipelineMaintenanceLayout, PipelineTabs, PipelineWorkspaceFrame } from "@/pipeline-layout";
+import { useWorkflowDraftNavigation, WorkflowDraftNavigation } from "@/workflow-draft-navigation";
 
 const pipelineTabs = [
   { id: "drafts", label: "Builder" },
@@ -56,20 +57,29 @@ function ProjectPipelineMaintenance({ checkout, openActivity, openWorkspace }: P
 }
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
-  return <ProjectPipelinesWorkspace key={props.checkout.checkoutId} {...props} />;
+  return <WorkflowDraftNavigation key={props.checkout.checkoutId}><ProjectPipelinesWorkspace {...props} /></WorkflowDraftNavigation>;
 }
 
-function ProjectPipelinesWorkspace(props: WorkspaceProps) {
+function ProjectPipelinesWorkspace({ openWorkspace, ...workspace }: WorkspaceProps) {
+  const navigate = useWorkflowDraftNavigation();
+  const props: WorkspaceProps = { ...workspace, openWorkspace: (area, target) => {
+    if (area === "pipelines" && target !== workspace.target) navigate(() => openWorkspace(area, target));
+    else openWorkspace(area, target);
+  } };
   const { view, libraryView = "library:pipeline", draftId, runId, runFocus } = pipelineRoute(props.target);
   const category = libraryView.slice("library:".length) as LibraryCategory;
   return <PipelineWorkspaceFrame>
-    <PipelineTabs views={pipelineTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
+    <PipelineTabs views={pipelineTabs} active={view} onSelect={(tab) => {
+      if (tab !== "library" || view !== "library") props.openWorkspace("pipelines", tab);
+    }} />
     <div className="pipeline-view">
       {view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} />
         : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
         : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus} />
         : view === "library" ? <>
-          <LibraryNavigation active={libraryView} onSelect={(target) => props.openWorkspace("pipelines", target)} />
+          <LibraryNavigation active={libraryView} onSelect={(target) => {
+            if (target !== libraryView) props.openWorkspace("pipelines", target);
+          }} />
           <WorkflowLibrary key={libraryView} category={category} {...props} />
         </>
         : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />

@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Pencil, Plus } from "lucide-react";
@@ -16,33 +16,38 @@ export type DraftResource = (key: string) => Resource | undefined;
 type ResourceSave = { status: "saved"; detail: { revision: { templateId: string; version: { revision: string } } } }
   | { status: "conflict" };
 
-function SchemaForm({ initial, disabled, onSave }: {
-  initial: Extract<Resource, { kind: "schema" }>; disabled: boolean; onSave: (resource: Resource) => void;
+type ResourceFormProps = {
+  id: string; disabled: boolean; onSave: (resource: Resource) => void; onValidity: (valid: boolean) => void;
+};
+
+function SchemaForm({ id, initial, disabled, onSave, onValidity }: ResourceFormProps & {
+  initial: Extract<Resource, { kind: "schema" }>;
 }) {
   const [draft, setDraft] = useState(initial);
+  const valid = Boolean(draft.name.trim());
+  useEffect(() => onValidity(valid), [valid, onValidity]);
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (draft.name.trim() && !disabled) onSave({ ...draft, name: draft.name.trim() });
+    if (valid && !disabled) onSave({ ...draft, name: draft.name.trim() });
   }
-  return <form className="pipeline-stack" onSubmit={submit}>
+  return <form id={id} className="pipeline-stack" onSubmit={submit}>
     <WorkflowSchemaEditor name={draft.name} fields={draft.fields} disabled={disabled}
       onChange={(name, fields) => setDraft({ ...draft, name, fields })} />
-    <Button type="submit" className="w-fit" disabled={disabled || !draft.name.trim()}>Save and use</Button>
   </form>;
 }
 
-function RoleForm({ projectId, checkoutId, initial, disabled, onSave }: Scope & {
-  initial: TemplateDraft; disabled: boolean; onSave: (resource: Resource) => void;
+function RoleForm({ id, projectId, checkoutId, initial, disabled, onSave, onValidity }: Scope & ResourceFormProps & {
+  initial: TemplateDraft;
 }) {
   const [draft, setDraft] = useState(initial);
   const validation = useRoleValidation(projectId, checkoutId, draft, true);
-  return <form className="pipeline-stack pipeline-form workflow-role-form" onSubmit={(event) => {
+  useEffect(() => onValidity(validation.canSave), [validation.canSave, onValidity]);
+  return <form id={id} className="pipeline-stack pipeline-form workflow-role-form" onSubmit={(event) => {
     event.preventDefault();
     if (validation.canSave && !disabled) onSave({ kind: "role", template: draft });
   }}>
     <WorkflowRoleFields projectId={projectId} checkoutId={checkoutId} draft={draft}
       disabled={disabled} validation={validation} onChange={setDraft} />
-    <Button type="submit" className="w-fit" disabled={disabled || !validation.canSave}>Save and use</Button>
   </form>;
 }
 
@@ -51,6 +56,8 @@ export function WorkflowResourceActions({ projectId, checkoutId, kind, label, se
   onSaved: (reference: Extract<ReusableReference, { source: "published" }>) => void;
 }) {
   const [mode, setMode] = useState<"create" | "edit">();
+  const [valid, setValid] = useState(false);
+  const id = useId();
   const origin = useRef<HTMLButtonElement>(null);
   const client = useQueryClient();
   const target = mode === "edit" ? selected : undefined;
@@ -94,6 +101,7 @@ export function WorkflowResourceActions({ projectId, checkoutId, kind, label, se
   function open(mode: "create" | "edit", button: HTMLButtonElement) {
     origin.current = button;
     save.reset();
+    setValid(false);
     setMode(mode);
   }
   return <div className="workflow-reference-actions">
@@ -105,16 +113,21 @@ export function WorkflowResourceActions({ projectId, checkoutId, kind, label, se
     </Button>}
     <WorkflowBuilderDialog title={mode === "edit" ? `Edit ${label}` : `Create ${label}`}
       description={`Save a reusable revision in the ${base?.destination === "library" ? "shared library" : "project"} and select it here.`}
-      wide={kind === "role"} open={!!mode} onOpenChange={(open) => { if (!open && !save.isPending) setMode(undefined); }}
-      onCloseAutoFocus={(event) => { event.preventDefault(); origin.current?.focus({ preventScroll: true }); }}>
+      wide={kind === "role"} open={!!mode} closeDisabled={save.isPending}
+      onOpenChange={(open) => { if (!open && !save.isPending) setMode(undefined); }}
+      onCloseAutoFocus={(event) => { event.preventDefault(); origin.current?.focus({ preventScroll: true }); }}
+      footer={<>
+        {save.error && <p role="alert" className="workflow-dialog-error">{String(save.error)}</p>}
+        <Button type="button" variant="outline" disabled={save.isPending} onClick={() => setMode(undefined)}>Cancel</Button>
+        <Button type="submit" form={id} disabled={!initial || !valid || save.isPending}>
+          {save.isPending ? "Saving…" : "Save and use"}
+        </Button>
+      </>}>
       {base && artifact.isPending ? <p role="status">Loading revision…</p>
-        : initial?.kind === "schema" ? <SchemaForm initial={initial} disabled={save.isPending} onSave={save.mutate} />
+        : initial?.kind === "schema" ? <SchemaForm id={id} initial={initial} disabled={save.isPending} onSave={save.mutate} onValidity={setValid} />
         : initial?.kind === "role" ? <RoleForm projectId={projectId} checkoutId={checkoutId} initial={initial.template}
-          disabled={save.isPending} onSave={save.mutate} />
+          id={id} disabled={save.isPending} onSave={save.mutate} onValidity={setValid} />
         : <p role="alert">{String(artifact.error ?? "This revision is unavailable.")}</p>}
-      {save.error && <p role="alert">{String(save.error)}</p>}
-      {save.isPending && <p role="status">Saving revision…</p>}
-      <Button type="button" variant="outline" className="w-fit" disabled={save.isPending} onClick={() => setMode(undefined)}>Cancel</Button>
     </WorkflowBuilderDialog>
   </div>;
 }

@@ -340,7 +340,8 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await preview.$('input[aria-label="Function name"]').waitForDisplayed({ timeout });
   const back = preview.$("button=Voltar");
   await back.waitForDisplayed({ timeout });
-  await browser.execute(() => Array.from(document.querySelectorAll('[aria-label="Artifact preview"] button')).find((button) => button.textContent.trim() === "Voltar").focus());
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.matches("[data-workflow-back]")), { timeout });
+  await capture?.(browser, "review-library-function-compact");
   await browser.keys("Enter");
   await library.$('button[aria-label="View Clarify Requirements"]').waitForDisplayed({ timeout });
   await setWindow(browser, invoke, 1440, 900);
@@ -356,12 +357,26 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   } });
   await click(libraryViews.$("button=Functions"));
   await click(libraryViews.$("button=Pipeline"));
+  await click(library.$(`button[aria-label=${JSON.stringify("Open draft of " + discardName)}]`));
+  const draftName = browser.$(`${builder} input[aria-label="Pipeline name"]`);
+  await replaceText(browser, draftName, "Unsaved pipeline name");
+  await click(libraryViews.$("button=Functions"));
+  const unsaved = browser.$('[role="dialog"]');
+  await unsaved.$("h2=Unsaved changes").waitForDisplayed({ timeout });
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent.trim() === "Keep editing"), { timeout });
+  await browser.keys("Enter");
+  assert.equal(await draftName.getValue(), "Unsaved pipeline name");
+  await click(libraryViews.$("button=Functions"));
+  await click(unsaved.$("button=Discard changes and continue"));
+  await click(libraryViews.$("button=Pipeline"));
   const discardSelector = `button[aria-label=${JSON.stringify("Actions for " + discardName)}]`;
   const discardMenu = library.$(discardSelector);
-  await discardMenu.waitForExist({ timeout });
+  await discardMenu.waitForDisplayed({ timeout });
+  await capture?.(browser, "review-library-draft-actions");
   await browser.execute((selector) => document.querySelector(selector).focus(), discardSelector);
   await browser.keys([Key.Shift, Key.F10]);
   await click(browser.$("//div[@role='menuitem' and normalize-space(.)='Delete draft']"));
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent.trim() === "Cancel"), { timeout });
   await click(browser.$('[role="dialog"]').$("button=Delete draft"));
   await discardMenu.waitForExist({ timeout, reverse: true });
   await assert.rejects(invoke(browser, "inspect_workflow_package", { projectId, draftId: discarded.id }), /unavailable/i);
@@ -434,7 +449,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   });
   await browser.refresh();
   await openBuilder(browser);
-  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open draft']`));
   await browser.$(`${canvas} ${waitNode}`).waitForDisplayed({ timeout });
   await browser.$(canvas).scrollIntoView({ block: "end" });
   await click(browser.$(`${canvas} .react-flow__controls-fitview`));
@@ -499,7 +514,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
 
   browser = await restart(browser);
   await openBuilder(browser);
-  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open draft']`));
   await browser.$(builder).waitForDisplayed({ timeout });
   for (const wire of wires) await browser.$(edge(wire)).waitForDisplayed({ timeout });
   closePosition(await nodePosition(browser), saved.layouts.pipeline[wait]);
@@ -914,4 +929,23 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   assert.equal(reused.package.members.length, 1, "Reusing a Node Prefab keeps its own immutable artifact");
   assert.deepEqual(reused.package.members[0].references.subflow, { source: "published", version: prefabVersion });
   await capture?.(browser, "visual-prompt-reused");
+  await setWindow(browser, invoke, 640, 440);
+  const showInspector = reuseEditor.$("button=Show inspector");
+  if (await showInspector.isDisplayed()) await click(showInspector);
+  await click(browser.$('button[aria-label="Create Input Schema"]'));
+  const schemaDialog = browser.$('.workflow-builder-dialog[role="dialog"]');
+  await schemaDialog.$("h2=Create Input Schema").waitForDisplayed({ timeout });
+  const schemaName = schemaDialog.$(".//label[starts-with(normalize-space(.), 'Schema name')]/input");
+  await schemaName.setValue("Compact input contract");
+  await click(schemaDialog.$("button=Add field"));
+  await click(schemaDialog.$("button=Add field"));
+  assert.equal(await browser.execute(() => {
+    const dialog = document.querySelector('.workflow-builder-dialog[role="dialog"]');
+    const body = dialog?.querySelector(".workflow-builder-dialog-body");
+    const footer = dialog?.querySelector(".workflow-builder-dialog-footer");
+    const bounds = footer?.getBoundingClientRect();
+    return Boolean(body && body.scrollHeight > body.clientHeight && bounds && bounds.top >= 0 && bounds.bottom <= innerHeight);
+  }), true);
+  await capture?.(browser, "review-schema-dialog-compact");
+  await click(schemaDialog.$("button=Cancel"));
 }

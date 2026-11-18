@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
@@ -17,6 +17,7 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); });
 it("confirms a revision-scoped pipeline deletion and reloads the draft list", async () => {
   let drafts = [{ id: "delete-me", name: "Obsolete pipeline", revision: "draft-v2", memberCount: 2,
     published: false, standalonePipeline: true, members: [{ kind: "pipeline" }] }];
+  const client = new QueryClient();
   vi.mocked(invoke).mockImplementation(async (name) => {
     if (name === "list_workflow_packages") return drafts;
     if (name === "delete_workflow_draft") {
@@ -25,7 +26,7 @@ it("confirms a revision-scoped pipeline deletion and reloads the draft list", as
     }
     throw Error(name);
   });
-  render(<QueryClientProvider client={new QueryClient()}>
+  render(<QueryClientProvider client={client}>
     <PipelineBuilderLanding checkout={testCheckout} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -36,13 +37,16 @@ it("confirms a revision-scoped pipeline deletion and reloads the draft list", as
   };
   const confirm = await openMenu();
   expect(confirm.getByText(/all 2 members/)).toBeTruthy();
-  await user.click(confirm.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(document.activeElement).toBe(confirm.getByRole("button", { name: "Cancel" })));
+  await user.keyboard("{Enter}");
   expect(invoke).not.toHaveBeenCalledWith("delete_workflow_draft", expect.anything());
-  await user.click((await openMenu()).getByRole("button", { name: "Delete draft" }));
+  const deleteDialog = await openMenu();
+  act(() => client.setQueryData(["workflow-packages", testCheckout.projectId], [{ ...drafts[0]!, revision: "draft-v3" }]));
+  await user.click(deleteDialog.getByRole("button", { name: "Delete draft" }));
   expect(invoke).toHaveBeenCalledWith("delete_workflow_draft", {
     projectId: testCheckout.projectId, draftId: "delete-me", kind: "package", expectedRevision: "draft-v2",
   });
-  expect(await screen.findByText("No visual pipeline drafts yet.")).toBeTruthy();
+  expect(await screen.findByText("No pipeline drafts yet.")).toBeTruthy();
 });
 
 it("creates independent Development Pipeline drafts using the native package action", async () => {

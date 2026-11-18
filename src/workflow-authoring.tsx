@@ -8,6 +8,7 @@ import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { WorkflowDraftRow } from "@/workflow-draft-row";
+import { useUnsavedWorkflowDraft, useWorkflowDraftNavigation } from "@/workflow-draft-navigation";
 import { WorkflowBack } from "@/workflow-package-review";
 import { availableModelSelection, liveModelsQuery, sameModelSelection, useLiveModelOptions } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
@@ -179,21 +180,22 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
     drafts={<LegacyPipelineDrafts checkout={checkout} openWorkspace={openWorkspace} />} />;
 }
 
-export function LegacyPipelineDrafts({ checkout, openWorkspace, onlyUnpublished, onOpen }: Pick<WorkspaceProps, "checkout" | "openWorkspace"> & {
-  onlyUnpublished?: boolean; onOpen?: (id: string) => void;
+export function LegacyPipelineDrafts({ checkout, openWorkspace, onlyUnpublished, filter = "", onOpen }: Pick<WorkspaceProps, "checkout" | "openWorkspace"> & {
+  onlyUnpublished?: boolean; filter?: string; onOpen?: (id: string) => void;
 }) {
   const projectId = checkout.projectId;
   const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }),
-    select: (data) => onlyUnpublished ? data.filter(({ published }) => !published) : data });
-  return <section aria-label="Pipeline drafts" className="pipeline-builder-card">
+    select: (data) => data.filter(({ name, published }) => (!onlyUnpublished || !published)
+      && (name ?? "Pipeline authoring request").toLowerCase().includes(filter)) });
+  if (drafts.data?.length === 0 && !drafts.error) return null;
+  return <section aria-label="Authoring requests" tabIndex={-1} className="pipeline-builder-card">
       <header className="pipeline-builder-card-heading">
         <span className="pipeline-builder-icon"><FilePenLine size={17} aria-hidden /></span>
-        <div><h3>Pipeline drafts</h3><p>Resume a draft or check an authoring request.</p></div>
+        <h3>Authoring requests</h3>
       </header>
       <div className="pipeline-builder-card-body">
-        {drafts.isPending && <p role="status">Loading pipeline drafts…</p>}
+        {drafts.isPending && <p role="status">Loading authoring requests…</p>}
         {drafts.error && <p role="alert">{String(drafts.error)}</p>}
-        {drafts.data?.length === 0 && <p className="pipeline-builder-empty">No pipeline drafts yet.</p>}
         {!!drafts.data?.length && <ul className="workflow-draft-list">
           {drafts.data.map((draft) => <WorkflowDraftRow key={draft.id} projectId={projectId} draftId={draft.id}
             kind="graph" name={draft.name ?? "Pipeline authoring request"} revision={draft.revision} published={draft.published}
@@ -213,6 +215,7 @@ export function PipelineAuthoringEditor(props: AuthoringProps) {
 }
 
 function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, openQueueJob, onBack }: AuthoringProps) {
+  const navigate = useWorkflowDraftNavigation();
   const projectId = checkout.projectId;
   const query = useQuery({
     queryKey: editorKey(projectId, draftId),
@@ -224,7 +227,7 @@ function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, 
   const runId = draft?.request.runId;
   return <section aria-label="Pipeline draft editor" className="pipeline-stack h-full overflow-auto p-4">
     <header className="flex flex-wrap items-center gap-2">
-      {onBack && <WorkflowBack onClick={onBack} />}
+      {onBack && <WorkflowBack onClick={() => navigate(onBack)} />}
       <h1 className="mr-auto text-lg font-semibold">{draft?.head?.graph.name ?? "Pipeline authoring"}</h1>
       {draft?.publication && <WorkflowEditorAssistance projectId={projectId} checkoutId={checkout.checkoutId} openWorkspace={openWorkspace}
         artifact={{ name: draft.head?.graph.name ?? "Pipeline", version: { ...draft.publication.workflow, kind: "pipeline", destination: "project" } }} />}
@@ -275,6 +278,7 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
     onSuccess: (next) => { setFeedback(""); updated(next); },
   });
   const dirty = JSON.stringify(editor) !== JSON.stringify(original);
+  useUnsavedWorkflowDraft(dirty);
   const editingDisabled = Boolean(draft.publication) || pending(draft) || save.isPending || request.isPending;
   const ready = Boolean(readModel && feedback.trim() && !dirty && !editingDisabled);
   function requestChanges(event: FormEvent) {

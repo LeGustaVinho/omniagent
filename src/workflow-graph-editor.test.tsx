@@ -169,7 +169,16 @@ it("opens the pinned Function canvas in Library and edits that revision in the s
   expect(invoke).toHaveBeenCalledWith("create_workflow_package", expect.objectContaining({
     package: { name: artifact.name, members: [expect.objectContaining({ base: version, body: artifact.body })] },
   }));
+  const functionName = screen.getByRole("textbox", { name: "Function name" });
+  await user.type(functionName, " with unsaved edits");
+  await user.click(within(screen.getByRole("navigation", { name: "Library views" })).getByRole("button", { name: "Schemas" }));
+  let leave = within(screen.getByRole("dialog", { name: "Unsaved changes" }));
+  await user.click(leave.getByRole("button", { name: "Keep editing" }));
+  expect(functionName).toHaveProperty("value", "Review documents with unsaved edits");
+  expect(openWorkspace).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Voltar" }));
+  leave = within(screen.getByRole("dialog", { name: "Unsaved changes" }));
+  await user.click(leave.getByRole("button", { name: "Discard changes and continue" }));
   expect(screen.getByRole("searchbox", { name: "Search Functions" })).toHaveProperty("value", "Review");
   expect(openWorkspace).not.toHaveBeenCalled();
 });

@@ -1,4 +1,4 @@
-import { useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { ArrowLeft, FileDiff, Workflow } from "lucide-react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -155,6 +155,7 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
     if (key === selectedMember?.key) return;
     if (selectedMember) setHistory((previous) => [...previous, { key: selectedMember.key, focus: focusKey() }]);
     select(key);
+    if (focusKey() !== "picker") focusWorkflowBack(workspace);
   }
   function goBack() {
     const previous = history.at(-1);
@@ -251,28 +252,38 @@ function graphView(views: Map<string, WorkflowGraphView>, key: string) {
   return view;
 }
 
-export function WorkflowBack({ onClick }: { onClick: () => void }) {
-  return <Button type="button" variant="outline" onClick={onClick}><ArrowLeft size={15} aria-hidden /> Voltar</Button>;
+function focusWorkflowBack(workspace: { current: HTMLElement | null }) {
+  const frame = requestAnimationFrame(() => workspace.current
+    ?.querySelector<HTMLElement>("[data-workflow-back]")?.focus({ preventScroll: true }));
+  return () => cancelAnimationFrame(frame);
+}
+
+export function WorkflowBack({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
+  return <Button type="button" variant="outline" data-workflow-back="" disabled={disabled} onClick={onClick}>
+    <ArrowLeft size={15} aria-hidden /> <span lang="pt-BR">Voltar</span>
+  </Button>;
 }
 
 type ArtifactSource = { version: Version } | { key: string };
 const artifactKey = (source: ArtifactSource) => "key" in source ? source.key : JSON.stringify(source.version);
 const ignoreEdit = () => undefined;
 
-export function WorkflowArtifactViewer({ projectId, checkoutId, source, members = [], onBack, actions }: {
+export function WorkflowArtifactViewer({ projectId, checkoutId, source, members = [], onBack, actions, busy }: {
   projectId: string; checkoutId: string; source: ArtifactSource; members?: WorkflowMember[];
-  onBack: () => void; actions?: ReactNode;
+  onBack: () => void; actions?: ReactNode; busy?: boolean;
 }) {
   const [history, setHistory] = useState<{ source: ArtifactSource; focus?: string }[]>([]);
   const [current, setCurrent] = useState(source);
   const views = useRef(new Map<string, WorkflowGraphView>());
   const workspace = useRef<HTMLElement>(null);
+  useEffect(() => focusWorkflowBack(workspace), []);
   const key = artifactKey(current);
   function open(next: ArtifactSource) {
     if (artifactKey(next) === key) return;
     const focus = document.activeElement?.getAttribute("data-member-focus") ?? undefined;
     setHistory((previous) => [...previous, { source: current, focus }]);
     setCurrent(next);
+    focusWorkflowBack(workspace);
   }
   function back() {
     const previous = history.at(-1);
@@ -285,35 +296,39 @@ export function WorkflowArtifactViewer({ projectId, checkoutId, source, members 
       target?.focus({ preventScroll: true });
     });
   }
-  const navigation = <div className="pipeline-actions"><WorkflowBack onClick={back} />{history.length === 0 && actions}</div>;
   return <section ref={workspace} className="workflow-artifact-viewer" aria-label="Artifact preview">
+    <div className="pipeline-actions workflow-artifact-toolbar">
+      <WorkflowBack onClick={back} disabled={busy} />
+      <span className="workflow-artifact-mode">Read-only</span>
+      {"version" in current && <code className="workflow-artifact-mode" title={current.version.revision}>{current.version.revision.slice(0, 12)}</code>}
+      {history.length === 0 && actions}
+    </div>
     {"version" in current ? <PublishedArtifactView key={key} projectId={projectId} checkoutId={checkoutId}
-      version={current.version} navigation={navigation} view={graphView(views.current, key)} openPublished={(version) => open({ version })} />
+      version={current.version} view={graphView(views.current, key)} openPublished={(version) => open({ version })} />
       : <ArtifactView key={key} projectId={projectId} checkoutId={checkoutId} artifact={members.find((member) => member.key === current.key)}
-        members={members} navigation={navigation} view={graphView(views.current, key)}
+        members={members} view={graphView(views.current, key)}
         openDraftMember={(key) => <Button type="button" variant="outline" data-member-focus="draft"
           onClick={() => open({ key })}>Open {members.find((member) => member.key === key)?.name ?? key}</Button>}
         openPublished={(version) => open({ version })} />}
   </section>;
 }
 
-function PublishedArtifactView({ projectId, version, navigation, ...props }: {
-  projectId: string; version: Version; checkoutId: string; navigation: ReactNode; view: WorkflowGraphView;
+function PublishedArtifactView({ projectId, version, ...props }: {
+  projectId: string; version: Version; checkoutId: string; view: WorkflowGraphView;
   openPublished: (version: Version) => void;
 }) {
   const published = useQuery(publishedWorkflowArtifactQuery(projectId, version));
-  if (!published.data) return <>{navigation}
+  if (!published.data) return <div className="workflow-artifact-form">
     {published.isPending ? <p role="status">Loading revision…</p>
-      : <p role="alert">{String(published.error ?? "This revision is unavailable.")}</p>}</>;
+      : <p role="alert">{String(published.error ?? "This revision is unavailable.")}</p>}</div>;
   const artifact = published.data;
   return <ArtifactView {...props} projectId={projectId} artifact={{ ...artifact, key: version.id }}
-    navigation={<>{navigation}<code title={version.revision}>{version.revision.slice(0, 12)}</code></>}
     layout={artifact.layout} definitions={artifact.definitions} />;
 }
 
-function ArtifactView({ projectId, checkoutId, artifact, navigation, view, members = [], layout = {}, definitions = {},
+function ArtifactView({ projectId, checkoutId, artifact, view, members = [], layout = {}, definitions = {},
   openDraftMember = () => null, openPublished }: {
-  projectId: string; checkoutId: string; artifact?: WorkflowMember; navigation: ReactNode; view: WorkflowGraphView;
+  projectId: string; checkoutId: string; artifact?: WorkflowMember; view: WorkflowGraphView;
   members?: WorkflowMember[]; layout?: WorkflowLayout; definitions?: WorkflowDefinitions;
   openDraftMember?: (key: string) => ReactNode; openPublished: (version: Version) => void;
 }) {
@@ -335,11 +350,10 @@ function ArtifactView({ projectId, checkoutId, artifact, navigation, view, membe
   if (artifact && body?.graph && registry.data) return <PackageMemberGraph projectId={projectId} checkoutId={checkoutId}
     memberKey={artifact.key} graph={body.graph} references={references} catalog={registry.data} pinned={definitions}
     canvas={{ layout, updateDefinitions: {} }} setCanvas={ignoreEdit} graphs={graphs} draftPresets={{}}
-    disabled edit={ignoreEdit} toolbarStart={navigation} view={view} isFunction={body.kind === "subflow"}
+    disabled readOnly edit={ignoreEdit} view={view} isFunction={body.kind === "subflow"}
     promptMembers={prompts} draftRoles={roles} draftSchemas={schemas} previewMembers={[]}
     openDraftMember={openDraftMember} openPublished={openPublished} />;
   return <div className="workflow-artifact-form pipeline-stack">
-    <div className="pipeline-actions">{navigation}</div>
     {body?.graph ? registry.error ? <p role="alert">{String(registry.error)}</p> : <p role="status">Loading graph…</p>
       : body?.fields && artifact ? <WorkflowSchemaEditor name={artifact.name} fields={body.fields} disabled onChange={ignoreEdit} />
       : body?.template ? <ReadOnlyWorkflowRole projectId={projectId} checkoutId={checkoutId} draft={body.template} />
@@ -377,10 +391,11 @@ function acceptsStartSchema(node: WorkflowGraphNode, definition?: WorkflowDefini
     name === "inputs" && value.kind === "data" && value.artifact === "json_object") === true;
 }
 
-function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftMember, openPublished,
+function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, readOnly, edit, openDraftMember, openPublished,
   canvas, setCanvas, graphs, memberKey, isFunction, onDerive, deriveDisabled, toolbarStart, view,
   promptMembers, draftRoles, draftSchemas, editPrompt, previewMembers, newPrompt, savePrefab }: {
-  projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
+  projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[];
+  disabled: boolean; readOnly?: boolean;
   references: Record<string, ReusableReference>; draftPresets: Record<string, ReusableBody>;
   edit: (graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
   promptMembers: PromptMember[];
@@ -605,7 +620,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   return <>
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
-      fullHeight toolbarStart={toolbarStart} view={view}
+      fullHeight toolbarStart={toolbarStart} view={view} readOnly={readOnly}
       nameLabel={isFunction ? "Function name" : undefined}
       insertTools={newPrompt ? (insert, options) =>
         <WorkflowNodePicker {...options} projectId={projectId} disabled={disabled}

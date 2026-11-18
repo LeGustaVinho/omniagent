@@ -14,6 +14,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { WorkflowRequirementsEditor, type StageRequirements } from "@/workflow-stage-requirements";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import { useUnsavedWorkflowDraft, useWorkflowDraftNavigation } from "@/workflow-draft-navigation";
 import type { WorkspaceProps } from "@/workbench-contract";
 import "./workflow-roles.css";
 
@@ -64,6 +65,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
   checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"];
 }) {
   const { projectId, checkoutId } = checkout;
+  const navigate = useWorkflowDraftNavigation();
   const client = useQueryClient();
   const [selected, setSelected] = useState<Selection>();
   const [viewOnly, setViewOnly] = useState(false);
@@ -119,7 +121,9 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
   return <section className="pipeline-view-content pipeline-stack workflow-roles" aria-label="Role library">
     <div className="workflow-roles-toolbar">
       <PipelineRolesHeading />
-      <Button type="button" onClick={() => { setSelected("new"); setSearch(""); }}><Plus size={15} aria-hidden /> New Role</Button>
+      <Button type="button" onClick={() => {
+        if (selected !== "new") navigate(() => { setSelected("new"); setSearch(""); });
+      }}><Plus size={15} aria-hidden /> New Role</Button>
     </div>
     <div className="workflow-roles-layout">
       <section className="pipeline-box pipeline-stack workflow-roles-list" aria-label="Saved Roles">
@@ -133,7 +137,10 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
         {visibleRoles.length > 0 && <ul className="pipeline-select-list">
           {visibleRoles.map(({ templateId, version, name, displayLabel }) => <li key={templateId}>
             <button className="pipeline-select-item" type="button" aria-pressed={reference?.templateId === templateId}
-              onClick={() => { setViewOnly(false); setSelected({ templateId, revision: version.revision }); }}>
+              onClick={() => {
+                if (reference?.templateId === templateId && reference.revision === version.revision) return setViewOnly(false);
+                navigate(() => { setViewOnly(false); setSelected({ templateId, revision: version.revision }); });
+              }}>
               <UserRound className="workflow-role-icon" size={17} aria-hidden />
               <span>{displayLabel ?? name}<small>{displayLabel && displayLabel !== name && `${name} · `}Revision {version.ordinal}</small></span>
               <ChevronRight size={14} className="pipeline-end" aria-hidden />
@@ -152,8 +159,10 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
         {reference && detail.data && <>
           <div className="workflow-role-tools">
             <label className="pipeline-form pipeline-stack">Saved revision
-              <select value={reference.revision} onChange={(event) =>
-                setSelected({ templateId: reference.templateId, revision: event.currentTarget.value })}>
+              <select value={reference.revision} onChange={(event) => {
+                const revision = event.currentTarget.value;
+                navigate(() => setSelected({ templateId: reference.templateId, revision }));
+              }}>
                 {detail.data.history.map((version) => <option key={version.revision} value={version.revision}>Revision {version.ordinal}</option>)}
               </select>
             </label>
@@ -163,9 +172,9 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: {
             {openWorkspace && <WorkflowEditorAssistance key={reference.revision} projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace}
               artifact={{ name: detail.data.revision.template.name, version: { id: reference.templateId, revision: reference.revision, kind: "role", destination: "project" } }} />}
           </div>
-          {!viewOnly && knownHead?.revision === reference.revision && <TemplateDisplayLabelEditor
+          {knownHead?.revision === reference.revision && <div hidden={viewOnly}><TemplateDisplayLabelEditor
             key={`${projectId}:${reference.templateId}:${reference.revision}`} projectId={projectId}
-            templateId={reference.templateId} templateRevision={reference.revision} />}
+            templateId={reference.templateId} templateRevision={reference.revision} /></div>}
           <TemplateForm key={reference.revision} checkoutId={checkoutId} projectId={projectId} saved={detail.data.revision}
             historical={historical} viewOnly={viewOnly} onSaved={accept} onConflict={openHead} />
         </>}
@@ -207,6 +216,7 @@ function TemplateDisplayLabelEditor({ projectId, templateId, templateRevision }:
   const stale = draft && draft.revision !== current?.revision;
   const value = draft?.value ?? current?.value ?? "";
   const dirty = !!draft && value.trim() !== (current?.value ?? "");
+  useUnsavedWorkflowDraft(dirty);
   const valid = new TextEncoder().encode(value.trim()).length <= 120 && !/[\p{Cc}]/u.test(value);
   return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>Role display label</summary>
@@ -242,6 +252,7 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, viewOn
   onConflict: (head: Head) => void;
 }) {
   const [draft, setDraft] = useState<TemplateDraft>(() => saved?.template ?? emptyRoleDraft());
+  useUnsavedWorkflowDraft(JSON.stringify(draft) !== JSON.stringify(saved?.template ?? emptyRoleDraft()));
   const readOnly = historical || viewOnly;
   const visibleDraft = readOnly && saved ? saved.template : draft;
   const validation = useRoleValidation(projectId, checkoutId, visibleDraft, !readOnly);

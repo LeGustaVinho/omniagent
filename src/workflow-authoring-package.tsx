@@ -15,6 +15,7 @@ import { PackagePublicationPreview, WorkflowBack, WorkflowPackageGraphEditing, W
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { WorkflowDraftRow } from "@/workflow-draft-row";
+import { useUnsavedWorkflowDraft, useWorkflowDraftNavigation } from "@/workflow-draft-navigation";
 import type { TemplateDraft } from "@/conversation-template-editor";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
@@ -257,22 +258,22 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
       </div>
       <div className="pipeline-builder-saved">
         {drafts}
-        <section aria-label="Visual pipeline drafts" className="pipeline-builder-card">
+        <section aria-label="Pipeline drafts" tabIndex={-1} className="pipeline-builder-card">
           <header className="pipeline-builder-card-heading">
             <span className="pipeline-builder-icon"><FilePlus2 size={17} aria-hidden /></span>
-            <h3>Visual pipeline drafts</h3>
+            <h3>Pipeline drafts</h3>
           </header>
           <div className="pipeline-builder-card-body">
-            {packages.isPending && <p role="status">Loading visual drafts…</p>}
+            {packages.isPending && <p role="status">Loading pipeline drafts…</p>}
             {packages.error && <p role="alert">{String(packages.error)}</p>}
-            {packages.data && !packages.data.length && <p className="pipeline-builder-empty">No visual pipeline drafts yet.</p>}
+            {packages.data && !packages.data.length && <p className="pipeline-builder-empty">No pipeline drafts yet.</p>}
             {!!packages.data?.length && <ul className="workflow-draft-list">
               {packages.data.map(({ id, name, revision, memberCount, members }) => members?.some(({ kind }) => kind === "pipeline")
                 ? <WorkflowDraftRow key={id} projectId={projectId} draftId={id} kind="package" name={name} revision={revision}
-                  memberCount={memberCount} openLabel="Open visual draft" open={() => openWorkspace("pipelines", packageDraftTarget(id))} />
+                  memberCount={memberCount} openLabel="Open draft" open={() => openWorkspace("pipelines", packageDraftTarget(id))} />
                 : <li key={id}><strong>{name}</strong>
                   <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", packageDraftTarget(id))}>
-                    Open visual draft <ArrowRight size={15} aria-hidden />
+                    Open draft <ArrowRight size={15} aria-hidden />
                   </Button>
                 </li>)}
             </ul>}
@@ -313,10 +314,10 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
   const [editBase, holdEdits] = useState<PackageDraft>();
   const [graphMember, selectGraphMember] = useState(memberKey ?? "");
   const [history, setHistory] = useState<WorkflowMemberLocation[]>([]);
-  const [confirmBack, setConfirmBack] = useState(false);
+  const navigate = useWorkflowDraftNavigation();
   const views = useRef(new Map<string, WorkflowGraphView>());
   const draft = editBase ?? query.data;
-  const externalBack = onBack && <WorkflowBack onClick={() => editBase ? setConfirmBack(true) : onBack()} />;
+  const externalBack = onBack && <WorkflowBack onClick={() => navigate(onBack)} />;
   function update(next: PackageDraft) {
     holdEdits(undefined);
     client.setQueryData(packageKey(projectId, draftId), next);
@@ -337,13 +338,6 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
   </>;
   return <section aria-label="Workflow package editor" className="workflow-builder">
     {externalBack && (!draft || draft.publication) && <div className="workflow-library-back">{externalBack}</div>}
-    {onBack && <WorkflowBuilderDialog title="Leave draft?" description="Save the current revision before returning to keep your edits."
-      open={confirmBack} onOpenChange={setConfirmBack}>
-      <div className="pipeline-actions justify-end">
-        <Button type="button" variant="outline" onClick={() => setConfirmBack(false)}>Keep editing</Button>
-        <Button type="button" onClick={onBack}>Discard changes and return</Button>
-      </div>
-    </WorkflowBuilderDialog>}
     {!draft && <header className="workflow-builder-header"><h1>Workflow package</h1></header>}
     {query.isPending && <p role="status">Loading package revision…</p>}
     {query.error && <p role="alert">{String(query.error)}</p>}
@@ -421,6 +415,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     },
   });
   const dirty = text !== JSON.stringify(draft.package, null, 2) || Object.keys(canvasByMember).length > 0;
+  useUnsavedWorkflowDraft(dirty);
   const review = usePackagePreview(projectId, draft.id, draft.revision, confirmation);
   useEffect(() => holdEdits(dirty ? draft : undefined), [holdEdits, dirty, draft]);
   const busy = pending(draft) || save.isPending || publish.isPending || request.isPending;

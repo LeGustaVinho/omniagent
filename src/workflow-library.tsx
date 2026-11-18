@@ -10,6 +10,7 @@ import { newPipelineMember, schemaMember, WorkflowPackageEditor, WorkflowTemplat
   type PackageDraft, type PackageMemberSummary, type PackageSummary, type WorkflowMember } from "@/workflow-authoring-package";
 import { WorkflowArtifactViewer } from "@/workflow-package-review";
 import { WorkflowDraftRow } from "@/workflow-draft-row";
+import { useWorkflowDraftNavigation } from "@/workflow-draft-navigation";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import type { WorkflowCatalogItem } from "@/workflow-node-picker";
 import { defaultTypedPrompt } from "@/workflow-prompt-model";
@@ -77,11 +78,13 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
   const { checkout, openWorkspace } = props;
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
+  const navigate = useWorkflowDraftNavigation();
   const section = libraryCategories.find(({ id }) => id === category)!;
   const [screen, show] = useState<Screen>();
   const [filter, setFilter] = useState("");
   const [create, setCreate] = useState(false);
   const [name, setName] = useState("");
+  const [roleEditorKey, setRoleEditorKey] = useState(0);
   const list = useRef<HTMLDivElement>(null);
   const scroll = useRef(0);
   const origin = useRef<HTMLElement | null>(null);
@@ -98,9 +101,19 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
   function enter(next: Screen) {
     if (!screen) {
       scroll.current = list.current?.scrollTop ?? 0;
-      origin.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (document.activeElement instanceof HTMLElement && list.current?.contains(document.activeElement)) {
+        origin.current = document.activeElement;
+      }
     }
     show(next);
+  }
+
+  function openFromList(action: () => void, trigger: HTMLElement) {
+    origin.current = trigger;
+    navigate((discarded) => {
+      if (discarded && category === "roles") setRoleEditorKey((key) => key + 1);
+      action();
+    });
   }
 
   function back() {
@@ -108,7 +121,7 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
     edit.reset();
     requestAnimationFrame(() => {
       if (list.current) list.current.scrollTop = scroll.current;
-      const target = origin.current?.isConnected && !origin.current.closest("[data-state='closed']")
+      const target = origin.current && list.current?.contains(origin.current)
         ? origin.current : list.current?.querySelector<HTMLInputElement>("input[type='search']");
       target?.focus({ preventScroll: true });
     });
@@ -155,11 +168,14 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
   });
   const creation = section.kind === "subflow" ? "function" : section.kind;
   const intro = category === "roles" ? "Shared Roles" : section.label;
+  const searchLabel = category === "pipeline" ? "Pipelines" : intro;
   const heading = <PipelineSectionHeading title={intro} icon={<section.icon size={20} aria-hidden />} />;
   const error = catalog.error ?? drafts.error ?? (!create && !screen ? edit.error : null);
   return <>
-    <div ref={list} hidden={!!screen} className="workflow-library-list">
-      {category === "roles" && <ConversationTemplateEditor checkout={checkout} openWorkspace={openWorkspace} />}
+    <div ref={list} hidden={!!screen} className="workflow-library-list" onFocusCapture={(event) => {
+      if (event.target instanceof HTMLElement && event.currentTarget.contains(event.target)) origin.current = event.target;
+    }}>
+      {category === "roles" && <ConversationTemplateEditor key={roleEditorKey} checkout={checkout} openWorkspace={openWorkspace} />}
       <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
         <header className="pipeline-actions justify-between">
           {heading}
@@ -168,7 +184,8 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
               if (edit.isPending) return;
               if (next) { edit.reset(); setName(""); }
               setCreate(next);
-            }} trigger={<Button type="button"><Plus size={15} aria-hidden /> New {section.title}</Button>}>
+            }} trigger={<Button type="button" onClick={(event) => { origin.current = event.currentTarget; }}>
+              <Plus size={15} aria-hidden /> New {section.title}</Button>}>
             <form className="pipeline-stack pipeline-form" onSubmit={(event) => {
               event.preventDefault();
               if (name.trim() && !edit.isPending) edit.mutate({ kind: creation, name: name.trim() });
@@ -181,7 +198,7 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
           </WorkflowBuilderDialog>}
         </header>
         <label className="work-search workflow-library-search"><Search size={15} aria-hidden />
-          <input type="search" aria-label={`Search ${intro}`} placeholder={`Search ${intro.toLowerCase()}`} value={filter}
+          <input type="search" aria-label={`Search ${searchLabel}`} placeholder={`Search ${searchLabel.toLowerCase()}`} value={filter}
             onChange={(event) => setFilter(event.currentTarget.value)} /></label>
         {error && <p role="alert">{String(error)}</p>}
         <section className="workflow-library-section" aria-label="Published revisions">
@@ -190,14 +207,16 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
             <li key={JSON.stringify(item.version)}>
               <div><strong>{item.name}</strong><code>{item.version.revision.slice(0, 10)}</code></div>
               <div className="workflow-library-actions">
-                <Button type="button" variant="outline" aria-label={`View ${item.name}`} onClick={() => enter({ type: "published", item })}>View</Button>
+                <Button type="button" variant="outline" aria-label={`View ${item.name}`} disabled={edit.isPending}
+                  onClick={(event) => openFromList(() => enter({ type: "published", item }), event.currentTarget)}>View</Button>
                 <Button type="button" variant="outline" aria-label={`Edit ${item.name}`} disabled={edit.isPending}
-                  onClick={() => edit.mutate({ item })}>Edit</Button>
+                  onClick={(event) => openFromList(() => edit.mutate({ item }), event.currentTarget)}>
+                  {edit.isPending && edit.variables && "item" in edit.variables && edit.variables.item === item ? "Opening…" : "Edit"}</Button>
               </div>
-              {!!item.blockers.length && <small>{item.blockers.join(" ")}</small>}
-            </li>)}</ul> : <p className="pipeline-meta">No published {intro.toLowerCase()}.</p>}
+              {!!item.blockers.length && <small className="workflow-library-note">{item.blockers.join(" ")}</small>}
+            </li>)}</ul> : <p className="pipeline-meta">{query ? "No matching published revisions." : `No published ${searchLabel.toLowerCase()}.`}</p>}
         </section>
-        <section className="workflow-library-section" aria-label="Draft revisions">
+        <section className="workflow-library-section" aria-label="Draft revisions" tabIndex={-1}>
           <h3>Drafts</h3>
           {drafts.isPending ? <p role="status">Loading drafts…</p> : categorizedDrafts.length ? <ul>{categorizedDrafts.map(({ draft, member, label }) => {
             const open = () => enter({ type: "draft", id: draft.id, memberKey: member?.key });
@@ -206,26 +225,33 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
                 name={label} revision={draft.revision} memberCount={draft.memberCount} open={open} openLabel="Open draft"
                 openAriaLabel={`Open draft of ${label}`} /> :
               <li key={`${draft.id}:${member?.key ?? ""}`}><strong>{label}</strong>
-                <Button type="button" variant="outline" aria-label={`Open draft of ${label}`} onClick={open}>Open draft</Button></li>;
-          })}</ul> : <p className="pipeline-meta">No drafts.</p>}
+                <Button type="button" variant="outline" aria-label={`Open draft of ${label}`}
+                  onClick={(event) => openFromList(open, event.currentTarget)}>Open draft</Button></li>;
+          })}</ul> : <p className="pipeline-meta">{query ? "No matching drafts." : "No drafts yet."}</p>}
         </section>
-        {category === "pipeline" && <LegacyPipelineDrafts checkout={checkout} openWorkspace={openWorkspace} onlyUnpublished
+        {category === "pipeline" && <LegacyPipelineDrafts checkout={checkout} openWorkspace={openWorkspace} onlyUnpublished filter={query}
           onOpen={(id) => enter({ type: "legacy", id })} />}
         <section className="workflow-library-section" aria-label="Native templates">
           <h3>Native templates</h3>
           {workflowTemplates.map((template) => {
             const entries = template.members.filter(({ kind, name }) => kind === section.kind && matches(name));
-            const prompts = category === "pipeline" ? template.members.filter(({ kind }) => kind === "prompt") : [];
-            return entries.length > 0 && <article key={template.key} className="workflow-native-template" aria-label={template.name}>
+            const prompts = category === "pipeline" ? template.members.filter(({ kind, name }) => kind === "prompt" && matches(name)) : [];
+            const primary = category === "pipeline" ? entries.find(({ name }) => name === template.name) : undefined;
+            const otherEntries = entries.filter((entry) => entry !== primary);
+            const previewButton = ({ key, name }: { key: string; name: string }) =>
+              <Button type="button" variant="outline" aria-label={`View ${name}`}
+                onClick={(event) => openFromList(() => enter({ type: "native", template, memberKey: key }), event.currentTarget)}>View</Button>;
+            return (entries.length > 0 || prompts.length > 0) && <article key={template.key} className="workflow-native-template" aria-label={template.name}>
               <header className="workflow-native-template-heading"><Workflow size={20} aria-hidden /><h4>{template.name}</h4>
-                {category === "pipeline" && <WorkflowTemplateChooser projectId={projectId} initialTemplateKey={template.key} onCreated={openDraft} />}
+                {category === "pipeline" && <div className="pipeline-actions">
+                  {primary && previewButton(primary)}
+                  <WorkflowTemplateChooser projectId={projectId} initialTemplateKey={template.key} onCreated={openDraft} />
+                </div>}
               </header>
-              <ul>{entries.map(({ key, name }) => <li key={key}><strong>{name}</strong>
-                <Button type="button" variant="outline" aria-label={`View ${name}`}
-                  onClick={() => enter({ type: "native", template, memberKey: key })}>View</Button></li>)}</ul>
-              {prompts.length > 0 && <details><summary>Prompts</summary><ul>{prompts.map(({ key, name }) =>
-                <li key={key}><strong>{name}</strong><Button type="button" variant="outline" aria-label={`View ${name}`}
-                  onClick={() => enter({ type: "native", template, memberKey: key })}>View</Button></li>)}</ul></details>}
+              {otherEntries.length > 0 && <ul>{otherEntries.map((member) =>
+                <li key={member.key}><strong>{member.name}</strong>{previewButton(member)}</li>)}</ul>}
+              {prompts.length > 0 && <details open={query ? true : undefined}><summary>Prompts</summary><ul>{prompts.map((member) =>
+                <li key={member.key}><strong>{member.name}</strong>{previewButton(member)}</li>)}</ul></details>}
             </article>;
           })}
         </section>
@@ -233,9 +259,10 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
     </div>
     {screen?.type === "draft" && <WorkflowPackageEditor key={screen.id} {...props} draftId={screen.id} memberKey={screen.memberKey} onBack={back} />}
     {screen?.type === "legacy" && <PipelineAuthoringEditor key={screen.id} {...props} draftId={screen.id} onBack={back} />}
-    {screen?.type === "published" && <WorkflowArtifactViewer projectId={projectId} checkoutId={checkoutId}
+    {screen?.type === "published" && <WorkflowArtifactViewer projectId={projectId} checkoutId={checkoutId} busy={edit.isPending}
       source={{ version: screen.item.version }} onBack={back} actions={<>
-        <Button type="button" disabled={edit.isPending} onClick={() => edit.mutate({ item: screen.item })}>Edit</Button>
+        <Button type="button" disabled={edit.isPending} onClick={() => edit.mutate({ item: screen.item })}>
+          {edit.isPending ? "Opening draft…" : "Edit"}</Button>
         {edit.error && <p role="alert">{String(edit.error)}</p>}
       </>} />}
     {screen?.type === "native" && <WorkflowArtifactViewer projectId={projectId} checkoutId={checkoutId}

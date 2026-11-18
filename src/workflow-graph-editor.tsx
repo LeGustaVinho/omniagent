@@ -179,7 +179,7 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
 
 export type WorkflowGraphView = { selected?: string; viewport?: Viewport; inspector: PipelineInspectorView };
 
-export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, view,
+export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, view, readOnly,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
   onDerive, deriveDisabled, fullHeight = false, toolbarStart,
   promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
@@ -191,6 +191,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   catalog: WorkflowDefinition[];
   problems: string[];
   disabled: boolean;
+  readOnly?: boolean;
   allowDefinitionUpdates?: boolean | ((nodeId: string) => boolean);
   inspectReference?: (nodeId: string) => ReactNode;
   editablePresetFields?: Record<string, string[]>;
@@ -647,14 +648,14 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
-      <div className="workflow-history" aria-label="Graph edit history" role="group">
+      {!readOnly && <div className="workflow-history" aria-label="Graph edit history" role="group">
         <Button type="button" variant="ghost" aria-label="Undo graph edit" title="Undo graph edit" disabled={disabled || !history.past.length}
           onClick={() => restore("undo")}><Undo2 size={16} /></Button>
         <Button type="button" variant="ghost" aria-label="Redo graph edit" title="Redo graph edit" disabled={disabled || !history.future.length}
           onClick={() => restore("redo")}><Redo2 size={16} /></Button>
-      </div>
+      </div>}
       {problems.length > 0 && <details className="workflow-graph-diagnostics">
-        <summary><CircleAlert size={15} aria-hidden /> Draft diagnostics ({problems.length})</summary>
+        <summary><CircleAlert size={15} aria-hidden /> {readOnly ? "Graph diagnostics" : "Draft diagnostics"} ({problems.length})</summary>
         <ul>{problems.map((issue, i) => <li key={`${issue}:${i}`}>{issue}</li>)}</ul>
       </details>}
     </PipelineToolbar>
