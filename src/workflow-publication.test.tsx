@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import type { WorkflowDefinition, WorkflowGraph } from "@/workflow-graph-model";
 import type { WorkflowPublication } from "@/workflow-publication";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => {
@@ -65,7 +65,7 @@ function setup(stale = false) {
   });
   function mount() {
     return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <PipelineAuthoringEditor draftId={publication.draftId} checkout={exampleCheckout}
+      <PipelineAuthoringEditor draftId={publication.draftId} checkout={testCheckout}
         openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
     </QueryClientProvider>);
   }
@@ -85,7 +85,7 @@ it("requires ordinary confirmation of the exact draft and base and restores the 
   await user.click(screen.getByRole("button", { name: "Review publication" }));
   await user.click(screen.getByRole("button", { name: "Confirm publication" }));
   expect(invoke).toHaveBeenCalledWith("publish_reviewed_workflow", {
-    projectId: exampleCheckout.projectId, draftId: publication.draftId,
+    projectId: testCheckout.projectId, draftId: publication.draftId,
     reviewedRevisionId: publication.reviewedRevisionId, expectedBase: base,
   });
   const receipt = within(await screen.findByRole("region", { name: "Publication evidence" }));

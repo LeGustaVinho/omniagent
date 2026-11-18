@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -15,7 +15,7 @@ vi.mock("@xyflow/react", async (original) => ({ ...await original<typeof import(
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it("reviews changes and pinned dependencies from an exact prior package revision", async () => {
-  const projectId = exampleCheckout.projectId;
+  const projectId = testCheckout.projectId;
   const reference = { destination: "library", kind: "subflow", id: "checker", revision: "pinned-subflow" };
   const member = {
     key: "pipeline", name: "Delivery pipeline", kind: "pipeline", base: null,
@@ -34,7 +34,7 @@ it("reviews changes and pinned dependencies from an exact prior package revision
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+    <WorkflowPackageEditor draftId="draft" checkout={testCheckout}
       openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -70,7 +70,7 @@ it("edits a package member graph through the shared editor and saves the same pa
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+    <WorkflowPackageEditor draftId="draft" checkout={testCheckout}
       openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -78,7 +78,7 @@ it("edits a package member graph through the shared editor and saves the same pa
   await user.type(screen.getByRole("textbox", { name: "Pipeline name" }), "Edited delivery");
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
-    projectId: exampleCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,
+    projectId: testCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,
     package: { name: draft.package.name, members: [{ ...member, body: { ...member.body, graph: {
       ...graph, name: "Edited delivery",
     } } }] },

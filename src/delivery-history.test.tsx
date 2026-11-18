@@ -10,13 +10,14 @@ import { ProjectTasksWorkspace } from "@/project-tasks";
 import { AttemptDeliveryHistory } from "@/repository-delivery-history";
 import type { VerifiedDeliveryUnitHistory } from "@/project-agile-model";
 import { RunOrchestrationPanel } from "@/run-orchestration";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it("reopens a completed task and navigates its selected diff, accepted review, and implementation context", async () => {
-  const { projectId, checkoutId } = exampleCheckout;
+  const { projectId, checkoutId } = testCheckout;
   const task = { id: "saved-task", title: "Completed release work" };
   const ref = { projectId, taskId: task.id };
   const runId = "saved-workflow";
@@ -63,7 +64,7 @@ it("reopens a completed task and navigates its selected diff, accepted review, a
   const visited = vi.fn();
   function ReopenedWorkbench() {
     const [inspection, setInspection] = useState<{ runId: string; conversationId?: string }>();
-    const props: WorkspaceProps = { checkout: exampleCheckout, openChanges: vi.fn(),
+    const props: WorkspaceProps = { checkout: testCheckout, openChanges: vi.fn(),
       openWorkspace: vi.fn(),
       openActivity: (runId, conversationId) => { visited(runId, conversationId); setInspection({ runId, conversationId }); } };
     return <>
@@ -95,7 +96,7 @@ it("reopens a completed task and navigates its selected diff, accepted review, a
 });
 
 it("shows full receipts for the Task, its independent units, and each contributing Sub-Task", async () => {
-  const { projectId } = exampleCheckout;
+  const { projectId } = testCheckout;
   const parent = { id: "deliver", title: "Ship release" };
   const child = { id: "child", title: "Ship API" };
   const second = { id: "second-child", title: "Ship documentation" };
@@ -179,7 +180,7 @@ it("shows full receipts for the Task, its independent units, and each contributi
   const navigation = { openActivity: vi.fn(), openWorkspace: vi.fn() };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const app = render(<QueryClientProvider client={client}>
-    <ProjectTasksWorkspace checkout={exampleCheckout} target={parent.id} openChanges={vi.fn()} {...navigation} />
+    <ProjectTasksWorkspace checkout={testCheckout} target={parent.id} openChanges={vi.fn()} {...navigation} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   const parentDetail = within(await screen.findByRole("region", { name: parent.title }));

@@ -2,12 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ContextActions, type MenuAction } from "@/components/ui/context-actions";
 
-export function NotePropertyEditor({ name, value, read, update, replace, actions, editable = true, expectedSource, focus }: {
+export function NotePropertyEditor({ name, value, read, update, actions, editable = true, expectedSource, focus }: {
   name: string;
   value: string;
   read: () => string | undefined;
   update: (markdown: string) => void;
-  replace?: (markdown: string, name: string, value: string) => string;
   actions?: readonly MenuAction[];
   editable?: boolean;
   expectedSource?: string;
@@ -35,8 +34,7 @@ export function NotePropertyEditor({ name, value, read, update, replace, actions
     setSaving(true);
     setError("");
     try {
-      const edited = replace ? replace(markdown, name, pending.value)
-        : await invoke<string>("replace_note_property", { markdown, key: name, value: pending.value });
+      const edited = await invoke<string>("replace_note_property", { markdown, key: name, value: pending.value });
       if (!mounted.current) return;
       if (read() !== markdown) {
         setError("The note changed. Review the property and apply it again.");

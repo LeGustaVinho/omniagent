@@ -3,7 +3,6 @@ import { Fragment, useEffect, useRef, useState, type ComponentProps, type ReactN
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
-import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
@@ -106,27 +105,6 @@ export function QueueJobFacts({ facts }: { facts: JobFact[] }) {
 
 export function QueueJobActions({ children }: { children: ReactNode }) {
   return <div className="flex flex-wrap gap-2">{children}</div>;
-}
-
-export function PendingQueueJobActions({ paused, queuedAnswer, disabled, onPauseToggle, onCancel }: {
-  paused: boolean;
-  queuedAnswer?: boolean;
-  disabled?: boolean;
-  onPauseToggle: () => void;
-  onCancel: () => void;
-}) {
-  return <>
-    <QueueButton variant="outline" disabled={disabled} onClick={onPauseToggle}>{paused ? "Resume job" : "Pause job"}</QueueButton>
-    <QueueButton variant="outline" disabled={disabled} onClick={onCancel}>
-      {queuedAnswer ? "Cancel queued answer" : "Cancel pending job"}
-    </QueueButton>
-  </>;
-}
-
-export function QueueRecoveryButton({ action, disabled, onClick }: { action: RecoveryAction; disabled?: boolean; onClick: () => void }) {
-  return <QueueButton variant="outline" disabled={disabled} onClick={onClick}>
-    {action === "retry" ? "Retry saved input" : "Resume from checkpoint"}
-  </QueueButton>;
 }
 
 export function QueueLayout({

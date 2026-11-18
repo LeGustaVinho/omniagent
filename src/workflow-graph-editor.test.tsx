@@ -11,7 +11,7 @@ import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const { fitView } = vi.hoisted(() => ({ fitView: vi.fn() }));
@@ -137,7 +137,7 @@ it("loads published Library artifacts without loading the Builder node registry"
   ipc.mockClear();
   ipc.mockResolvedValue([]);
   render(<QueryClientProvider client={new QueryClient()}>
-    <PipelinesWorkspace checkout={exampleCheckout} target="library" openWorkspace={vi.fn()}
+    <PipelinesWorkspace checkout={testCheckout} target="library" openWorkspace={vi.fn()}
       openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const library = within(screen.getByRole("region", { name: "Workflow library" }));
@@ -145,7 +145,7 @@ it("loads published Library artifacts without loading the Builder node registry"
   expect(library.queryByRole("searchbox")).toBeNull();
   expect(library.queryByText("Import or export workflow packages")).toBeNull();
   expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions", expect.anything());
-  expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: exampleCheckout.projectId });
+  expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: testCheckout.projectId });
 });
 
 it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and opens its editor", async (title) => {
@@ -155,7 +155,7 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
     inputs: [control("ready"), data("result", "json_object")], outputs: [control("completed"), data("result", "json_object")] };
   const ipc = vi.mocked(invoke);
   let draft: PackageDraft | undefined;
-  const projectId = exampleCheckout.projectId;
+  const projectId = testCheckout.projectId;
   ipc.mockImplementation(async (command, payload) => {
     switch (command) {
       case "list_workflow_packages": return draft ? [{ id: draft.id, name: draft.package.name, memberCount: 1, standalonePipeline: false, published: false }] : [];
@@ -176,7 +176,7 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
   });
   function Workspace() {
     const [target, setTarget] = useState("library");
-    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
+    return <PipelinesWorkspace checkout={testCheckout} target={target}
       openWorkspace={(_, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -254,7 +254,7 @@ it("uses the canvas node picker and saves an AI Node with its position and Schem
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" openWorkspace={vi.fn()}
+    <PipelineAuthoringEditor checkout={testCheckout} draftId="package:draft" openWorkspace={vi.fn()}
       openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -433,7 +433,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   vi.mocked(invoke).mockImplementation(async (command, input) => {
     switch (command) {
       case "project_workflow_graph_drafts":
-        expect(input).toEqual({ projectId: exampleCheckout.projectId });
+        expect(input).toEqual({ projectId: testCheckout.projectId });
         return [{ id: stored.id, name: stored.head.graph.name, revision: stored.head.id }];
       case "inspect_workflow_authoring": return stored;
       case "workflow_node_definitions": return [start, context, plan];
@@ -447,7 +447,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
       default: throw new Error(`Unexpected ${command}`);
     }
   });
-  const props = { checkout: exampleCheckout,
+  const props = { checkout: testCheckout,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   const client = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const mount = (target?: string) => render(<QueryClientProvider client={client()}><PipelinesWorkspace {...props} target={target} /></QueryClientProvider>);
@@ -496,7 +496,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   await user.click(save());
   await waitFor(() => expect(screen.getByText("saved-revision")).toBeTruthy());
   expect(invoke).toHaveBeenCalledWith("save_workflow_authoring_draft", {
-    projectId: exampleCheckout.projectId, draftId: "draft-1", selectedRevision: "first-revision",
+    projectId: testCheckout.projectId, draftId: "draft-1", selectedRevision: "first-revision",
     graph: { ...graph, nodes: graph.nodes.map((node) => node.id === "plan" ? { ...node, configuration: { kind: "agent_role", role: "Qualified planner" } } : node),
       wires: [wire("start", "start", "context", "ready"), wire("start", "document", "context", "document"),
         wire("context", "loaded", "plan", "ready"), wire("context", "context", "plan", "context")] },

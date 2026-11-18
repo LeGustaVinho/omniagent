@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent, ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
 import { WorkflowReusableDerivation } from "@/workflow-reusable";
 import type { WorkflowDefinition, WorkflowGraph, WorkflowWire } from "@/workflow-graph-model";
@@ -27,7 +27,7 @@ vi.mock("@xyflow/react", async (original) => {
 });
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-const projectId = exampleCheckout.projectId;
+const projectId = testCheckout.projectId;
 const control = { kind: "control" } as const;
 const checks = { kind: "data", artifact: "checks" } as const;
 const start: WorkflowDefinition = {
@@ -110,7 +110,7 @@ it("opens the saved preset and typed subflow review from the clicked canvas node
     if (command === "derive_workflow_reusable") return { ...sourceDraft, revision: "derived" };
     throw Error(command);
   });
-  mount(<WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout}
+  mount(<WorkflowPackageEditor draftId={draft.id} checkout={testCheckout}
     openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
   const first = await screen.findByRole("button", { name: "Select graph node verify" });
@@ -173,7 +173,7 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
       default: throw Error(name);
     }
   });
-  mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+  mount(<WorkflowPackageEditor draftId="draft" checkout={testCheckout}
     openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
   const parent = await screen.findByRole("region", { name: "Pipeline graph editor" });

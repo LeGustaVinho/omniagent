@@ -10,7 +10,7 @@ import type { SessionMode } from "@/bindings/SessionMode";
 import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import { AgentRoleFields } from "@/workflow-stage-model";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@xyflow/react", async (original) => ({
@@ -150,7 +150,7 @@ it("keeps the authored package reference when the graph editor saves the Goal se
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="package" checkout={exampleCheckout}
+    <WorkflowPackageEditor draftId="package" checkout={testCheckout}
       openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -161,13 +161,13 @@ it("keeps the authored package reference when the graph editor saves the Goal se
   const nextConfiguration = { ...configuration, requirements: { ...requirements, goal: { ...goal, objective: "Deliver the change" } } };
   const nextNode = { id: nodeId, kind: definition.kind, configuration: nextConfiguration };
   expect(invoke).toHaveBeenCalledWith("preview_workflow_stage_goal", {
-    projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId, selection: model,
+    projectId: testCheckout.projectId, checkoutId: testCheckout.checkoutId, selection: model,
     node: { ...nextNode, configuration: { ...nextConfiguration, requirements: { ...nextConfiguration.requirements, boundRole: version } } },
   });
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   const member = draft.package.members[0]!;
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
-    projectId: exampleCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,
+    projectId: testCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,
     package: { ...draft.package, members: [{ ...member, body: { ...member.body, graph: { ...member.body.graph, nodes: [nextNode] } } }] },
   });
 });

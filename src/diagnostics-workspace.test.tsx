@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { RealDiagnostics } from "@/desktop-dock";
 import { downloadArtifact } from "@/download-artifact";
 import { FixtureRunPanel } from "@/fixture-panels";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 import { useWorkspace } from "@/workspace-state";
 
 const { getVersion, invoke } = vi.hoisted(() => ({ getVersion: vi.fn(), invoke: vi.fn() }));
@@ -36,7 +36,7 @@ it("reads actual desktop and CLI status and exposes the device settings link", a
   });
   const openSystem = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <RealDiagnostics checkout={exampleCheckout} openSystem={openSystem} />
+    <RealDiagnostics checkout={testCheckout} openSystem={openSystem} />
   </QueryClientProvider>);
 
   const desktop = screen.getByRole("region", { name: "Current installation" });
@@ -56,9 +56,9 @@ it("reads actual desktop and CLI status and exposes the device settings link", a
 });
 
 it("copies only the selected fixture's events and keeps protected input display scoped to its run", async () => {
-  useWorkspace.setState({ checkout: exampleCheckout });
+  useWorkspace.setState({ checkout: testCheckout });
   const runs = ["first-fixture", "second-fixture"].map((id) => ({
-    id, projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId, turnId: id, status: "succeeded",
+    id, projectId: testCheckout.projectId, checkoutId: testCheckout.checkoutId, turnId: id, status: "succeeded",
   }));
   invoke.mockImplementation(async (command: string, { runId } = { runId: "" }) => {
     if (command === "run_snapshot") return { cursor: "2", runs, recentEvents: runs.map(({ id, turnId }, index) => ({
@@ -81,17 +81,17 @@ it("copies only the selected fixture's events and keeps protected input display 
   expect(invoke.mock.calls.some(([command]) => command === "fixture_input_evidence")).toBe(false);
   await user.click(within(first).getByRole("button", { name: "Inspect protected input" }));
   expect(await within(first).findByText("Protected input for first-fixture")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("fixture_input_evidence", { checkoutId: exampleCheckout.checkoutId, runId: "first-fixture" });
+  expect(invoke).toHaveBeenCalledWith("fixture_input_evidence", { checkoutId: testCheckout.checkoutId, runId: "first-fixture" });
 
   rerender(panelFor("second-fixture"));
   expect(await screen.findByText("Output for second-fixture")).toBeTruthy();
   expect(screen.queryByText("Protected input for first-fixture")).toBeNull();
-  expect(invoke).not.toHaveBeenCalledWith("fixture_input_evidence", { checkoutId: exampleCheckout.checkoutId, runId: "second-fixture" });
+  expect(invoke).not.toHaveBeenCalledWith("fixture_input_evidence", { checkoutId: testCheckout.checkoutId, runId: "second-fixture" });
 });
 
 it("filters fixture events by channel and exports the exact visible recorded previews with scope", async () => {
-  useWorkspace.setState({ checkout: exampleCheckout });
-  const { projectId, checkoutId } = exampleCheckout;
+  useWorkspace.setState({ checkout: testCheckout });
+  const { projectId, checkoutId } = testCheckout;
   const run = { id: "recorded-fixture", projectId, checkoutId, turnId: "recorded-turn", status: "failed" };
   const event = (seq: string, data: unknown, runId = run.id) => ({ seq, runId, turnId: run.turnId, data });
   const failure = event("9007199254740993192", { type: "output", stream: "stderr", preview: "  diagnostic [redacted]…" });

@@ -6,16 +6,16 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowMaintenanceCandidates, WorkflowMaintenanceDelivery, WorkflowMaintenancePlugins, WorkflowMaintenanceSettings } from "@/workflow-maintenance";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 afterEach(() => { cleanup(); invoke.mockReset(); });
 
-const projectId = exampleCheckout.projectId;
+const projectId = testCheckout.projectId;
 const runningBuild = { version: "0.1.0", sourceCommit: "running-source", sourceModified: false, target: "windows-x64", profile: "release" };
 const configuration = {
-  sourceCheckoutId: exampleCheckout.checkoutId, workflowId: "maintenance-workflow",
+  sourceCheckoutId: testCheckout.checkoutId, workflowId: "maintenance-workflow",
   build: { executable: "C:/Build/builder.exe", arguments: ["--release"], timeoutSeconds: null, packagePath: "target/setup.exe", versionPath: "target/version" },
   requiredChecks: ["Windows test"], activation: "manual_fixture",
 };
@@ -39,7 +39,7 @@ it("opens the saved release execution and loads real CLI plugin controls from Ma
   });
   const openWorkspace = vi.fn();
   mount(<>
-    <WorkflowMaintenanceCandidates checkout={exampleCheckout} openWorkspace={openWorkspace} />
+    <WorkflowMaintenanceCandidates checkout={testCheckout} openWorkspace={openWorkspace} />
     <WorkflowMaintenancePlugins />
   </>);
   const user = userEvent.setup();
@@ -66,13 +66,13 @@ it("configures the exact registered checkout, workflow, build gate and activatio
     switch (command) {
       case "workflow_maintenance": return { runningBuild, settings: saved, handoffs: [] };
       case "workflow_authoring_bases": return [{ version: { id: "maintenance-workflow" }, name: "Maintenance delivery" }];
-      case "registered_checkouts": return [exampleCheckout, { ...exampleCheckout, projectId: "foreign", checkoutRoot: "D:/Foreign" }];
+      case "registered_checkouts": return [testCheckout, { ...testCheckout, projectId: "foreign", checkoutRoot: "D:/Foreign" }];
       case "automatic_update_settings": return { policy: { revision: null, target: null }, status: { state: "disabled" }, feedConfigured: false };
       case "set_workflow_maintenance": saved = settings; return settings;
       default: throw new Error(command);
     }
   });
-  mount(<WorkflowMaintenanceSettings checkout={exampleCheckout} />);
+  mount(<WorkflowMaintenanceSettings checkout={testCheckout} />);
   const user = userEvent.setup();
   await user.click(screen.getByText("Maintenance workflow"));
   await user.selectOptions(await screen.findByLabelText("Delivery workflow"), "maintenance-workflow");
@@ -177,7 +177,7 @@ it("opts in to the reviewed signed workflow and revokes that exact grant", async
         runningBuild, settings: { ...settings, configuration: { ...configuration, activation: "signed_updater" } }, handoffs: [],
       };
       case "workflow_authoring_bases": return [{ version: { id: "maintenance-workflow" }, name: "Maintenance delivery" }];
-      case "registered_checkouts": return [exampleCheckout];
+      case "registered_checkouts": return [testCheckout];
       case "automatic_update_settings": return { policy, status: { state: "waiting_for_candidate" }, feedConfigured: true };
       case "set_automatic_update_policy":
         policy = { revision: args.target ? "saved-grant" : "revoked-grant", target: args.target };
@@ -185,7 +185,7 @@ it("opts in to the reviewed signed workflow and revokes that exact grant", async
       default: throw new Error(command);
     }
   });
-  mount(<WorkflowMaintenanceSettings checkout={exampleCheckout} />);
+  mount(<WorkflowMaintenanceSettings checkout={testCheckout} />);
   const user = userEvent.setup();
   await user.click(screen.getByText("Maintenance workflow"));
   const enable = await screen.findByRole<HTMLButtonElement>("button", { name: "Enable automatic updates for this workflow" });

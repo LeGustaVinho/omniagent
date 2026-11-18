@@ -59,13 +59,6 @@ Create a small pipeline that loads a saved Markdown source and checks whether th
 3. Save the package revision and open **Review changes** to inspect the graph and its execution requirements. Review and confirm publication.
 4. From a task's **Workflow** tab, choose **Run published workflow**, select its revision, and provide the checkout and saved source note. Open **Pipelines → Runs** to inspect the pinned revision, node inputs, and the condition's selected output.
 
-<details>
-<summary>See the completed pipeline run</summary>
-
-![The pipeline run inspector showing the selected Load context node, its input ports, and recorded Markdown output](docs/images/pipeline-run.png)
-
-</details>
-
 ### Pick up an interrupted run
 
 If OmniAgent restarts during a task, open **Queue** and select the interrupted attempt. Review its recorded outcome and the worktree it used. If the attempt stopped during a Git write, complete the reconciliation review when prompted before retrying.

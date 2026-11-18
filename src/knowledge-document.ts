@@ -55,7 +55,7 @@ function lineParts(line: string) {
   if (!found?.[1] || !found[2]) return;
   const body = found[3] ?? "";
   const comment = /^(?:[^"'#]|"[^"]*"|'[^']*')*?(\s+#[^\r\n]*)$/.exec(body)?.[1] ?? "";
-  return { key: found[1], delimiter: found[2], value: comment ? body.slice(0, -comment.length) : body, comment };
+  return { key: found[1], value: comment ? body.slice(0, -comment.length) : body };
 }
 
 export function getProperties(content: string) {
@@ -63,21 +63,6 @@ export function getProperties(content: string) {
     const parts = lineParts(line);
     return parts ? [{ key: parts.key, value: parts.value.trim(), line: index + 2 }] : [];
   });
-}
-
-export function updateProperty(content: string, key: string, value: string) {
-  const block = frontmatter(content);
-  if (!block) return content;
-  const valueLine = value.replace(/[\r\n]+/g, " ");
-  let replaced = false;
-  const body = block.body.split(/(\r?\n)/).map((line) => {
-    const parsed = lineParts(line);
-    if (replaced || parsed?.key !== key) return line;
-    replaced = true;
-    return parsed.key + parsed.delimiter + valueLine + parsed.comment;
-  }).join("");
-  const range = block.start.length + block.body.length + block.end.length;
-  return block.start + body + block.end + content.slice(range);
 }
 
 export function withoutProperties(content: string) {
@@ -309,39 +294,6 @@ export function noteAnchorExcerpt(source: string, anchor: string) {
   const text = excerpt(source, anchor)?.trimEnd();
   if (!firstLine || !text) return;
   return { text, startLine: firstLine, endLine: firstLine + text.split(/\r?\n/).length - 1, language: "markdown" };
-}
-
-function replaceWikiAddress(content: string, replace: (link: NoteTarget) => string | undefined) {
-  const text = withoutProperties(content);
-  const rewritten = byText(text, (line) => line.replace(wikiPattern, (original: string, embed: string, raw: string) => {
-    const link = parseWiki(raw, embed === "!");
-    const address = replace(link);
-    return address ? `${embed}[[${address}${link.anchor ? "#" + link.anchor : ""}${link.alias ? "|" + link.alias : ""}]]` : original;
-  }));
-  return content.slice(0, content.length - text.length) + rewritten;
-}
-
-export function repairWikiAddress(content: string, raw: string, to: string, anchor?: string, sourceLine?: number) {
-  const text = withoutProperties(content);
-  const firstLine = content.slice(0, content.length - text.length).split("\n").length;
-  let matches = 0;
-  const updated = byText(text, (line, index) => line.replace(wikiPattern, (original: string, embed: string, entry: string) => {
-    if (entry !== raw || sourceLine !== undefined && index + firstLine !== sourceLine) return original;
-    matches += 1;
-    const { alias } = parseWiki(entry);
-    return `${embed}[[${to}${anchor ? "#" + anchor : ""}${alias ? "|" + alias : ""}]]`;
-  }));
-  if (sourceLine !== undefined && matches !== 1) throw new Error("The source line no longer identifies one matching wikilink. Edit the source to disambiguate it.");
-  return content.slice(0, content.length - text.length) + updated;
-}
-
-export function rewriteNoteReferences(content: string, originalPath: string, path: string, renamedPath: string, files: readonly ExampleFile[]) {
-  return replaceWikiAddress(content, (link) => {
-    if (!link.target) return;
-    const targets = resolveWiki(link, originalPath, files);
-    if (targets.length !== 1 || targets[0]?.path !== path) return;
-    return renamedPath;
-  });
 }
 
 function escapedLabel(label: string) {

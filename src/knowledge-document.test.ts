@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  anchorLine, getProperties, headings, markdownNoteLink, noteMarkdownLink, parseReadingAddress, parseWiki, prepareReading, repairWikiAddress,
-  resolveWiki, rewriteNoteReferences, updateProperty, wikiLinks,
+  anchorLine, getProperties, headings, markdownNoteLink, noteMarkdownLink, parseReadingAddress, parseWiki, prepareReading,
+  resolveWiki, wikiLinks,
 } from "@/knowledge-document";
 import type { ExampleFile } from "@/ide-knowledge-data";
 
@@ -30,24 +30,17 @@ describe("Knowledge document projection", () => {
     expect(anchorLine("# One\n\nLine. ^abc\n", "^abc")).toBe(3);
   });
 
-  it("rewrites note links outside protected markup and frontmatter", () => {
+  it("finds only note links outside protected markup and frontmatter", () => {
     const code = "`[[architecture]]`";
     const fence = "``` markdown\r\n[[architecture]]\r\n```";
     const source = "\uFEFF---\r\nowner: Alpha # keep this\r\nexample: '[[architecture]]'\r\n---\r\n"
       + "%% [[architecture]] %%\r\n" + code + "\r\n" + fence + "\r\n"
       + "![[" + "architecture#Scope|overview" + "]]\r\n";
     expect(wikiLinks(source).map(({ raw }) => raw)).toEqual(["architecture#Scope|overview"]);
-    expect(rewriteNoteReferences(source, "docs/release.md", "docs/architecture.md", "docs/archive/architecture.md", notes))
-      .toBe(source.replace("architecture#Scope|overview", "docs/archive/architecture.md#Scope|overview"));
-    expect(updateProperty(source, "owner", "Beta")).toBe(source.replace("owner: Alpha", "owner: Beta"));
     expect(getProperties(source)[0]?.value).toBe("Alpha");
   });
 
-  it("repairs an unavailable heading and bounds circular transclusions", () => {
-    const source = "Read [[old#Missing|the guide]].";
-    expect(repairWikiAddress(source, "old#Missing|the guide", "docs/runner.md", "Startup checks"))
-      .toBe("Read [[docs/runner.md#Startup checks|the guide]].");
-
+  it("bounds circular transclusions", () => {
     const catalog = [{ path: "a.md", content: "# A\n\n![[b]]" }, { path: "b.md", content: "# B\n\n![[a]]" }];
     expect(prepareReading(catalog[0]!.content, "a.md", catalog)).toContain("already in the current embed chain");
   });

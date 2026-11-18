@@ -8,7 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
 import { fileHistoryTarget, newWorktreeTarget, readTerminalFolderTarget } from "@/file-context-actions";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@/ide-monaco", () => ({
@@ -16,7 +17,7 @@ vi.mock("@/ide-monaco", () => ({
   monacoTheme: () => "vs-dark",
 }));
 
-const checkout = { ...exampleCheckout, checkoutId: "local-checkout", checkoutRoot: "C:/local" };
+const checkout = { ...testCheckout, checkoutId: "local-checkout", checkoutRoot: "C:/local" };
 const originalRevision = { branch: "refs/heads/main", head: "current-main", index: "old-index" };
 const worktrees = [
   { checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, branch: "main", head: "current-main", managed: false },

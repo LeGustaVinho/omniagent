@@ -5,7 +5,7 @@ import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react"
 import { ArrowUpRight, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ContextActions, PositionedContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
-import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineRevisionList, PipelineToolbar } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunList, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
@@ -423,7 +423,7 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
           {!runId && runs.isPending && <p role="status">Loading workflow runs…</p>}
           {execution.data === null && <p>The requested execution is unavailable in this project.</p>}
           {!runId && !!runs.data?.length && <section aria-label="Saved workflow runs" className="pipeline-stack">
-            <PipelineRevisionList kind="run" onOpen={goToRun} entries={runs.data.map((run) => ({
+            <PipelineRunList onOpen={goToRun} entries={runs.data.map((run) => ({
               id: run.id, name: run.id, detail: `Workflow revision ${run.version.revision.slice(0, 12)}`, menu: actions(run),
             }))} />
           </section>}

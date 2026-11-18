@@ -209,7 +209,7 @@
 .file-dialog :is(input, select, textarea), .file-workspace :is(input, select, textarea) { accent-color: var(--primary); }
 .file-dialog > label { display: grid; gap: 5px; font-size: 12px; }
 .file-dialog :is(input, select, textarea):not([type=checkbox]),
-.note-property-row input, .note-control-select {
+.note-property-row input {
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -335,7 +335,7 @@
 .note-diagram { display: grid; place-items: center; margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: #eae9f0; }
 .note-diagram img { display: block; max-width: 100%; height: auto; }
 .note-preview-error { color: var(--negative, #e98989); }
-.note-pdf, .note-media-canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; margin: 0 auto; }
+.note-pdf { display: block; max-width: 100%; height: auto; border-radius: 6px; margin: 0 auto; }
 .note-rewrite-list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
 .note-rewrite-list summary { padding: 7px 0; cursor: pointer; font-size: 12px; }
 

@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { defaultAppearance, useAppAppearance } from "@/settings-appearance";
 import SettingsDialog from "@/settings-dialog";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 const { invoke, getVersion } = vi.hoisted(() => ({ invoke: vi.fn(), getVersion: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -19,7 +19,7 @@ function AppearanceRoot() {
   return null;
 }
 
-function openSettings({ checkout = exampleCheckout, ...options }: {
+function openSettings({ checkout = testCheckout, ...options }: {
   initialPage?: string; checkout?: ProjectCheckout | null;
 }) {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -193,7 +193,7 @@ it("saves execution capacity in the same device scheduler used by the queue", as
   expect(save().disabled).toBe(true);
   await user.type(capacity(), "5");
   await user.click(save());
-  expect(invoke).toHaveBeenCalledWith("project_job_queue", { projectId: exampleCheckout.projectId });
+  expect(invoke).toHaveBeenCalledWith("project_job_queue", { projectId: testCheckout.projectId });
   expect(invoke).toHaveBeenCalledWith("set_job_queue_capacity", { capacity: 5 });
   await waitFor(() => expect(save().disabled && !capacity().disabled).toBe(true));
   expect(capacity().value).toBe("5");
@@ -261,7 +261,7 @@ it("saves Git automation independently of its completion milestone and destinati
   await waitFor(() => expect(policy.value).toBe("automatic_commit_user_merge"));
   await user.selectOptions(policy, "user_commits_and_merges");
   expect(invoke).toHaveBeenCalledWith("set_delivery_git_policy", {
-    projectId: exampleCheckout.projectId, policy: "user_commits_and_merges",
+    projectId: testCheckout.projectId, policy: "user_commits_and_merges",
   });
   await waitFor(() => expect(policy.value).toBe("user_commits_and_merges"));
   await user.selectOptions(policy, "automatic_local_commit_and_merge");
@@ -275,14 +275,14 @@ it("saves Git automation independently of its completion milestone and destinati
   await user.type(screen.getByLabelText("Merge destination"), "release/integration");
   await user.click(save);
   expect(invoke).toHaveBeenCalledWith("set_delivery_milestone_policy", {
-    projectId: exampleCheckout.projectId, policy: { milestone: "verified_merge", destinationBranch: "release/integration" },
+    projectId: testCheckout.projectId, policy: { milestone: "verified_merge", destinationBranch: "release/integration" },
   });
   const drift = screen.getByLabelText<HTMLSelectElement>("When the destination branch advances");
   expect(drift.value).toBe("pause");
   await user.selectOptions(drift, "prepare_and_recheck");
   await waitFor(() => expect(drift.value).toBe("prepare_and_recheck"));
   expect(invoke).toHaveBeenCalledWith("set_delivery_destination_drift_policy", {
-    projectId: exampleCheckout.projectId, policy: "prepare_and_recheck",
+    projectId: testCheckout.projectId, policy: "prepare_and_recheck",
   });
   await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "destination branch advances");
   await user.click(screen.getByRole("button", { name: "When the destination branch advances in Git and delivery" }));

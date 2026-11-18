@@ -16,7 +16,7 @@ import type { Delivery, Hierarchy, Item, WorkflowStatus } from "@/project-agile-
 import { ProjectTasksWorkspace } from "@/project-tasks";
 import type { WorkspaceWorkInput } from "@/project-work-editor";
 import type { TaskParticipantAttempt } from "@/task-participants";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const gestures = vi.hoisted(() => ({ drop: undefined as ((event: DragEndEvent) => void) | undefined }));
@@ -29,7 +29,7 @@ vi.mock("@dnd-kit/core", async (original) => ({
 }));
 afterEach(() => { cleanup(); gestures.drop = undefined; vi.resetAllMocks(); });
 
-const { projectId } = exampleCheckout;
+const { projectId } = testCheckout;
 const epic = { id: "release", title: "Release epic" };
 const parent = { id: "docs", title: "Documentation" };
 const child = { id: "review", title: "Proofread samples" };
@@ -124,7 +124,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
       case "task_checklist_mode_settings": return { effectiveMode: checklistRun.mode, overrideMode: null };
       case "task_branch_strategy": return { effectiveStrategy: "independent", overrideStrategy: null, locked: false };
       case "project_work_fields": return { title: parent.title, priority: 0, acceptanceCriteria: [], prerequisites: [], blockers: [] };
-      case "project_checklist_dispatch": return { workflowRunId: "item-workflow", checkoutId: exampleCheckout.checkoutId,
+      case "project_checklist_dispatch": return { workflowRunId: "item-workflow", checkoutId: testCheckout.checkoutId,
         planRevision: "item-plan", releaseId: "item-release", unitId: "item-unit" };
       case "project_model_defaults": return { conversation: null, planning: null, implementation: activity?.models?.[0]?.selection ?? null };
       case "queue_project_checklist_work": return { id: "checklist-job" };
@@ -183,7 +183,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
   const openQueueJob = vi.fn();
-  const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout}
+  const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={testCheckout}
     openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()}
     openQueueJob={activity?.jobs ? openQueueJob : undefined} /></QueryClientProvider>);
   const user = userEvent.setup();
@@ -325,7 +325,7 @@ it("opens exact active attempts and task job approvals and keeps observed subage
   const interrupted: TaskParticipantAttempt = { ...active, runId: "interrupted-attempt", conversationId: "old-chat",
     ordinal: 1, status: "interrupted", reportedModel: "previous-model" };
   const waitingJob: JobInspection = {
-    job: { id: "approved-job-target", projectId, checkoutId: exampleCheckout.checkoutId, taskId: parent.id,
+    job: { id: "approved-job-target", projectId, checkoutId: testCheckout.checkoutId, taskId: parent.id,
       worktreeOwnerTaskId: parent.id, origin: { type: "operator" }, context: null, mode: "read_only", priority: 0,
       queueState: "queued", latestAttempt: null, queuedRecovery: null, downstreamWait: null, pipeline: null, kind: "agent" },
     blockers: [{ type: "approval", approvalId: "exact-approval" }], recoveryActions: [],

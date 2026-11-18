@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@xyflow/react", async (original) => ({
@@ -28,7 +28,7 @@ const pipeline = { key: "pipeline", name: "Delivery", body: { kind: "pipeline", 
 } } };
 const draft = { id: "draft", revision: "current", conversationId: null, request: null, publication: null,
   package: { name: "Delivery package", members: [pipeline, role] } };
-const scope = { projectId: exampleCheckout.projectId, draftId: draft.id };
+const scope = { projectId: testCheckout.projectId, draftId: draft.id };
 const model = { modelId: "fixture", profileId: "desktop", provider: "codex" };
 const proposal = { inputs: {}, outputs: { summary: { kind: "rendered_text" } }, routes: ["review", "deliver"] };
 
@@ -61,7 +61,7 @@ function mountPromptEditor(opened: typeof draft) {
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout}
+    <WorkflowPackageEditor draftId={draft.id} checkout={testCheckout}
       openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   return userEvent.setup();

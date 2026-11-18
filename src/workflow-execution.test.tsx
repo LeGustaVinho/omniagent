@@ -13,7 +13,7 @@ import { WorkflowDiffStage } from "@/workflow-execution-diff";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import { executionCanvasGraph, needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
   type ExecutionPinnedNode, type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@xyflow/react", async (original) => {
@@ -35,7 +35,7 @@ vi.mock("@xyflow/react", async (original) => {
 
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-const projectId = exampleCheckout.projectId;
+const projectId = testCheckout.projectId;
 const runId = "workflow-original";
 const version = { id: "pipeline", revision: "immutable-original-graph" };
 const logical = { planRevision: "selected-plan", taskId: "linked-task", unit: { id: "logical-one", ordinal: 1, purpose: "First delivery" } };
@@ -48,7 +48,7 @@ function node(id: string, title: string, inputs: ExecutionPinnedNode["definition
 function job(nodeId: string, attempts: ExecutionJob["attempts"], kind: Job["kind"] = "agent"): ExecutionJob {
   const last = attempts.at(-1);
   return { nodeId, unitId: null, inputs: nodeId === "planner" ? { context: "original-markdown" } : {}, attempts,
-    job: { id: `job-${nodeId}`, projectId, checkoutId: exampleCheckout.checkoutId, taskId: null, worktreeOwnerTaskId: null, origin: { type: "pipeline" },
+    job: { id: `job-${nodeId}`, projectId, checkoutId: testCheckout.checkoutId, taskId: null, worktreeOwnerTaskId: null, origin: { type: "pipeline" },
       kind, pipeline: { pipelineRunId: runId, nodeInstanceId: nodeId, planRevision: null, release: null }, context: null,
       mode: "read_only", priority: 0, queueState: "queued", queuedRecovery: null, downstreamWait: null,
       latestAttempt: last ? { ...last, cancelRequested: false, recovery: last.previousRunId ? "retry" : null } : null } };
@@ -108,7 +108,7 @@ it("shows a Function as one live graph node with its published result and intern
     if (command === "inspect_workflow_execution") return snapshot;
     throw new Error(command);
   });
-  render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={exampleCheckout}
+  render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={testCheckout}
     target={`run:${runId}`} openWorkspace={vi.fn()}
     openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
   const user = userEvent.setup();
@@ -140,7 +140,7 @@ it("opens a legacy run link in Runs and navigates between the parent backlog and
   const openWorkspace = vi.fn();
   function Harness() {
     const [target, setTarget] = useState(runId);
-    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
+    return <PipelinesWorkspace checkout={testCheckout} target={target}
       openWorkspace={(workspace, next) => { openWorkspace(workspace, next); setTarget(next ?? ""); }}
       openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
@@ -181,7 +181,7 @@ it("opens the real Builder from the Runs empty state", async () => {
   vi.mocked(invoke).mockResolvedValue([]);
   const openWorkspace = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} target="runs"
+    <PipelinesWorkspace checkout={testCheckout} target="runs"
       openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const runs = within(screen.getByRole("region", { name: "Workflow runs" }));
@@ -197,7 +197,7 @@ it("navigates from the context of the clicked saved run", async () => {
   ]);
   const openWorkspace = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} target="runs"
+    <PipelinesWorkspace checkout={testCheckout} target="runs"
       openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -233,7 +233,7 @@ it.each(["checkbox", "context menu"])("hands saved responses from the %s to the 
     }],
   };
   const wrongCheckout = { ...snapshot, run: { ...snapshot.run, id: "foreign-checkout-run" },
-    jobs: snapshot.jobs.map((row) => ({ ...row, job: { ...row.job, checkoutId: exampleCheckout.checkoutId } })) };
+    jobs: snapshot.jobs.map((row) => ({ ...row, job: { ...row.job, checkoutId: testCheckout.checkoutId } })) };
   const commit = "a".repeat(40);
   const group = {
     id: "review-comparison", sourceCheckoutId, commit, tree: "worktree",
@@ -265,7 +265,7 @@ it.each(["checkbox", "context menu"])("hands saved responses from the %s to the 
   });
   function Harness() {
     const [target, setTarget] = useState("compare");
-    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
+    return <PipelinesWorkspace checkout={testCheckout} target={target}
       openWorkspace={(_workspace, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -444,7 +444,7 @@ it("reads only the recorded agent response and drops it on history invalidation"
     return "Original agent text";
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const navigation = { checkout: exampleCheckout, openWorkspace: vi.fn(), openActivity: vi.fn() };
+  const navigation = { checkout: testCheckout, openWorkspace: vi.fn(), openActivity: vi.fn() };
   render(<QueryClientProvider client={client}>
     <WorkflowNodeEvidence snapshot={snapshot} node={agent} navigation={navigation} />
   </QueryClientProvider>);
@@ -557,8 +557,8 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
     ],
   };
   let approvalPreview = { revision: "rule-reviewed", settings: { mode: "automatic", taskId: task.taskId,
-    sourceCheckoutId: exampleCheckout.checkoutId, maximumUnits: 2, ifUnmet: "wait" },
-    facts: { planRevision: "selected-plan", taskId: task.taskId, sourceCheckoutId: exampleCheckout.checkoutId, unitCount: 2 },
+    sourceCheckoutId: testCheckout.checkoutId, maximumUnits: 2, ifUnmet: "wait" },
+    facts: { planRevision: "selected-plan", taskId: task.taskId, sourceCheckoutId: testCheckout.checkoutId, unitCount: 2 },
     outcome: "conditions_met", allowsHuman: false, decisionArtifactId: "approval-receipt" as string | null };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
     switch (command) {
@@ -593,7 +593,7 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
       default: throw new Error(`Unexpected ${command}`);
     }
   });
-  const props = { checkout: exampleCheckout,
+  const props = { checkout: testCheckout,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openQueueJob: vi.fn() };
   function NavigablePipelines() {
     const [target, setTarget] = useState<string | undefined>("automations");
@@ -715,7 +715,7 @@ it("shows a pending decision only for the pinned node in the current plan and se
     }
     throw new Error(`Unexpected ${command}`);
   });
-  const props = { checkout: exampleCheckout, target: `run:${runId}`,
+  const props = { checkout: testCheckout, target: `run:${runId}`,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
   const user = userEvent.setup();
@@ -772,7 +772,7 @@ it("opens comparison outcomes for the exact wired input and preserves the candid
     }
     throw new Error(`Unexpected ${command}`);
   });
-  const props = { checkout: exampleCheckout, target: `run:${runId}`,
+  const props = { checkout: testCheckout, target: `run:${runId}`,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
   const user = userEvent.setup();

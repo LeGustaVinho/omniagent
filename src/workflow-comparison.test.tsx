@@ -9,7 +9,7 @@ import { WorkflowComparisons } from "@/workflow-comparison";
 import { comparisonOutcome } from "@/workflow-comparison-outcomes";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import type { Job } from "@/bindings/Job";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { workflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 
@@ -26,7 +26,7 @@ const options = profiles.map((selection, index) => ({
 function mount(target?: string, fromNavigation = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const Surface = fromNavigation ? PipelinesWorkspace : WorkflowComparisons;
-  return render(<QueryClientProvider client={client}><Surface checkout={exampleCheckout} target={target}
+  return render(<QueryClientProvider client={client}><Surface checkout={testCheckout} target={target}
       openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
 }
 
@@ -59,7 +59,7 @@ it("pins the selected Git revision and preserves selection order for same-provid
   expect(order.getAllByText(/\$1.25 \/ 1M tokens/)).toHaveLength(2);
   await user.click(screen.getByRole("button", { name: "Start comparison" }));
   expect(invoke).toHaveBeenCalledWith("start_model_comparison", {
-    projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId, commit,
+    projectId: testCheckout.projectId, checkoutId: testCheckout.checkoutId, commit,
     prompt: "Review the changes", selections: [profiles[1], profiles[0]],
   });
   expect(within(await screen.findByRole("list", { name: "Comparison results" })).getAllByRole("status").map((status) => status.textContent))
@@ -71,7 +71,7 @@ it("pins the selected Git revision and preserves selection order for same-provid
 });
 
 it("routes from Knowledge through Pipelines to a comparison pinned to the reviewed saved revision", async () => {
-  const { projectId, checkoutId } = exampleCheckout;
+  const { projectId, checkoutId } = testCheckout;
   const revision = { id: "saved-revision", checkoutId, relativePath: "notes/Decisão técnica.md", sha256: "b".repeat(64), baseCommit: commit };
   const markdown = "# Pinned requirement\r\nOriginal constraints\r\n";
   const target = workflowComparisonNoteTarget({ checkoutId, revisionId: revision.id, relativePath: revision.relativePath, sha256: revision.sha256 });
@@ -115,7 +115,7 @@ it("routes from Knowledge through Pipelines to a comparison pinned to the review
 });
 
 it("does not offer a working checkout comparison for a mismatched note revision", async () => {
-  const { checkoutId } = exampleCheckout;
+  const { checkoutId } = testCheckout;
   const target = workflowComparisonNoteTarget({ checkoutId, revisionId: "expected", relativePath: "Note.md", sha256: "d".repeat(64) });
   vi.mocked(invoke).mockImplementation(async (name) => {
     if (name === "conversation_models" || name === "model_comparisons") return [];
@@ -153,7 +153,7 @@ it("shows each dispatch's observed instruction reads and tool use alongside the 
   expect(within(rows[0]!).getByText("Tools used · Read")).toBeTruthy();
   expect(within(rows[1]!).getByText("expected")).toBeTruthy();
   expect(within(rows[1]!).getByText("Tools used · Search")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("model_comparison_environments", { projectId: exampleCheckout.projectId, groupId: "comparison" });
+  expect(invoke).toHaveBeenCalledWith("model_comparison_environments", { projectId: testCheckout.projectId, groupId: "comparison" });
 });
 
 it("keeps the original successful response visible next to a timed-out candidate", async () => {
@@ -224,7 +224,7 @@ it("queues a separate synthesis from only selected successful run IDs and restor
   await user.click(await screen.findByRole("menuitemradio", { name: /Second Codex model/ }));
   await user.click(screen.getByRole("button", { name: "Queue synthesis" }));
   expect(invoke).toHaveBeenCalledWith("start_model_comparison_synthesis", {
-    projectId: exampleCheckout.projectId, sources: { groupId: "sources", runIds: ["first-run"] }, selection: profiles[1],
+    projectId: testCheckout.projectId, sources: { groupId: "sources", runIds: ["first-run"] }, selection: profiles[1],
   });
   expect(await screen.findByText("Separate synthesis answer")).toBeTruthy();
   expect(screen.getByText("Original saved answer")).toBeTruthy();
@@ -238,7 +238,7 @@ it("queues a separate synthesis from only selected successful run IDs and restor
 });
 
 it("passes exact comparison inputs through the normal plan-review action", async () => {
-  const scope = { projectId: exampleCheckout.projectId, runId: "workflow-run" };
+  const scope = { projectId: testCheckout.projectId, runId: "workflow-run" };
   const group = { id: "comparison", commit, tree: "tree", prompt: "Check requirements", candidates: [
     { selection: profiles[0], jobId: "source-job", runId: "source-run", dispatchId: "source-dispatch", state: "succeeded" },
   ] };

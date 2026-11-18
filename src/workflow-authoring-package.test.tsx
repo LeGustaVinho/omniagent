@@ -8,7 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { PipelineBuilderLanding } from "@/workflow-authoring-package";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -81,7 +82,7 @@ function mount({ stale = false, publication = null, openWorkspace = vi.fn(), mem
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft"
+    <PipelineAuthoringEditor checkout={testCheckout} draftId="package:draft"
       openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   return userEvent.setup();
@@ -94,12 +95,12 @@ async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
   const candidate = await screen.findByRole("option", { name: /Repository checker/ });
   await user.selectOptions(screen.getByRole("combobox", { name: "Published artifact" }), candidate);
   await user.click(screen.getByRole("button", { name: "Edit this revision in the draft" }));
-  expect(invoke).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: exampleCheckout.projectId, version });
+  expect(invoke).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: testCheckout.projectId, version });
   const text = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Draft document" });
   await waitFor(() => expect(JSON.parse(text.value).members[1]?.base).toEqual(version));
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
-    projectId: exampleCheckout.projectId, draftId: "draft", expectedRevision: "first-review",
+    projectId: testCheckout.projectId, draftId: "draft", expectedRevision: "first-review",
     package: expect.objectContaining({ members: [pipeline, expect.objectContaining({ base: version })] }),
   }));
   await screen.findByTitle(published.reviewedRevision);
@@ -117,7 +118,7 @@ it("opens exact published bases, confirms one saved revision and shows every pac
   expect(await dialog.findByText("Field changes (1)")).toBeTruthy();
   await user.click(dialog.getByRole("button", { name: "Confirm publication" }));
   expect(invoke).toHaveBeenCalledWith("publish_reviewed_workflow_package", {
-    projectId: exampleCheckout.projectId, draftId: "draft", reviewedRevision: published.reviewedRevision,
+    projectId: testCheckout.projectId, draftId: "draft", reviewedRevision: published.reviewedRevision,
   });
   const receipt = within(await screen.findByRole("region", { name: "Publication receipt" }));
   expect(receipt.getByText("result-v1")).toBeTruthy();
@@ -151,9 +152,9 @@ it("runs the exact pipeline from its package receipt and opens its execution gra
   await user.click(screen.getByRole("button", { name: "Start workflow" }));
   expect(invoke).toHaveBeenCalledWith("launch_workflow_manual", {
     request: {
-      projectId: exampleCheckout.projectId,
+      projectId: testCheckout.projectId,
       workflow: { id: "different-pipeline", revision: "result-v1" },
-      source: { checkoutId: exampleCheckout.checkoutId, revisionId: "saved-brief" },
+      source: { checkoutId: testCheckout.checkoutId, revisionId: "saved-brief" },
       workId: null,
       requestId: expect.any(String),
     },
@@ -199,7 +200,7 @@ it("pins the chosen pipeline model on unbound stages and locally edited presets 
 
   const configured = { ...agent, model: selected };
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
-    projectId: exampleCheckout.projectId, draftId: initial.id, expectedRevision: initial.revision,
+    projectId: testCheckout.projectId, draftId: initial.id, expectedRevision: initial.revision,
     package: { name: initial.package.name, members: [
       { ...root, body: { ...root.body, graph: { ...root.body.graph,
         nodes: [...pipeline.body.graph.nodes, { ...direct, configuration: configured }, fixed, bound, referenced],
@@ -223,9 +224,9 @@ it("starts a named pipeline directly in the visual Builder", async () => {
     if (command === "create_workflow_package") return { id: "visual-draft", revision: "new", package: (args as { package: unknown }).package };
     throw Error(command);
   });
-  const projectId = exampleCheckout.projectId;
+  const projectId = testCheckout.projectId;
   render(<QueryClientProvider client={new QueryClient()}>
-    <PipelineBuilderLanding checkout={exampleCheckout} openWorkspace={openWorkspace} />
+    <PipelineBuilderLanding checkout={testCheckout} openWorkspace={openWorkspace} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   expect(await screen.findByText("Existing pipeline draft")).toBeTruthy();

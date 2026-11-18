@@ -16,10 +16,3 @@ export interface WorkspaceProps {
 }
 
 export type QueueJobFocus = { projectId: string; jobId: string };
-
-export const exampleCheckout: ProjectCheckout = {
-  projectId: "example-project",
-  repositoryRoot: "Example repository",
-  checkoutId: "example-worktree",
-  checkoutRoot: "Example repository",
-};

@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { downloadArtifact } from "@/download-artifact";
 import { RunInspector } from "@/inspection-panel";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@/download-artifact", () => ({ downloadArtifact: vi.fn(), decodeArtifactBytes: vi.fn() }));
@@ -27,7 +27,7 @@ function readDownload(blob: Blob) {
 it("opens recorded run pages and loads exact evidence on selection", async () => {
   const conversationId = "recorded-conversation";
   const run: RunRecord = {
-    id: "recorded-run", projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId,
+    id: "recorded-run", projectId: testCheckout.projectId, checkoutId: testCheckout.checkoutId,
     turnId: "recorded-turn", status: "succeeded",
   };
   vi.mocked(invoke).mockImplementation(async (command) => {
@@ -54,7 +54,7 @@ it("opens recorded run pages and loads exact evidence on selection", async () =>
     }
   });
   const props = {
-    checkout: exampleCheckout, runId: run.id, conversationId, onClose: vi.fn(),
+    checkout: testCheckout, runId: run.id, conversationId, onClose: vi.fn(),
     openWorkspace: vi.fn(), openChanges: vi.fn(), openActivity: vi.fn(),
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -85,7 +85,7 @@ it("opens recorded run pages and loads exact evidence on selection", async () =>
 });
 
 it("copies captured command output and failure evidence for the exact inspected run", async () => {
-  const projectId = exampleCheckout.projectId;
+  const projectId = testCheckout.projectId;
   const run: RunRecord = { id: "command-attempt", projectId, checkoutId: "attempt-worktree", turnId: "command-turn", status: "failed" };
   const process = { code: 17, cancelled: false };
   const stdout = "  First line\r\nSecond line — ç\r\n";
@@ -107,7 +107,7 @@ it("copies captured command output and failure evidence for the exact inspected 
     throw new Error(`Unexpected ${command}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={run.id}
+  render(<QueryClientProvider client={client}><RunInspector checkout={testCheckout} runId={run.id}
  onClose={vi.fn()} openWorkspace={openWorkspace} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("region", { name: "Command activity" }));
@@ -168,7 +168,7 @@ it("copies captured command output and failure evidence for the exact inspected 
   await user.click(draft.getByRole("button", { name: "Add to draft" }));
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("conversations", "diagnostic-chat"));
   expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
-    checkoutId: exampleCheckout.checkoutId, conversationId: "diagnostic-chat", context: expect.stringContaining("\nfailed\n```"),
+    checkoutId: testCheckout.checkoutId, conversationId: "diagnostic-chat", context: expect.stringContaining("\nfailed\n```"),
   });
 
   fireEvent.contextMenu(activity.getByText("Exit code 17"));
@@ -184,9 +184,9 @@ it("copies captured command output and failure evidence for the exact inspected 
 
 it("compares only recorded attempts of the inspected conversation and opens the selected provenance", async () => {
   const conversationId = "conversation";
-  const projectId = exampleCheckout.projectId;
+  const projectId = testCheckout.projectId;
   const runId = "current-run";
-  const recorded = { id: runId, projectId, checkoutId: exampleCheckout.checkoutId, turnId: "turn-current", status: "succeeded" };
+  const recorded = { id: runId, projectId, checkoutId: testCheckout.checkoutId, turnId: "turn-current", status: "succeeded" };
   const openActivity = vi.fn();
   vi.mocked(invoke).mockImplementation(async (command, payload) => {
     switch (command) {
@@ -215,7 +215,7 @@ it("compares only recorded attempts of the inspected conversation and opens the 
     }
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={runId} conversationId={conversationId}
+  render(<QueryClientProvider client={client}><RunInspector checkout={testCheckout} runId={runId} conversationId={conversationId}
  onClose={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("complementary", { name: "Conversation activity" }));

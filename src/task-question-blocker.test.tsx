@@ -8,7 +8,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { RunInspector } from "@/inspection-panel";
 import { ProjectTasksWorkspace } from "@/project-tasks";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
@@ -17,7 +18,7 @@ it.each([
   { state: "live", status: "waiting_for_input", command: "answer_conversation_question" },
   { state: "saved", status: "interrupted", command: "answer_saved_conversation_question" },
 ] as const)("opens and answers the originating agent's $state question from a blocked Task", async ({ state, status, command }) => {
-  const { projectId, checkoutId } = exampleCheckout;
+  const { projectId, checkoutId } = testCheckout;
   const task = { id: "task", title: "Update the contract" };
   const origin = { runId: "child-run", conversationId: "child-conversation", requestId: "9" };
   const scoped = { runId: origin.runId, conversationId: origin.conversationId };
@@ -70,7 +71,7 @@ it.each([
       inspect({ runId, conversationId, focusQuestion: questionRequestId === undefined ? undefined : { requestId: questionRequestId } });
     };
     const props: WorkspaceProps = {
-      checkout: exampleCheckout, openActivity,
+      checkout: testCheckout, openActivity,
       openWorkspace: vi.fn(), openChanges: vi.fn(),
     };
     return <>

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { downloadArtifact } from "@/download-artifact";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import type { ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@/download-artifact", async (original) => ({
   ...await original<typeof import("@/download-artifact")>(),
@@ -23,7 +23,7 @@ function node(id: string): ExecutionPinnedNode {
 }
 
 it("copies and downloads the clicked historical output and follows only its recorded input references", async () => {
-  const scope = { projectId: exampleCheckout.projectId, workflowRunId: "workflow-run", workflowVersion: { id: "workflow", revision: "pinned-workflow" } };
+  const scope = { projectId: testCheckout.projectId, workflowRunId: "workflow-run", workflowVersion: { id: "workflow", revision: "pinned-workflow" } };
   const producer = node("producer");
   const consumer = node("consumer");
   function output(stage: ExecutionPinnedNode, id: string, evidence: unknown, current: boolean): ExecutionOutput {
@@ -47,7 +47,7 @@ it("copies and downloads the clicked historical output and follows only its reco
     outputs: [exactInput, currentInput, exactOutput, currentOutput],
   };
   render(<WorkflowNodeEvidence node={consumer} unitId="recorded-unit" snapshot={snapshot}
-    navigation={{ checkout: exampleCheckout, openWorkspace: vi.fn(), openActivity: vi.fn() }} />);
+    navigation={{ checkout: testCheckout, openWorkspace: vi.fn(), openActivity: vi.fn() }} />);
   const user = userEvent.setup();
   const older = within(screen.getByText("older-output").closest("section")!);
   const result = {

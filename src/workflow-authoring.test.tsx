@@ -6,7 +6,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BuilderAuthoring, PipelineAuthoringEditor } from "@/workflow-authoring";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -15,7 +15,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 const selection = { provider: "codex", profileId: "local", modelId: "authoring-model" } as const;
 const version = { id: "base", revision: "published-revision" };
-const checkout = exampleCheckout;
+const checkout = testCheckout;
 const pipelineBase = { ...version, kind: "pipeline", destination: "project" };
 const catalog = [
   { version: pipelineBase, name: "Published review" },
@@ -132,7 +132,7 @@ it("routes feedback with the loaded draft revision and links the source conversa
   const open = vi.fn();
   const user = userEvent.setup();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor draftId={draft.id} checkout={exampleCheckout}
+    <PipelineAuthoringEditor draftId={draft.id} checkout={testCheckout}
       openWorkspace={open} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   await user.click(await screen.findByRole("button", { name: "Open source conversation" }));
@@ -144,7 +144,7 @@ it("routes feedback with the loaded draft revision and links the source conversa
   await waitFor(() => expect(request).toHaveProperty("disabled", false));
   await user.click(request);
   expect(invoke).toHaveBeenCalledWith("request_workflow_authoring_changes", {
-    projectId: exampleCheckout.projectId, draftId: draft.id, selectedRevision: draft.head.id,
+    projectId: testCheckout.projectId, draftId: draft.id, selectedRevision: draft.head.id,
     selection, effort: null, feedback: "Keep the checkout pinned",
   });
 });

@@ -2,19 +2,16 @@ import cytoscape from "cytoscape";
 import { CircleDot, Focus, Network, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
-import { fileName, type ExampleFile } from "@/ide-knowledge-data";
+import { fileName } from "@/ide-knowledge-data";
 import { isContextKey, useNoteContextMenu } from "@/knowledge-context";
-import { exampleNoteGraph, indexNoteGraph, selectNoteGraph, type NoteGraphProjection } from "@/knowledge-graph-model";
+import { indexNoteGraph, selectNoteGraph, type NoteGraphProjection } from "@/knowledge-graph-model";
 import { ResizablePanel } from "@/panel-resize";
 
 export type { NoteGraphProjection } from "@/knowledge-graph-model";
 
 const elementId = (path: string, id?: number) => `note:${id ?? path}`;
-const emptyExamples: readonly ExampleFile[] = [];
-
-export default function NoteGraph({ files = emptyExamples, projection, selected, initialCenter, onOpen, onNodeActions }: {
-  files?: readonly ExampleFile[];
-  projection?: NoteGraphProjection;
+export default function NoteGraph({ projection, selected, initialCenter, onOpen, onNodeActions }: {
+  projection: NoteGraphProjection;
   selected?: string;
   initialCenter?: string;
   onOpen: (path: string) => void;
@@ -30,7 +27,7 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
   const [filter, setFilter] = useState("");
   const [tag, setTag] = useState("");
   const { open: openContextMenu, overlay } = useNoteContextMenu();
-  const indexed = useMemo(() => indexNoteGraph(projection ?? exampleNoteGraph(files)), [files, projection]);
+  const indexed = useMemo(() => indexNoteGraph(projection), [projection]);
   const hasActive = selected !== undefined && indexed.byPath.has(selected);
   const anchor = scope === "local" ? center ?? selected : undefined;
   const local = anchor && indexed.byPath.has(anchor) ? anchor : undefined;

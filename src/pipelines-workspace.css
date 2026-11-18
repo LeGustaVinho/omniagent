@@ -17,7 +17,6 @@
 .pipeline-card-heading,
 .pipeline-actions,
 .pipeline-note,
-.pipeline-warning,
 .pipeline-plugin {
   display: flex;
   align-items: center;
@@ -104,23 +103,6 @@
   background: var(--card);
 }
 
-.pipeline-draft-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: .55rem 1rem;
-  padding-block: .35rem .65rem;
-}
-.pipeline-draft-revision {
-  display: grid;
-  gap: .25rem;
-  min-width: 0;
-  color: var(--muted-foreground);
-  font-size: .75rem;
-  overflow-wrap: anywhere;
-}
-
 .pipeline-inline-field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted-foreground); }
 .pipeline-inline-field input,
 .pipeline-inline-field select { min-width: 0; color: var(--foreground); }
@@ -141,7 +123,7 @@
   isolation: isolate;
 }
 
-:is(.pipeline-canvas, .pipeline-delivery-git-flow) .react-flow {
+.pipeline-canvas .react-flow {
   --xy-background-color: var(--background);
   --xy-controls-button-background-color: var(--card);
   --xy-controls-button-background-color-hover: var(--muted);
@@ -150,17 +132,6 @@
   --xy-controls-button-border-color: var(--border);
   --xy-edge-label-background-color: var(--background);
   --xy-edge-label-color: var(--muted-foreground);
-}
-
-.pipeline-delivery-git-flow { height: clamp(7rem, var(--panel-height, 9rem), 70dvh); }
-
-.pipeline-delivery-git-flow .react-flow {
-  --xy-node-background-color: var(--card);
-  --xy-node-color: var(--card-foreground);
-  --xy-node-border: 1px solid var(--border);
-  --xy-node-border-radius: .6rem;
-  --xy-handle-background-color: var(--primary);
-  --xy-handle-border-color: var(--card);
 }
 
 .pipeline-grid {
@@ -205,7 +176,6 @@
   animation: ui-reveal var(--motion-overlay) ease-out;
 }
 .pipeline-inspector-drawer { inset: 0 0 0 auto; }
-.pipeline-inspector-drawer .pipeline-stage-jump { display: block; }
 
 .pipeline-inspector-scroll { flex: 1; min-height: 0; overflow: auto; padding: 1rem; }
 .pipeline-editor > .resizable-panel > .panel-resize-handle[data-edge="bottom"] { display: none; }
@@ -221,9 +191,6 @@
 .pipeline-inspector-scroll > header > h2,
 .pipeline-section-heading h2 { font-size: 1rem; font-weight: 630; }
 
-.pipeline-stage-jump { display: none; }
-.pipeline-stage-jump select { width: 100%; margin-block-start: 0.35rem; padding: 0.3rem 0.55rem; border: 1px solid var(--border); border-radius: 0.35rem; background: var(--background); }
-
 .pipeline-banner {
   display: flex;
   align-items: center;
@@ -237,13 +204,9 @@
 
 .pipeline-form label,
 .pipeline-stack,
-.pipeline-select-list,
-.pipeline-dependencies,
-.pipeline-checks,
-.pipeline-attempts { display: grid; align-content: start; gap: 0.55rem; min-width: 0; }
+.pipeline-select-list { display: grid; align-content: start; gap: 0.55rem; min-width: 0; }
 
 .pipeline-form label { gap: 0.3rem; min-width: 0; }
-.pipeline-form-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
 
 .pipeline-form input:not([type="checkbox"], [type="radio"]),
 .pipeline-form select,
@@ -264,11 +227,8 @@
 .pipeline-form legend { margin-block-end: 0.3rem; color: var(--muted-foreground); }
 .pipeline-form fieldset { border-block-start: 1px solid var(--border); padding-block-start: 0.4rem; }
 .pipeline-form :is(input[type="checkbox"], input[type="radio"]),
-.pipeline-checks input,
 .pipeline-checkline input { accent-color: var(--primary); margin-block-start: 0.15rem; }
 .pipeline-form .pipeline-checkline,
-.pipeline-form .pipeline-checks label,
-.pipeline-checks label,
 .pipeline-checkline { display: flex; align-items: start; gap: 0.4rem; }
 
 .pipeline-status {
@@ -283,14 +243,11 @@
   text-transform: capitalize;
 }
 
-.pipeline-self-start { justify-self: start; }
 .pipeline-status[data-status="running"] { border-inline-start-color: var(--primary); }
 .pipeline-status[data-status="failed"] { border-inline-start-color: #ef757f; }
 .pipeline-status[data-status="completed"],
 .pipeline-status[data-status="succeeded"] { border-inline-start-color: #58c996; }
 .pipeline-status[data-status="waiting"] { border-inline-start-color: #e7ad51; }
-.pipeline-warning { color: #d37d26; }
-[data-app-theme="dark"] .pipeline-warning { color: #e7ad51; }
 
 .pipeline-meta,
 .pipeline-note,
@@ -344,10 +301,6 @@
 .pipeline-select-list small { display: block; color: var(--muted-foreground); }
 .workflow-run-picker .workflow-execution-field { min-width: 0; }
 .pipeline-end { margin-inline-start: auto; flex: none; }
-
-.pipeline-attempts { padding-inline-start: 0.15rem; }
-.pipeline-attempts strong { font-size: 0.75rem; }
-.pipeline-attempts p { font-size: 0.75rem; color: var(--muted-foreground); }
 .pipeline-plugin { padding-block: 0.5rem; border-block-start: 1px solid var(--border); }
 
 @container pipelines (width < 700px) {
@@ -362,7 +315,6 @@
   }
   .pipeline-editor > .pipeline-canvas > .panel-resize-handle[data-edge="bottom"] { display: block; }
   .pipeline-two-columns { grid-template-columns: minmax(0, 1fr); }
-  .pipeline-stage-jump { display: block; }
   .pipeline-workspace-heading,
   .pipeline-view-content { padding-inline: 0.85rem; }
 }

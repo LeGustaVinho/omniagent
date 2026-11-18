@@ -11,7 +11,7 @@ import { ConversationTemplateEditor } from "@/conversation-template-editor";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import type { WorkflowDefinition, WorkflowGraph } from "@/workflow-graph-model";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@xyflow/react", async (load) => ({
@@ -31,7 +31,7 @@ const other: ModelOption = {
   rating: { intelligenceTenths: 763, priceScore: 47, apiReferenceCents: 250 },
 };
 const props = {
-  checkout: exampleCheckout, openWorkspace: vi.fn(),
+  checkout: testCheckout, openWorkspace: vi.fn(),
   openActivity: vi.fn(), openChanges: vi.fn(),
 };
 const definitions: WorkflowDefinition[] = [

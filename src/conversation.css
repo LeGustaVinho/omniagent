@@ -35,7 +35,6 @@
 }
 .conv-navigation-close { position: absolute; inset: .525rem .65rem auto auto; }
 .conv-navigation-drawer .conv-session-heading { padding-inline-end: 2.4rem; }
-.conv-mobile-library { align-self: start; margin: .25rem .55rem; }
 
 .conv-pane {
   display: flex;
@@ -96,7 +95,6 @@
   .conv-heading-actions .conv-heading-more { display: inline-flex; }
   .conv-heading-actions .conv-secondary-wide { display: none; }
 }
-.conv-title-context { min-width: 0; max-width: 10rem; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .conv-icon-button, .conv-quiet-button, .conv-row-more, .conv-select {
   display: inline-flex;
@@ -113,9 +111,8 @@
 .conv-icon-button, .conv-row-more { width: 32px; flex: none; }
 .conv-icon-button:hover, .conv-quiet-button:hover, .conv-row-more:hover, .conv-select:hover { background: var(--muted); color: var(--foreground); }
 .conv-icon-button svg, .conv-quiet-button svg, .conv-row-more svg { width: .95rem; height: .95rem; flex: none; }
-.conv-sessions button:focus-visible, .conv-navigation-close:focus-visible, .conv-mobile-library:focus-visible,
-.conv-example-tab button:focus-visible, .conv-search:focus-within, .conv-pane button:focus-visible,
-.conv-pane select:focus-visible, .conv-pane summary:focus-visible {
+.conv-sessions button:focus-visible, .conv-navigation-close:focus-visible, .conv-search:focus-within,
+.conv-pane button:focus-visible, .conv-pane select:focus-visible, .conv-pane summary:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
@@ -171,7 +168,6 @@
   .conv-row-more { visibility: visible; }
 }
 .conv-sidebar-note { padding: .5rem .3rem; font-size: .725rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
-.conv-inline-action { color: var(--primary); text-decoration: underline; text-underline-offset: .15rem; }
 
 .conv-menu {
   z-index: 300;
@@ -312,9 +308,10 @@
 .conv-select { display: block; max-width: 100%; }
 .conv-stop, .conv-send { padding: .35rem .65rem; min-height: 1.9rem; font-size: .75rem; }
 .conv-send { min-height: 2.125rem; padding-inline: .8rem; border-radius: .55rem; }
-.conv-goal, .conv-goal-note { display: flex; align-items: start; gap: .5rem; }
 .conv-goal {
+  display: flex;
   align-items: center;
+  gap: .5rem;
   flex-wrap: wrap;
   margin-bottom: .45rem;
   padding: .45rem .55rem;
@@ -322,22 +319,11 @@
   border-radius: .6rem;
   background: var(--card);
 }
-.conv-goal > svg, .conv-goal-note > svg { flex: none; color: var(--primary); }
-.conv-goal-summary { display: grid; flex: 1 1 9rem; min-width: 0; font-size: .8rem; }
+.conv-goal > svg { flex: none; color: var(--primary); }
 .conv-goal-live { display: grid; max-height: 12rem; overflow: auto; }
 .conv-goal-heading { display: flex; align-items: center; gap: .4rem; font-size: .8rem; }
 .conv-goal-heading svg { flex: none; color: var(--primary); }
 .conv-goal-heading [role="status"] { color: var(--muted-foreground); }
-.conv-goal-objective { display: flex; align-items: center; justify-self: start; gap: .35rem; min-width: 0; max-width: 100%; text-align: start; }
-.conv-goal-objective:hover { color: var(--primary); }
-.conv-goal-objective svg { flex: none; color: var(--muted-foreground); }
-.conv-goal-summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv-goal-summary small, .conv-goal-note { color: var(--muted-foreground); font-size: .72rem; }
-.conv-goal-actions { display: flex; flex-wrap: wrap; gap: .15rem; }
-.conv-goal-note { padding: .25rem .35rem .1rem; }
-.conv-goal-revisions { max-height: 10rem; overflow: auto; color: var(--muted-foreground); font-size: .75rem; }
-.conv-goal-revisions summary { cursor: pointer; }
-.conv-goal-revisions li { margin-top: .4rem; padding: .35rem .55rem; border-inline-start: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .conv-activity {
   position: absolute;
@@ -370,59 +356,20 @@
   .conv-user { max-width: 95%; }
 }
 
-.conv-example-tabs { display: flex; min-height: 2.3rem; gap: .15rem; align-items: center; padding-inline: .4rem; background: var(--card); border-bottom: 1px solid var(--border); overflow: auto; flex: none; }
-.conv-example-tab { display: flex; gap: .15rem; align-items: center; flex: 0 0 auto; padding: 0 .25rem; border-radius: .45rem; min-width: 0; max-width: 15rem; color: var(--muted-foreground); }
-.conv-example-tab[data-active="true"] { background: var(--muted); color: var(--foreground); }
-.conv-example-tab > button:first-child { display: inline-flex; gap: .4rem; align-items: center; min-width: 0; font-size: .75rem; min-height: 1.9rem; }
-.conv-example-tab > button:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv-example-tab > button:first-child > svg { width: .8rem; min-width: .8rem; height: .8rem; }
-.conv-example-tab > .conv-icon-button { width: 1.4rem; }
 .conv-workspace .workspace-dock .dv-tabs-container { padding-inline: .35rem; gap: .15rem; }
 .conv-workspace .workspace-dock .dv-tab { border-radius: .45rem; font-size: .75rem; }
 .conv-workspace .workspace-dock .dv-tab .dv-default-tab-content { max-width: 13rem; overflow: hidden; text-overflow: ellipsis; }
 .conv-unread { margin-left: auto; width: .42rem; height: .42rem; border-radius: 50%; flex: none; background: var(--primary); }
-.conv-header-menu { position: relative; }
-.conv-header-menu summary { list-style: none; display: flex; align-items: center; justify-content: center; width: 1.85rem; height: 1.85rem; padding: .25rem; cursor: pointer; color: var(--muted-foreground); border-radius: .45rem; }
-.conv-header-menu summary::-webkit-details-marker { display: none; }
-.conv-header-menu summary:hover, .conv-header-menu[open] summary { background: var(--muted); color: var(--foreground); }
-.conv-header-menu > div { display: grid; min-width: 10.85rem; position: absolute; z-index: 20; right: 0; top: 100%; background: var(--card); border: 1px solid var(--border); border-radius: .45rem; padding: .3rem; box-shadow: 0 12px 30px #0003; }
-.conv-header-menu > div button { display: flex; gap: .4rem; align-items: center; white-space: nowrap; min-height: 2rem; padding: .25rem .4rem; font-size: .75rem; text-align: left; border-radius: .3rem; }
-.conv-header-menu > div button:hover { background: var(--muted); }
-@container conversation (max-width: 36rem) {
-  .conv-header-menu > div { inset-inline: 0 auto; }
-}
 .conv-message-actions { margin-top: .35rem; white-space: normal; }
 .conv-message-context { display: block; padding-inline-end: 1.8rem; }
 .conv-message-context > .context-actions-more { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
 .conv-message-actions, .conv-message-action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem .25rem; }
 .conv-message-actions .conv-quiet-button { font-size: .7rem; min-height: 1.65rem; }
 .conv-message-actions .conv-quiet-button svg { width: .8rem; height: .8rem; }
-.conv-example-flow { margin-top: 1.25rem; }
-.conv-flow-card { display: grid; gap: .65rem; justify-items: start; width: 100%; padding: .8rem; background: var(--card); border: 1px solid var(--border); border-radius: .55rem; font-size: .83rem; }
-.conv-flow-card fieldset { display: flex; gap: .65rem; flex-wrap: wrap; }
-.conv-flow-card progress { width: 100%; height: .6rem; accent-color: var(--primary); }
-.conv-flow-heading { width: 100%; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem; color: var(--foreground); border-bottom: 1px solid var(--border); padding-bottom: .4rem; }
-.conv-flow-heading > span { display: flex; gap: .35rem; align-items: center; font-weight: 550; }
-.conv-flow-heading small, .conv-flow-card > small { color: var(--muted-foreground); }
-.conv-flow-heading svg { width: .9rem; height: .9rem; color: var(--primary); }
-.conv-route-actions { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; }
-.conv-primary-button, .conv-danger-button { display: inline-flex; width: max-content; max-width: 100%; gap: .4rem; justify-content: center; align-items: center; min-height: 2rem; border-radius: .45rem; padding: .35rem .65rem; font-size: .775rem; font-weight: 620; }
+.conv-primary-button { display: inline-flex; width: max-content; max-width: 100%; gap: .4rem; justify-content: center; align-items: center; min-height: 2rem; border-radius: .45rem; padding: .35rem .65rem; font-size: .775rem; font-weight: 620; }
 .conv-primary-button { background: var(--primary); color: var(--primary-foreground); }
-.conv-danger-button { color: var(--foreground); background: color-mix(in srgb, var(--danger, #d84f58) 33%, var(--background)); border: 1px solid var(--danger, #d84f58); }
-.conv-primary-button:hover, .conv-danger-button:hover { filter: brightness(1.1); }
-.conv-primary-button:disabled, .conv-danger-button:disabled { opacity: .55; }
-.conv-attachments { display: flex; flex-wrap: wrap; gap: .35rem; padding: .15rem .15rem .3rem; }
-.conv-attachments > span { display: inline-flex; gap: .35rem; align-items: center; min-height: 1.7rem; padding-inline: .4rem; color: var(--muted-foreground); background: var(--card); border: 1px solid var(--border); border-radius: .45rem; font-size: .71rem; overflow-wrap: anywhere; }
-.conv-attachments svg { width: .75rem; height: .75rem; flex: none; }
-.conv-attachments button { border-radius: .3rem; padding: .2rem; }
-.conv-attachments button:hover { background: var(--muted); color: var(--foreground); }
-.conv-completion { display: grid; gap: .15rem; border: 1px solid var(--border); border-radius: .35rem; background: var(--card); max-height: 6.6rem; overflow: auto; }
-.conv-completion button { display: flex; flex-wrap: wrap; justify-content: space-between; padding: .35rem .5rem; text-align: left; font-size: .72rem; }
-.conv-completion button:hover { background: var(--muted); }
-.conv-completion button span, .conv-suggestion { color: var(--muted-foreground); }
-.conv-suggestion { display: flex; justify-content: space-between; align-items: baseline; gap: .35rem; padding: .2rem .3rem; font-size: .71rem; text-align: left; }
-.conv-suggestion:hover { color: var(--foreground); }
-.conv-suggestion kbd { padding: .1rem .25rem; background: var(--card); border-radius: .25rem; }
+.conv-primary-button:hover { filter: brightness(1.1); }
+.conv-primary-button:disabled { opacity: .55; }
 .conv-queued { display: grid; min-width: 0; padding: .35rem .5rem; gap: .15rem; max-height: 7rem; overflow: auto; margin-bottom: .3rem; border: 1px solid var(--border); border-radius: .45rem; background: var(--card); font-size: .72rem; }
 .conv-queued > div { display: flex; align-items: center; gap: .3rem; overflow-wrap: anywhere; }
 .conv-queued > div > p, .conv-queued > div > input { flex: 1; min-width: 0; }
@@ -496,10 +443,9 @@ details[open] > .conv-history-disclosure svg:last-child { rotate: 90deg; }
 }
 .conv-dialog-form .conv-checkbox, .conv-checkbox { display: flex; align-items: center; gap: .35rem; }
 .conv-checkbox input { accent-color: var(--primary); }
-.conv-file-preview { max-height: 9rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: .5rem; background: var(--background); border: 1px solid var(--border); border-radius: .35rem; font-size: .75rem; }
 
 @media (forced-colors: active) {
-  .conv-session-row:has([aria-current="page"]), .conv-example-tab[data-active="true"] { outline: 1px solid Highlight; outline-offset: -1px; }
+  .conv-session-row:has([aria-current="page"]) { outline: 1px solid Highlight; outline-offset: -1px; }
   .conv-menu-item[data-highlighted], .conv-menu-item[data-state="open"] { forced-color-adjust: none; color: HighlightText; background: Highlight; }
   .conv-unread { forced-color-adjust: none; background: Highlight; }
 }

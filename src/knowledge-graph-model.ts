@@ -1,6 +1,3 @@
-import { fileName, type ExampleFile } from "@/ide-knowledge-data";
-import { resolveWiki, wikiLinks } from "@/knowledge-document";
-
 export interface NoteGraphNode {
   readonly id?: number;
   readonly path: string;
@@ -16,17 +13,6 @@ export interface NoteGraphEdge {
 export interface NoteGraphProjection {
   readonly notes: readonly NoteGraphNode[];
   readonly edges: readonly NoteGraphEdge[];
-}
-
-export function exampleNoteGraph(files: readonly ExampleFile[]): NoteGraphProjection {
-  return {
-    notes: files.map(({ path }) => ({ path, title: fileName(path).replace(/\.md$/i, ""), tags: [] })),
-    edges: files.flatMap(({ path, content }) => wikiLinks(content).flatMap((link) => {
-      const resolved = resolveWiki(link, path, files);
-      const target = resolved.length === 1 ? resolved[0] : undefined;
-      return target ? [{ sourcePath: path, targetPath: target.path }] : [];
-    })),
-  };
 }
 
 export function indexNoteGraph({ notes, edges }: NoteGraphProjection) {

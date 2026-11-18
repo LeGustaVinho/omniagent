@@ -10,7 +10,6 @@ export type DeliveryGitPolicy = typeof deliveryGitModes[number][0];
 export type DeliveryMilestonePolicy = { milestone: "verified_commit" | "verified_merge"; destinationBranch: string | null };
 export type DestinationDriftPolicy = "pause" | "prepare_and_recheck";
 
-export const deliveryGitWait = { commit: "Waiting for commit", merge: "Waiting for merge" } as const;
 export const deliveryMilestoneKey = (projectId: string) => ["delivery-milestone-policy", projectId] as const;
 
 export const deliveryGitSetting = {

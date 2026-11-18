@@ -7,12 +7,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { ProjectTasksWorkspace } from "@/project-tasks";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-const { projectId, checkoutId } = exampleCheckout;
+const { projectId, checkoutId } = testCheckout;
 const epic = { id: "epic-stable", title: "Release epic", owner: { epic: "epic-stable" } } as const;
 const task = { id: "task-stable", title: "Write release notes", owner: { work: "task-stable" } } as const;
 const subtask = { id: "subtask-stable", title: "Gather changes", owner: { work: "subtask-stable" } } as const;
@@ -94,7 +95,7 @@ function descriptionFixture() {
 
 function mountWorkspace() {
   const props: WorkspaceProps = {
-    checkout: exampleCheckout, openWorkspace: vi.fn(), openActivity: vi.fn(),
+    checkout: testCheckout, openWorkspace: vi.fn(), openActivity: vi.fn(),
     openChanges: vi.fn(),
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });

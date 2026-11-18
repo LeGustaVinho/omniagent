@@ -157,21 +157,13 @@ it("keeps indexed file IDs distinct across checkout projections even when their 
   for (const observer of canvasObservers) expect(disconnect.mock.contexts).toContain(observer);
 });
 
-it("keeps the sample resolver working and represents an explicitly empty checkout", () => {
-  const files = [
-    { path: "demo/Start.md", content: "# Start\n\n[[./Next]]" },
-    { path: "demo/Next.md", content: "# Next" },
-  ];
+it("clears the graph when the checkout has no indexed notes", () => {
   const open = vi.fn();
-  const { rerender } = render(<NoteGraph files={files} selected={files[0]?.path} onOpen={open} />);
-  expect(graphPaths()).toEqual(["demo/Start.md", "demo/Next.md"]);
-  expect(graph().edges().length).toBe(1);
-  fireEvent.click(screen.getByRole("button", { name: "Next.md" }));
-  expect(open).toHaveBeenCalledExactlyOnceWith("demo/Next.md");
-  const sample = graph();
+  const { rerender } = render(<NoteGraph projection={projection} selected={active} onOpen={open} />);
+  const indexed = graph();
 
-  rerender(<NoteGraph files={files} projection={{ notes: [], edges: [] }} selected={files[0]?.path} onOpen={open} />);
-  expect(sample.destroyed()).toBe(true);
+  rerender(<NoteGraph projection={{ notes: [], edges: [] }} selected={active} onOpen={open} />);
+  expect(indexed.destroyed()).toBe(true);
   expect(graphPaths()).toEqual([]);
   expect(screen.getByRole("status").textContent).toBe("No Markdown notes in this checkout.");
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "Local" }).disabled).toBe(true);

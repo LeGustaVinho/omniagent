@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Background, Controls, ReactFlow, type Edge, type Node, type NodeChange, type ReactFlowProps } from "@xyflow/react";
-import { ArrowRight, CirclePlay, FileCode2, FileDiff, Layers3, PackageCheck, PanelRight, Puzzle, Workflow, X } from "lucide-react";
+import { ArrowRight, CirclePlay, FileDiff, Layers3, PackageCheck, PanelRight, Puzzle, Workflow, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
@@ -46,23 +46,21 @@ export function PipelineRolesHeading() {
     icon={<Layers3 size={20} aria-hidden />} />;
 }
 
-export function PipelineRevisionList({ entries, onOpen, kind = "draft" }: {
+export function PipelineRunList({ entries, onOpen }: {
   entries: { id: string; name: string; detail: string; menu?: MenuGroups }[];
   onOpen: (id: string) => void;
-  kind?: "draft" | "run";
 }) {
-  const Icon = kind === "run" ? CirclePlay : FileCode2;
   return entries.length ? <ul className="pipeline-select-list">
     {entries.map(({ id, name, detail, menu }) => <li key={id}>
       <ContextActions label={`${name} ${detail}`} groups={menu ?? []}>
         <button className="pipeline-select-item" type="button" onClick={() => onOpen(id)}>
-          <Icon size={15} aria-hidden />
+          <CirclePlay size={15} aria-hidden />
           <span>{name}<small>{detail}</small></span>
           <ArrowRight size={14} className="pipeline-end" aria-hidden />
         </button>
       </ContextActions>
     </li>)}
-  </ul> : <p className="text-muted-foreground">{kind === "run" ? "No saved runs." : "No saved draft revisions."}</p>;
+  </ul> : <p className="text-muted-foreground">No saved runs.</p>;
 }
 
 export function PipelineMaintenanceLayout({ proposals, releases, inventory }: {

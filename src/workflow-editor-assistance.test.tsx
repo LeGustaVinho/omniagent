@@ -11,7 +11,7 @@ import PipelinesWorkspace from "@/pipelines-workspace";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
 import type { WorkflowPublication } from "@/workflow-publication";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }));
@@ -19,7 +19,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 const selection = { provider: "claude", profileId: "desktop-claude", modelId: "qualified-model" } as const;
 const option: ModelOption = { selection, name: "Qualified Claude", selectable: true, unavailableReason: null, catalogVersion: 1, rating: null };
-const checkout = exampleCheckout;
+const checkout = testCheckout;
 const args = { projectId: checkout.projectId, checkoutId: checkout.checkoutId, selection, effort: "high", brief: "Preserve existing references." };
 const result = {
   id: "agent-draft", revision: "draft-revision", conversationId: null, publication: null,

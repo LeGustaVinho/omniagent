@@ -6,7 +6,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { ProjectTasksWorkspace } from "@/project-tasks";
-import { exampleCheckout } from "@/workbench-contract";
+import { testCheckout } from "@/test-fixtures/checkout";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 it("records manual completion after resolving the checklist and preserves history after reopening", async () => {
-  const { projectId } = exampleCheckout;
+  const { projectId } = testCheckout;
   const task = { id: "release-notes", title: "Publish release notes" };
   const epic = { id: "release", title: "Release" };
   const taskArgs = { projectId, taskId: task.id };
@@ -78,7 +78,7 @@ it("records manual completion after resolving the checklist and preserves histor
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const user = userEvent.setup();
   render(<QueryClientProvider client={client}>
-    <ProjectTasksWorkspace checkout={exampleCheckout}
+    <ProjectTasksWorkspace checkout={testCheckout}
       openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
 

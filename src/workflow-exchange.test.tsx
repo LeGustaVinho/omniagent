@@ -8,7 +8,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { downloadArtifact } from "@/download-artifact";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import type { ExchangeBinding } from "@/workflow-exchange-bindings";
-import { exampleCheckout } from "@/workbench-contract";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
