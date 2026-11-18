@@ -384,7 +384,7 @@ async function captureProductWorkspaces(browser, checkout) {
   await capture(browser, "08-knowledge-reading");
 
   await click(knowledge, "button=Graph");
-  await knowledge.$('[aria-label="Graph of repository notes"] canvas').waitForDisplayed();
+  await knowledge.$('[aria-label="Graph of repository notes"] canvas:first-child').waitForDisplayed();
   await capture(browser, "08-knowledge-graph");
   await click(knowledge, "button=Graph");
 
@@ -1480,7 +1480,6 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
         return run?.id === retry.runId && ["cancelled", "interrupted"].includes(run.status);
       }, { timeout: 15_000 });
     }
-    await captureProductWorkspaces(browser, main);
     await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
     await browser.waitUntil(() => browser.execute(() => Math.abs(window.innerWidth - 1120) <= 4));
     await t.test("checks the current worktree and required evidence on a linked retry", async () => {
@@ -1786,6 +1785,29 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     } finally {
       driver.kill();
     }
+  }
+});
+
+test("renders registered workspaces at desktop and compact sizes", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Visual workspace checkout");
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, "AGENTS.md"), "# Checkout instructions\n\nUse [[README]] for the workspace guide.\n");
+  await writeFile(join(repo, "README.md"), "# Workspace guide\n");
+  git(repo, "add", "AGENTS.md", "README.md");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Visual workspace fixture");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await captureProductWorkspaces(browser, checkout);
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
   }
 });
 

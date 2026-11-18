@@ -851,13 +851,13 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
 
   const review = await reviewSavedRevision(browser, saved);
   const artifacts = review.$(".//label[starts-with(normalize-space(.), 'Review artifact')]/select");
-  await artifacts.selectByVisibleText("Evaluate changes · prompt");
+  await artifacts.selectByAttribute("value", authored[0].key);
   await review.$("summary=Changes and dependencies").waitForDisplayed({ timeout });
   await click(review.$("summary=Dependencies"));
   await textIsVisible(browser, review, "Draft fixture-role");
   assert.deepEqual((await invoke(browser, "project_job_queue", { projectId })).jobs, previousQueue);
   await capture?.(browser, "visual-prompt-reviewed");
-  await click(review.$('button[aria-label="Close review workflow package"]'));
+  await click(browser.$('button[aria-label="Close review workflow package"]'));
 
   await click(browser.$("button=Review publication"));
   const confirmation = browser.$('[role="dialog"]');
