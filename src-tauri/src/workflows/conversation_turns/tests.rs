@@ -86,6 +86,30 @@ async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()
     .err()
     .context("Expected a missing Start message diagnostic")?;
     assert!(invalid.to_string().contains("text message input on Start"));
+    let start = catalog
+        .iter_mut()
+        .find(|node| node.kind == BuiltinNode::TypedStart)
+        .context("Expected the Typed Start definition")?;
+    start.output_schemas.insert("inputs".into(), json!({"type":"object","additionalProperties":false,
+        "properties":{"message":{"type":"string"},"history":{"type":"array","items":{"type":"string"}}},
+        "required":["message","history"]}));
+    let invalid = compile_resolved_graph(
+        "unsupported-history".into(),
+        graph.clone(),
+        |node| catalog.iter().find(|entry| entry.kind == node.kind),
+        true,
+    )
+    .err()
+    .context("Expected a Start history diagnostic")?;
+    assert!(invalid.to_string().contains("string fields role and text"));
+    let start = catalog
+        .iter_mut()
+        .find(|node| node.kind == BuiltinNode::TypedStart)
+        .context("Expected the Typed Start definition")?;
+    start.output_schemas.get_mut("inputs").unwrap()["properties"]["history"]["items"] = json!({
+        "type":"object","additionalProperties":false,"properties":{"role":{"type":"string"},"text":{"type":"string"}},
+        "required":["role","text"]
+    });
     let definition = compile_resolved_graph(
         "early-reply".into(),
         graph,

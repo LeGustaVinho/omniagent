@@ -696,6 +696,12 @@ it("requires a conversation message in the selected Start Schema", () => {
   expect(graphProblems(graph, definitions)).toEqual(["A conversation pipeline needs a text message input on Start."]);
   definitions.start!.outputSchemas = { inputs: { type: "object", properties: { message: { type: "string" } } } };
   expect(graphProblems(graph, definitions)).toEqual([]);
+  const properties = definitions.start!.outputSchemas.inputs!.properties!;
+  properties.history = { type: "array", items: { type: "string" } };
+  expect(graphProblems(graph, definitions)).toEqual(["Start history must accept a list of objects with string fields role and text."]);
+  properties.history.items = { type: "object", properties: { role: { type: "string" }, text: { type: "string" } },
+    required: ["role", "text"], additionalProperties: false };
+  expect(graphProblems(graph, definitions)).toEqual([]);
 });
 
 it("matches the backend rules for Start events and optional or multiple Result evidence", () => {

@@ -415,6 +415,13 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
     const receivesMessage = input ? input.properties?.message?.type === "string"
       : fields.some(({ conversationSource, valueType }) => conversationSource === "message" && valueType === "text");
     if (!receivesMessage) problems.push("A conversation pipeline needs a text message input on Start.");
+    const history = input?.properties?.history;
+    if (history && (history.type !== "array" || schemaMismatch({
+      type: "array", items: { type: "object", additionalProperties: false, required: ["role", "text"],
+        properties: { role: { type: "string" }, text: { type: "string" } } },
+    }, history))) {
+      problems.push("Start history must accept a list of objects with string fields role and text.");
+    }
     const result = ends[0] && definitions[ends[0].id]?.outputSchemas?.result;
     if (result?.properties?.reply?.type !== "string" || !result.required?.includes("reply")) {
       problems.push("A conversation pipeline needs an End result Schema with required reply text.");

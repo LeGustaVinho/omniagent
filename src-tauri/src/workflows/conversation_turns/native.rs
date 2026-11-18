@@ -402,11 +402,25 @@ pub(crate) fn is_conversation_template(definition: &WorkflowDefinition) -> bool 
 pub(in crate::workflows) fn validate_conversation_template(
     definition: &WorkflowDefinition,
 ) -> Result<()> {
-    anyhow::ensure!(
-        super::WorkflowStartSchema::for_definition(definition)
-            .is_some_and(|schema| schema.conversation_enabled()),
-        "A conversation pipeline needs a text message input on Start"
-    );
+    let start = super::WorkflowStartSchema::for_definition(definition)
+        .filter(|schema| schema.conversation_enabled())
+        .context("A conversation pipeline needs a text message input on Start")?;
+    if let Some(history) = start
+        .json_schema
+        .as_ref()
+        .and_then(|schema| schema.pointer("/properties/history"))
+    {
+        let generated = json!({
+            "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "properties": { "role": {"type":"string"}, "text": {"type":"string"} },
+                "required": ["role", "text"] }
+        });
+        anyhow::ensure!(
+            history["type"] == "array"
+                && crate::workflows::schema::compatible(&generated, history).is_ok(),
+            "Start history must accept a list of objects with string fields role and text"
+        );
+    }
     anyhow::ensure!(
         root_end(definition)
             .and_then(|node| node.definition.output_schemas.get("result"))
