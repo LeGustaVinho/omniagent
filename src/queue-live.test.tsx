@@ -7,8 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobInspection } from "@/bindings/JobInspection";
 import { isGitCheckoutTarget } from "@/file-context-actions";
-import type { LiveQueueProps } from "@/queue-live";
-import QueuePanel from "@/queue-panel";
+import QueuePanel, { type LiveQueueProps } from "@/queue-live";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 

@@ -3,9 +3,9 @@ import {
   anchorLine, getProperties, headings, markdownNoteLink, noteMarkdownLink, parseReadingAddress, parseWiki, prepareReading,
   resolveWiki, wikiLinks,
 } from "@/knowledge-document";
-import type { ExampleFile } from "@/ide-knowledge-data";
+import type { NoteSource } from "@/ide-knowledge-data";
 
-const notes: ExampleFile[] = [
+const notes: NoteSource[] = [
   { path: "docs/architecture.md", content: "# Scope\nCheckout scope. ^checkout-scope" },
   { path: "docs/ops/Readme.md", content: "# Operations conventions" },
   { path: "docs/team/Readme.md", content: "# Team conventions" },

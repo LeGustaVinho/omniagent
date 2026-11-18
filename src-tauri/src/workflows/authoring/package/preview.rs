@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::workflows::{
-    BuiltinNode, NodeConfiguration, WorkflowDefinition, command::validate_command_binding,
+    BuiltinNode, NodeConfiguration, command::validate_command_binding,
     mcp_tools::validate_mcp_binding,
 };
 
@@ -182,7 +182,7 @@ impl<'a> ReviewCatalog<'a> {
         &self,
         member: &PackageMember,
         requirements: &mut Vec<String>,
-    ) -> Result<(WorkflowDefinition, BTreeMap<String, NodeDefinition>)> {
+    ) -> Result<BTreeMap<String, NodeDefinition>> {
         let artifact = self
             .load(&self.draft_version(member))?
             .context("The draft graph is unavailable")?;
@@ -223,13 +223,12 @@ impl<'a> ReviewCatalog<'a> {
                 &|version| self.load(version),
                 false,
             )?;
-            let definitions = expanded
+            return Ok(expanded
                 .workflow
                 .nodes
                 .iter()
                 .map(|node| (node.instance.id.clone(), node.definition.clone()))
-                .collect();
-            return Ok((expanded.workflow, definitions));
+                .collect());
         }
         let (graph, interface) = match &member.body {
             PackageArtifactBody::Pipeline { graph } => (graph, None),
@@ -330,7 +329,7 @@ impl<'a> ReviewCatalog<'a> {
                 ));
             }
         }
-        Ok((definition, authoring_definitions))
+        Ok(authoring_definitions)
     }
 }
 
@@ -421,7 +420,7 @@ fn preview_member(
         PackageArtifactBody::Pipeline { .. }
         | PackageArtifactBody::Subflow { .. }
         | PackageArtifactBody::Prompt { .. } => match catalog.compile(member, &mut requirements) {
-            Ok((_, definitions)) => graph_definitions = definitions,
+            Ok(definitions) => graph_definitions = definitions,
             Err(error) => diagnostics.push(format!("{error:#}")),
         },
         PackageArtifactBody::McpTool { binding, .. } => {

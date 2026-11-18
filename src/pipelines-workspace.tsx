@@ -13,7 +13,7 @@ import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
 import { PipelineMaintenanceLayout, PipelineTabs, PipelineWorkspaceFrame } from "@/pipeline-layout";
 
-const productionTabs = [
+const pipelineTabs = [
   { id: "drafts", label: "Builder" },
   { id: "runs", label: "Runs" },
   { id: "library", label: "Library" },
@@ -21,7 +21,7 @@ const productionTabs = [
   { id: "automations", label: "Automation rules" },
   { id: "maintenance", label: "Maintenance" },
 ] as const;
-type ProductionView = (typeof productionTabs)[number]["id"];
+type PipelineView = (typeof pipelineTabs)[number]["id"];
 type LibraryView = "library" | "library:roles";
 
 function LibraryNavigation({ active, onSelect }: { active: LibraryView; onSelect: (view: LibraryView) => void }) {
@@ -35,7 +35,7 @@ function LibraryNavigation({ active, onSelect }: { active: LibraryView; onSelect
 
 const isRolesTarget = (target?: string) => target === "library:roles" || target === "templates" || target === "roles";
 
-function productionRoute(target = ""): { view: ProductionView; libraryView?: LibraryView; draftId?: string; runId?: string; runFocus?: WorkflowExecutionFocus } {
+function pipelineRoute(target = ""): { view: PipelineView; libraryView?: LibraryView; draftId?: string; runId?: string; runFocus?: WorkflowExecutionFocus } {
   if (target.startsWith("run:")) {
     const [runId, search] = target.slice("run:".length).split("?", 2);
     const params = new URLSearchParams(search);
@@ -45,7 +45,7 @@ function productionRoute(target = ""): { view: ProductionView; libraryView?: Lib
   if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
   if (target.startsWith("compare-note:")) return { view: "compare" };
   if (isRolesTarget(target)) return { view: "library", libraryView: "library:roles" };
-  const tab = productionTabs.find(({ id }) => id === target);
+  const tab = pipelineTabs.find(({ id }) => id === target);
   if (tab) return { view: tab.id };
   if (!target || target === "builder" || target === "delivery") return { view: "drafts" };
   return { view: "runs", runId: target };
@@ -66,9 +66,9 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
   useEffect(() => {
     setHandoff((current) => current && workflowRunTarget(current.runId) === props.target ? current : undefined);
   }, [props.target]);
-  const { view, libraryView = "library", draftId, runId, runFocus } = productionRoute(props.target);
+  const { view, libraryView = "library", draftId, runId, runFocus } = pipelineRoute(props.target);
   return <PipelineWorkspaceFrame>
-    <PipelineTabs views={productionTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
+    <PipelineTabs views={pipelineTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
       {view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} onUseInPipeline={(destination) => {
         setHandoff(destination);

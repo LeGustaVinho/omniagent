@@ -7,7 +7,7 @@ import {
   FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type EditorSearchRequest, type FileSearchScope } from "@/ide-file-search";
+import { matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type EditorSearchRequest, type FileSearchScope } from "@/ide-file-search";
 import { noteWindowTarget } from "@/file-editor-popout";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { useCheckoutFilePreview } from "@/checkout-file-preview";
@@ -56,7 +56,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
   const requestedFolder = readFolderSearchTarget(target);
   const requestedTerminal = readTerminalFolderTarget(target);
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide" });
-  const source = useRepositorySourceBuffers(checkout.checkoutId, true);
+  const source = useRepositorySourceBuffers(checkout.checkoutId);
   const { load: loadSource, watch: watchSource, update: updateSource, getFile: getSource } = source;
   const workspace = useRef<HTMLElement>(null);
   const sidebarToggle = useRef<HTMLButtonElement>(null);
@@ -301,7 +301,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
   };
   const readOpenFile = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
     ? source.getFile(path)?.content : undefined, [dock.api, source.getFile]);
-  useCheckoutTextReader(checkout.checkoutId, true, readOpenFile);
+  useCheckoutTextReader(checkout.checkoutId, readOpenFile);
   const currentText = readOpenFile;
   const menu = fileContextActions({ checkout, status: setStatus, report: setProblem, currentText });
   const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, currentText, open: openFile });

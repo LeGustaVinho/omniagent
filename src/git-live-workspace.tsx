@@ -46,7 +46,7 @@ type Tab = typeof tabs[number];
 const tabFor = (target?: string): Tab => target === "worktrees" || isNewWorktreeTarget(target) ? "Worktrees" : target === "history" || readFileHistoryTarget(target) ? "History"
   : target === "saved" || target?.startsWith("attempt:") ? "Saved attempts" : "Changes";
 
-export function LiveGitWorkspace(props: WorkspaceProps) {
+export default function GitWorkspace(props: WorkspaceProps) {
   return <GitCheckoutWorkspace key={`${props.checkout.projectId}:${props.checkout.checkoutId}`} {...props} />;
 }
 

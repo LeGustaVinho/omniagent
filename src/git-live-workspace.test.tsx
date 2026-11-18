@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
-import GitWorkspace from "@/git-workspace";
+import GitWorkspace from "@/git-live-workspace";
 import { fileHistoryTarget, newWorktreeTarget, readTerminalFolderTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { testCheckout } from "@/test-fixtures/checkout";

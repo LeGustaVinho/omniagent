@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import { RealDiagnostics } from "@/desktop-dock";
+import { DiagnosticsDock } from "@/desktop-dock";
 import { downloadArtifact } from "@/download-artifact";
 import { FixtureRunPanel } from "@/fixture-panels";
 import { testCheckout } from "@/test-fixtures/checkout";
@@ -36,7 +36,7 @@ it("reads actual desktop and CLI status and exposes the device settings link", a
   });
   const openSystem = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <RealDiagnostics checkout={testCheckout} openSystem={openSystem} />
+    <DiagnosticsDock checkout={testCheckout} openSystem={openSystem} />
   </QueryClientProvider>);
 
   const desktop = screen.getByRole("region", { name: "Current installation" });

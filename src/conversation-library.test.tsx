@@ -12,7 +12,7 @@ import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { RunRecord } from "@/bindings/RunRecord";
-import { RealConversations } from "@/desktop-dock";
+import { ConversationsWorkspace } from "@/desktop-dock";
 import { defaultAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
@@ -233,7 +233,7 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
 function mount(onOpenOtherCheckout = vi.fn(async () => {})) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const ui = render(<QueryClientProvider client={client}>
-    <RealConversations checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} onOpenOtherCheckout={onOpenOtherCheckout} />
+    <ConversationsWorkspace checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} onOpenOtherCheckout={onOpenOtherCheckout} />
   </QueryClientProvider>);
   return { ...ui, user: userEvent.setup(), onOpenOtherCheckout };
 }
@@ -496,7 +496,7 @@ it("confirms a checkout file save and stages the same clicked block for the term
   const openWorkspace = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><RunInspectorNavigation.Provider value={{ openActivity: vi.fn(), openWorkspace }}>
-    <RealConversations checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} />
+    <ConversationsWorkspace checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} />
   </RunInspectorNavigation.Provider></QueryClientProvider>);
   const user = userEvent.setup();
   await screen.findByRole("region", { name: "Conversation library" });
@@ -758,7 +758,7 @@ it("opens saved conversations from the compact library and returns space to the 
   repository();
   function CompactWorkspace() {
     const [sidebar, setSidebar] = useState(false);
-    return <RealConversations checkout={selected} compact sidebar={sidebar} onSidebarChange={setSidebar} />;
+    return <ConversationsWorkspace checkout={selected} compact sidebar={sidebar} onSidebarChange={setSidebar} />;
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><CompactWorkspace /></QueryClientProvider>);

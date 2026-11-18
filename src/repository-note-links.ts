@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import type { Completion } from "@codemirror/autocomplete";
 import { notePreviewLinks, type NoteTarget, type NoteLocation } from "@/knowledge-document";
-import type { ExampleFile } from "@/ide-knowledge-data";
+import type { NoteSource } from "@/ide-knowledge-data";
 
 export type IndexedLinkLocation = { path: string; anchor: string | null; line: number | null };
 export type IndexedLinkResolution = { status: "resolved" | "missing_anchor"; location: IndexedLinkLocation }
@@ -38,9 +38,9 @@ export async function suggestRepositoryLinks(checkoutId: string, sourcePath: str
   return results.map(({ path, target, label }) => ({ label, detail: path, apply: target, type: "text" }));
 }
 
-export function useRepositoryLinkPreviews(checkoutId: string, files: readonly ExampleFile[], version: number, enabled: boolean) {
+export function useRepositoryLinkPreviews(checkoutId: string, files: readonly NoteSource[], version: number) {
   const queries = new Map<string, LinkQuery>();
-  if (enabled) for (const { path, content } of files) {
+  for (const { path, content } of files) {
     for (const link of notePreviewLinks(content, path)) {
       const query = linkQuery(link, path);
       queries.set(key(query), query);
@@ -49,7 +49,7 @@ export function useRepositoryLinkPreviews(checkoutId: string, files: readonly Ex
   const batched = [...queries.values()];
   return useQuery({
     queryKey: ["repository-note-link-previews", checkoutId, version, batched],
-    enabled: enabled && Boolean(batched.length) && Boolean(version),
+    enabled: Boolean(batched.length) && Boolean(version),
     queryFn: async () => {
       const responses = await invoke<IndexedLinkResolution[]>("resolve_repository_note_links", { checkoutId, queries: batched });
       return new Map(responses.map((response, i) => [key(batched[i]!), response]));

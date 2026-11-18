@@ -17,7 +17,6 @@ import { checkoutFavoriteKey, isNoteFavorite, maxFavoriteGroupName, moveCheckout
 import { dockviewLayoutInMain, editorPopoutPath, FileEditorDocument, mirrorEditorAppearance } from "@/file-editor-popout";
 import { makeTree, readTreePreferences, saveTreePreference, showTreePath, treeParents, useIgnoredTree, useWindowsHiddenTree,
   type FolderNodeData, type TreeReveal } from "@/checkout-file-tree";
-import { ResizablePanel } from "@/panel-resize";
 import "dockview/dist/styles/dockview.css";
 import "./ide-knowledge.css";
 import "./checkout-file-tree.css";

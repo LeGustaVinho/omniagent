@@ -16,12 +16,11 @@ type IndexInvalidation = { checkoutId: string } & ({ kind: "paths"; paths: strin
 
 const indexKey = (checkoutId: string) => ["repository-note-index", checkoutId];
 
-export function useRepositoryNoteIndex(checkoutId: string, enabled: boolean, query: string) {
+export function useRepositoryNoteIndex(checkoutId: string, query: string) {
   const client = useQueryClient();
   const [watching, setWatching] = useState(false);
   const [watchError, setWatchError] = useState("");
   useEffect(() => {
-    if (!enabled) return;
     let active = true;
     let watchId: string | undefined;
     let pending = Promise.resolve();
@@ -52,18 +51,18 @@ export function useRepositoryNoteIndex(checkoutId: string, enabled: boolean, que
       active = false;
       if (watchId) void unwatch(watchId);
     };
-  }, [checkoutId, client, enabled]);
+  }, [checkoutId, client]);
 
   const searchTerm = useDeferredValue(query.trim());
   const index = useQuery({
     queryKey: indexKey(checkoutId),
-    enabled: enabled && watching,
+    enabled: watching,
     refetchOnWindowFocus: false,
     queryFn: () => invoke<IndexedNote[]>("rebuild_repository_note_index", { checkoutId }),
   });
   const search = useQuery({
     queryKey: ["repository-note-search", checkoutId, searchTerm, index.dataUpdatedAt],
-    enabled: enabled && index.isSuccess && Boolean(searchTerm),
+    enabled: index.isSuccess && Boolean(searchTerm),
     queryFn: () => invoke<KnowledgeSearchHit[]>("search_repository_note_index", { checkoutId, query: searchTerm, limit: 100 }),
   });
   return {

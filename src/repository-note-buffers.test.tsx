@@ -43,7 +43,7 @@ it("shares one canonical buffer, refreshes clean content and preserves edits dur
       default: throw new Error(command);
     }
   });
-  const { result, unmount } = renderHook(() => useRepositoryNotes(checkoutId, true));
+  const { result, unmount } = renderHook(() => useRepositoryNotes(checkoutId));
   await act(async () => { expect(await result.current.load("notes/release.md")).toBe(path); result.current.watch(path); });
   expect(Object.keys(result.current.notes)).toEqual([path]);
   const notice = { checkoutId, relativePath: path };
@@ -83,7 +83,7 @@ it("restores the original revision and unsaved content beside an external revisi
       default: throw new Error(command);
     }
   });
-  const { result } = renderHook(() => useRepositoryNotes(checkoutId, true));
+  const { result } = renderHook(() => useRepositoryNotes(checkoutId));
   await act(async () => { await result.current.load(path); });
   expect(result.current.draftPaths).toEqual([path]);
   expect(invoke).toHaveBeenCalledWith("read_repository_markdown", { checkoutId, revisionId: "r1" });

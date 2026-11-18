@@ -108,9 +108,8 @@ type CurrentText = (path: string) => string | undefined;
 const checkoutTextReaders = new Map<string, Set<CurrentText>>();
 let textCaptureRequest = 0;
 
-export function useCheckoutTextReader(checkoutId: string, enabled: boolean, read: CurrentText) {
+export function useCheckoutTextReader(checkoutId: string, read: CurrentText) {
   useEffect(() => {
-    if (!enabled) return;
     const readers = checkoutTextReaders.get(checkoutId) ?? new Set<CurrentText>();
     readers.add(read);
     checkoutTextReaders.set(checkoutId, readers);
@@ -118,7 +117,7 @@ export function useCheckoutTextReader(checkoutId: string, enabled: boolean, read
       readers.delete(read);
       if (!readers.size) checkoutTextReaders.delete(checkoutId);
     };
-  }, [checkoutId, enabled, read]);
+  }, [checkoutId, read]);
 }
 
 function otherEditorText(checkoutId: string, path: string) {

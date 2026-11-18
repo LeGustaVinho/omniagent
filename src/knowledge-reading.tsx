@@ -9,7 +9,7 @@ import {
   type NoteTarget, type ReadingOrigin,
 } from "@/knowledge-document";
 import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteContextHit } from "@/knowledge-context";
-import { fileName, type ExampleFile } from "@/ide-knowledge-data";
+import { fileName, type NoteSource } from "@/ide-knowledge-data";
 import { NoteDiagram } from "@/knowledge-media";
 import { markdownHighlight } from "@/markdown-highlight";
 import type { NoteYamlProperty } from "@/knowledge-properties";
@@ -157,7 +157,7 @@ function trustedPreviewUrl(url: string, path: string) {
 type ReadingProps = {
   path: string;
   content: string;
-  files: readonly ExampleFile[];
+  files: readonly NoteSource[];
   jump?: { anchor?: string; line?: number; token: number };
   onLink: (link: NoteTarget) => void;
   checkoutId?: string;

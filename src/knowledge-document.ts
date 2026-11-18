@@ -1,6 +1,6 @@
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import { Text } from "@codemirror/state";
-import { fileName, normalizeRepositoryPath, type ExampleFile } from "@/ide-knowledge-data";
+import { fileName, normalizeRepositoryPath, type NoteSource } from "@/ide-knowledge-data";
 
 export interface NoteTarget {
   raw: string;
@@ -20,7 +20,7 @@ export interface NoteLocation {
   anchor?: string;
 }
 
-export type PreviewLinkResolver = (link: NoteTarget, path: string, files: readonly ExampleFile[]) => NoteLocation[];
+export type PreviewLinkResolver = (link: NoteTarget, path: string, files: readonly NoteSource[]) => NoteLocation[];
 
 export interface NoteHeading {
   label: string;
@@ -159,7 +159,7 @@ function noteAliases(source: string) {
   return [];
 }
 
-export function resolveWiki(link: NoteTarget, from: string, files: readonly ExampleFile[]): NoteLocation[] {
+export function resolveWiki(link: NoteTarget, from: string, files: readonly NoteSource[]): NoteLocation[] {
   const raw = link.target.replaceAll("\\", "/");
   const find = (path: string) => {
     const normalized = normalizeRepositoryPath(path);
@@ -381,13 +381,13 @@ export function notePreviewLinks(source: string, path: string): NoteTarget[] {
   return links;
 }
 
-export function prepareReading(source: string, path: string, files: readonly ExampleFile[], lineage: readonly string[] = [path], resolve: PreviewLinkResolver = resolveWiki): string {
+export function prepareReading(source: string, path: string, files: readonly NoteSource[], lineage: readonly string[] = [path], resolve: PreviewLinkResolver = resolveWiki): string {
   return readingDocument(source, path, files, resolve, undefined, lineage).markdown;
 }
 
 export type ReadingOrigin = { path: string; line: number };
 
-export function readingDocument(source: string, path: string, files: readonly ExampleFile[], resolve: PreviewLinkResolver = resolveWiki,
+export function readingDocument(source: string, path: string, files: readonly NoteSource[], resolve: PreviewLinkResolver = resolveWiki,
   sourceLine?: number, lineage: readonly string[] = [path], originOffset = 0) {
   const body = withoutProperties(source);
   const content = byText(body, (text) => text, true);

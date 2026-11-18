@@ -161,7 +161,7 @@ impl Store {
                 } => {
                     let loaded = LoadedSource::published(artifact.clone());
                     let catalog = loaded.catalog(&tx, &project, &version.revision);
-                    let (_, definitions) = catalog
+                    let definitions = catalog
                         .compile(catalog.draft_member(&loaded.member_key)?, &mut Vec::new())?;
                     let mut definition = builtin_registry()
                         .into_iter()
@@ -276,7 +276,7 @@ impl LoadedSource {
             .definitions
             .get(&self.member_key)
             .context("The source definition pins are unavailable")?;
-        let (_, effective_definitions) = catalog.compile(member, &mut Vec::new())?;
+        let effective_definitions = catalog.compile(member, &mut Vec::new())?;
         run(&DerivationSource {
             member,
             definitions,

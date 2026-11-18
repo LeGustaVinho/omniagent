@@ -7,7 +7,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CheckoutSelector } from "@/checkout-selector";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
-import { RealConversations, RealDiagnostics } from "@/desktop-dock";
+import { ConversationsWorkspace, DiagnosticsDock } from "@/desktop-dock";
 import { openWorkspaceFile } from "@/file-context-actions";
 import type { FileLinkTarget } from "@/file-links";
 import { RunInspector } from "@/inspection-panel";
@@ -20,14 +20,14 @@ import { useWorkspaceSize, WorkbenchPanel, WorkspaceDrawersSuspended, WorkspaceV
 import type { QuestionFocus, QueueJobFocus, WorkspaceDestination, WorkspaceId, WorkspaceProps } from "@/workbench-contract";
 
 const SettingsDialog = lazy(() => import("@/settings-dialog"));
-const QueuePanel = lazy(() => import("@/queue-panel"));
+const QueuePanel = lazy(() => import("@/queue-live"));
 const ChangesPanel = lazy(() => import("@/changes-panel"));
 const workspaceComponents: Partial<Record<WorkspaceId, ComponentType<WorkspaceProps>>> = {
   ide: lazy(() => import("@/ide-workspace")),
   tasks: lazy(() => import("@/tasks-workspace")),
   pipelines: lazy(() => import("@/pipelines-workspace")),
   knowledge: lazy(() => import("@/knowledge-workspace")),
-  git: lazy(() => import("@/git-workspace")),
+  git: lazy(() => import("@/git-live-workspace")),
 };
 const areas = [
   { id: "conversations", label: "Conversations", icon: MessageSquare },
@@ -436,13 +436,13 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
     const target = state?.target;
     return <div key={id} className="work-view" hidden={!visible}>
       <WorkspaceVisibility.Provider value={visible}><Suspense fallback={loading}>
-        {workspace === "conversations" ? <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
+        {workspace === "conversations" ? <ConversationsWorkspace checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
             compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} onOpenCheckoutInIde={async (source) => {
               if (source.checkoutId === context.checkout.checkoutId) context.openWorkspace("ide");
               else if (onOpenOtherCheckout) await onOpenOtherCheckout(source, undefined, { workspace: "ide" });
               else throw new Error("This worktree cannot be opened from the current workspace.");
             }} />
-          : workspace === "diagnostics" ? <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />
+          : workspace === "diagnostics" ? <DiagnosticsDock checkout={context.checkout} openSystem={openSystem} />
             : View && <View {...context} target={target} />}
       </Suspense></WorkspaceVisibility.Provider>
     </div>;

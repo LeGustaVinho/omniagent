@@ -155,7 +155,7 @@ function Dock({
   );
 }
 
-export function RealConversations({
+export function ConversationsWorkspace({
   checkout, sidebar, onSidebarChange, compact, target, onOpenOtherCheckout, onOpenCheckoutInIde,
 }: {
   checkout: ProjectCheckout;
@@ -253,7 +253,7 @@ export function RealConversations({
   );
 }
 
-export function RealDiagnostics({ checkout, openSystem }: { checkout: ProjectCheckout; openSystem?: () => void }) {
+export function DiagnosticsDock({ checkout, openSystem }: { checkout: ProjectCheckout; openSystem?: () => void }) {
   const dock = useDesktopDock(checkout, "diagnostics");
   const [view, setView] = useState<DiagnosticView>("desktop");
   const [fixturesVisited, setFixturesVisited] = useState(false);

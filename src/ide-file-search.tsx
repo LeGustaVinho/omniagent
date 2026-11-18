@@ -137,25 +137,6 @@ function ScopeLabel({ scope, onClear }: { scope?: FileSearchScope; onClear?: () 
   </div>;
 }
 
-export function ExampleFileSearch({ query, setQuery, results, onOpen, actions, fileActions, scope, onClear, literalContent }: {
-  query: string;
-  setQuery: (query: string) => void;
-  results: readonly FileSearchResult[];
-  onOpen: OpenMatch;
-  actions: MatchActions;
-  fileActions: FileActions;
-  scope?: FileSearchScope;
-  onClear?: () => void;
-  literalContent?: boolean;
-}) {
-  return <div className="file-search">
-    <ScopeLabel scope={scope} onClear={onClear} />
-    <FileSearchField label="Search files and content" query={query} onChange={setQuery} scope={scope} />
-    {(literalContent ? query : query.trim()) && <p className="file-help" role="status">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
-    <FileSearchResults results={results} onOpen={onOpen} actions={actions} fileActions={fileActions} />
-  </div>;
-}
-
 export function ProjectFileSearch({ checkoutId, onOpen, scope, onClear, editorSearch, actions = () => [], fileActions = () => [] }: {
   checkoutId: string; onOpen: OpenMatch; scope?: FileSearchScope; onClear?: () => void; actions?: MatchActions; fileActions?: FileActions;
   editorSearch?: EditorSearchRequest;

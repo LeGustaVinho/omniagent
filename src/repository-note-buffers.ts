@@ -87,19 +87,19 @@ function loaded(document: RepositoryDocument, draftRevision: string | null): Rep
   };
 }
 
-export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
-  const { previewFormat: _previewFormat, saveFormat: _saveFormat, ...notes } = useRepositoryFileBuffers<NoteCatalogEntry>(checkoutId, enabled, noteCommands, "note");
+export function useRepositoryNotes(checkoutId: string) {
+  const { previewFormat: _previewFormat, saveFormat: _saveFormat, ...notes } = useRepositoryFileBuffers<NoteCatalogEntry>(checkoutId, noteCommands, "note");
   return notes;
 }
 
-export function useRepositorySourceBuffers(checkoutId: string, enabled: boolean) {
+export function useRepositorySourceBuffers(checkoutId: string) {
   const { notes: files, getNote: getFile, extractSelection: _extractSelection, mergeReviewed: _mergeReviewed, renameReviewedTags: _renameReviewedTags, ...buffers } =
-    useRepositoryFileBuffers<string>(checkoutId, enabled, sourceCommands, "file");
+    useRepositoryFileBuffers<string>(checkoutId, sourceCommands, "file");
   return { ...buffers, files, getFile };
 }
 
 function useRepositoryFileBuffers<CatalogEntry>(
-  checkoutId: string, enabled: boolean, commands: typeof noteCommands, noun: "note" | "file",
+  checkoutId: string, commands: typeof noteCommands, noun: "note" | "file",
 ) {
   const [state, setState] = useState<NoteState>({ notes: {}, failures: {} });
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
@@ -149,17 +149,15 @@ function useRepositoryFileBuffers<CatalogEntry>(
 
   useEffect(() => {
     mounted.current = true;
-    if (enabled) {
-      void refreshCatalog().catch(report);
-      void invoke<string[]>(commands.drafts, { checkoutId })
-        .then((paths) => { if (mounted.current) setDraftPaths(paths); }, report);
-    }
+    void refreshCatalog().catch(report);
+    void invoke<string[]>(commands.drafts, { checkoutId })
+      .then((paths) => { if (mounted.current) setDraftPaths(paths); }, report);
     return () => {
       mounted.current = false;
       catalogRequest.current += 1;
       for (const path of watches.keys()) stopWatching(path);
     };
-  }, [checkoutId, commands, enabled, refreshCatalog, report, stopWatching, watches]);
+  }, [checkoutId, commands, refreshCatalog, report, stopWatching, watches]);
 
   const load = useCallback((path: string): Promise<string | undefined> => {
     if (current.current.notes[path]) return Promise.resolve(path);
@@ -362,12 +360,12 @@ function useRepositoryFileBuffers<CatalogEntry>(
 
   const formatRevision = useCallback((path: string) => {
     const file = current.current.notes[path];
-    if (noun !== "file" || !enabled || !mounted.current || !file || file.incoming || file.sourceProblem
+    if (noun !== "file" || !mounted.current || !file || file.incoming || file.sourceProblem
       || file.draftRevision || file.content !== file.saved) {
       throw new Error("Open a saved file and resolve external changes before converting its format.");
     }
     return file.base.id;
-  }, [enabled, noun]);
+  }, [noun]);
 
   const previewFormat = useCallback((path: string, change: SourceFormatChange) => serialize(path, async (): Promise<ReviewedSourceFormat> => {
     const expectedRevision = formatRevision(path);

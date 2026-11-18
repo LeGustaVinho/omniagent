@@ -721,8 +721,8 @@ it("copies the exact clicked file from a live buffer or a read-only capture in t
     return backend(command, args);
   });
   function OtherWorkspace() {
-    useCheckoutTextReader(main, true, () => "wrong worktree");
-    useCheckoutTextReader(alternate, true, (path) => path === "docs/Guide.md" ? "# Knowledge draft\n" : undefined);
+    useCheckoutTextReader(main, () => "wrong worktree");
+    useCheckoutTextReader(alternate, (path) => path === "docs/Guide.md" ? "# Knowledge draft\n" : undefined);
     return null;
   }
   const user = userEvent.setup();

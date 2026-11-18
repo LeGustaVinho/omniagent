@@ -1,5 +1,5 @@
 import {
-  AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, GitFork, Link2,
+  AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, Link2,
   ListTree, Network, PanelRight, Paperclip, RotateCw, Save, Search, SplitSquareHorizontal, Wand2, X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -78,7 +78,7 @@ export default function KnowledgeWorkspace(props: WorkspaceProps) {
 function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
   const [reveal, setReveal] = useState<{ path: string }>();
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge" });
-  const repository = useRepositoryNotes(checkout.checkoutId, true);
+  const repository = useRepositoryNotes(checkout.checkoutId);
   const notes = repository.notes;
   const workspace = useRef<HTMLElement>(null);
   const detailSpace = useRef<HTMLDivElement>(null);
@@ -91,7 +91,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
   const [query, setQuery] = useState("");
   const [propertyFilter, setPropertyFilter] = useState<NotePropertyFilter>();
   const [focusSearch, requestSearchFocus] = useState(0);
-  const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, true, propertyFilter ? "" : query);
+  const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, propertyFilter ? "" : query);
   const propertiesOf = useKnowledgeProperties(Object.values(notes).map(({ content }) => content));
   const [graph, setGraph] = useState<false | "global" | { path: string; request: number }>(false);
   const graphEdges = useQuery({
@@ -152,7 +152,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
     }
     return [...indexed].map(([path, content]) => ({ path, content }));
   }, [notes, noteIndex.index.data, repository.catalog, repository.draftPaths]);
-  const previews = useRepositoryLinkPreviews(checkout.checkoutId, catalog, noteIndex.index.dataUpdatedAt, true);
+  const previews = useRepositoryLinkPreviews(checkout.checkoutId, catalog, noteIndex.index.dataUpdatedAt);
   const lookupLink = useCallback((link: NoteTarget, from: string) => linkPreviewValue(previews.data, link, from), [previews.data]);
   const drafts = useMemo(() => Object.fromEntries(Object.entries(repository.notes).filter(([, value]) => isDirty(value) && !value.sourceProblem)
     .map(([path, { content }]) => [path, noteFrontmatter(content)])), [repository.notes]);
@@ -372,7 +372,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
 
   const readOpenNote = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
     ? getNote(path)?.content : undefined, [dock.api, getNote]);
-  useCheckoutTextReader(checkout.checkoutId, true, readOpenNote);
+  useCheckoutTextReader(checkout.checkoutId, readOpenNote);
   const currentText = readOpenNote;
   const menu = fileContextActions({ checkout, status: setStatus, report: setProblem, currentText });
   const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, currentText,

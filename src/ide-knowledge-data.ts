@@ -1,4 +1,4 @@
-export interface ExampleFile {
+export interface NoteSource {
   path: string;
   content: string;
 }

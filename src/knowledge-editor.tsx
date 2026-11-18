@@ -13,7 +13,7 @@ import { Braces, CheckSquare, List, Redo2, Search, Table2, Undo2 } from "lucide-
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 import type { MenuGroups } from "@/components/ui/context-actions";
-import type { ExampleFile } from "@/ide-knowledge-data";
+import type { NoteSource } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
 import { headings, markdownNoteLink, parseReadingFile, parseWiki, readingLocalAddress, type NoteTarget } from "@/knowledge-document";
 import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteContextHit } from "@/knowledge-context";
@@ -348,7 +348,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   mode: "source" | "live";
   path: string;
   source: string;
-  files: readonly ExampleFile[];
+  files: readonly NoteSource[];
   jump?: NoteJump;
   onChange: (content: string) => void;
   onLink: (link: NoteTarget) => void;

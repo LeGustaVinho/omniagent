@@ -91,7 +91,6 @@
 .pipeline-tabs button:focus-visible { outline-offset: -3px; }
 
 .pipeline-view { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
-.pipeline-view[hidden] { display: none; }
 .pipeline-view-content { gap: 1rem; overflow: auto; padding: 1.25rem; }
 
 .pipeline-toolbar {

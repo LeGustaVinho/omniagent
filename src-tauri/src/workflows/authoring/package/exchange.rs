@@ -375,7 +375,7 @@ fn prepare(
             PackageArtifactBody::Pipeline { .. }
             | PackageArtifactBody::Subflow { .. }
             | PackageArtifactBody::Prompt { .. } => match catalog.compile(member, &mut notes) {
-                Ok((_, definitions)) => Some(definitions),
+                Ok(definitions) => Some(definitions),
                 Err(error) => {
                     conflicts.push(issue(
                         &member.key,
@@ -683,7 +683,6 @@ fn published_subflow_ports(
     ReviewCatalog::new(db, project, &document, "exchange-installed")
         .compile(&document.package.members[0], &mut Vec::new())
         .ok()
-        .map(|(_, definitions)| definitions)
 }
 
 fn interface_ports(

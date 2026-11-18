@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveRestore, FileCode2, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { ExternalEditorSettings } from "@/external-editor-settings";
