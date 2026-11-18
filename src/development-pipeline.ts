@@ -13,7 +13,7 @@ type Member = { key: string; name: string; body: ReusableBody; references?: Reco
 type Graph = { graph: WorkflowGraph; references: Record<string, ReusableReference> };
 type Branches = Record<string, (input: Flow) => Flow>;
 
-const name = "Development Pipeline";
+export const developmentPipelineName = "Development Pipeline";
 const endpoint = (node: string, port: string): WorkflowEndpoint => ({ node, port });
 const draft = (key: string): ReusableReference => ({ source: "draft", key });
 const slug = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -36,6 +36,7 @@ const loopContext = (initial: Fields, previous: Fields) => [
 ];
 
 export function developmentPipelinePackage(model: ModelSelection): { name: string; members: Member[] } {
+  const name = developmentPipelineName;
   const members: Member[] = developmentRoles.map((key) => ({
     key: `role-${key}`, name: developmentRole(key, model).name,
     body: { kind: "role", template: developmentRole(key, model) },

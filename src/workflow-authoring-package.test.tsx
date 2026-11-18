@@ -36,7 +36,8 @@ it("creates independent Development Pipeline drafts using the native package act
   </QueryClientProvider>);
   const user = userEvent.setup();
   for (const ordinal of [1, 2]) {
-    await user.click(screen.getByRole("button", { name: "Use template" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Development Pipeline" }));
     const dialog = within(await screen.findByRole("dialog", { name: "Development Pipeline" }));
     const create = dialog.getByRole<HTMLButtonElement>("button", { name: "Create draft" });
     await waitFor(() => expect(create.disabled).toBe(false));

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
-import { developmentPipelinePackage } from "@/development-pipeline";
+import { developmentPipelineName, developmentPipelinePackage } from "@/development-pipeline";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview, type SchemaMember } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
@@ -67,7 +67,7 @@ function packageGraphs(text: string) {
   try {
     const parsed = JSON.parse(text) as Package;
     if (!Array.isArray(parsed.members)) return [];
-    return parsed.members.flatMap((member) => {
+    const graphs = parsed.members.flatMap((member) => {
       const graph = member?.body?.graph;
       if (!graph || typeof member.key !== "string" || typeof member.name !== "string" || typeof graph.name !== "string" || !Array.isArray(graph.nodes) || !Array.isArray(graph.wires)
         || !graph.nodes.every((node) => typeof node?.id === "string" && typeof node.kind === "string" && typeof node.configuration?.kind === "string")
@@ -76,6 +76,7 @@ function packageGraphs(text: string) {
       return [{ key: member.key, name: member.name, graph, kind: member.body.kind, references: member.references ?? {},
         inputs: member.body.inputs, outputs: member.body.outputs }];
     });
+    return graphs.sort((a, b) => Number(b.kind === "pipeline") - Number(a.kind === "pipeline"));
   } catch {
     return [];
   }
@@ -201,14 +202,14 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
         </article>
         <article className="pipeline-builder-start">
           <span className="pipeline-builder-icon"><PackageIcon size={18} aria-hidden /></span>
-          <div><h3>From template</h3><p>Plan, implement, and validate changes with the Development Pipeline.</p></div>
+          <div><h3>From template</h3><p>Plan, implement, and validate changes.</p></div>
           <Dialog.Root open={choosingTemplate} onOpenChange={(open) => {
             if (useTemplate.isPending) return;
             if (open) useTemplate.reset();
             showTemplate(open);
           }}>
-            <Dialog.Trigger asChild><Button type="button" variant="outline">Use template</Button></Dialog.Trigger>
-            <BuilderLandingDialog title="Development Pipeline" icon={<Workflow size={20} aria-hidden />}
+            <Dialog.Trigger asChild><Button type="button" variant="outline">{developmentPipelineName}</Button></Dialog.Trigger>
+            <BuilderLandingDialog title={developmentPipelineName} icon={<Workflow size={20} aria-hidden />}
               description="Choose the default model for the template Roles." busy={useTemplate.isPending}>
               <form className="pipeline-form pipeline-builder-dialog-form" onSubmit={(event) => {
                 event.preventDefault();

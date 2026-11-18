@@ -1,6 +1,6 @@
 import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { Viewport } from "@xyflow/react";
-import { FileDiff, Workflow } from "lucide-react";
+import { ArrowLeft, FileDiff, Workflow } from "lucide-react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
@@ -133,18 +133,25 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
       {options.map((member) => <option key={member.key} value={member.key}>{member.name}</option>)}
     </select>
   </label> : undefined;
+  const mainPipeline = graphs.find(({ kind }) => kind === "pipeline");
+  const memberNavigation = <>
+    {mainPipeline && selectedMember?.key !== mainPipeline.key && <Button type="button" variant="outline" onClick={() => select(mainPipeline.key)}>
+      <ArrowLeft size={15} aria-hidden /> Back to pipeline
+    </Button>}
+    {memberPicker}
+  </>;
   const pinned = preview.data?.members.find(({ key }) => key === graph?.key)?.graphDefinitions ?? {};
   const error = preview.error ?? registry.error ?? (prompt ? roleCatalog.error : null);
   return <section className="workflow-builder-graph" aria-label="Build workflow">
       {error && <p role="alert">{String(error)}</p>}
       {show && (registry.isPending || preview.isPending) && <p role="status">Loading pipeline graph…</p>}
       {schema && editSchema && <>
-        {memberPicker}
+        <div className="pipeline-actions">{memberNavigation}</div>
         <WorkflowSchemaEditor key={schema.key} name={schema.name} fields={schema.body.fields} disabled={disabled}
           onChange={(name, fields) => editSchema({ ...schema, name, body: { kind: "schema", fields } })} />
       </>}
       {!schema && prompt && registry.data && preview.isSuccess && editPrompt && <PromptRevisionView>
-        {memberPicker}
+        <div className="pipeline-actions">{memberNavigation}</div>
         {prompt.body.prompt.schemaContract ? <TypedPromptInspector key={prompt.key} projectId={projectId} checkoutId={checkoutId}
           title={prompt.name} onTitle={(name) => editPrompt({ ...prompt, name })}
           prompt={prompt.body.prompt.text} references={prompt.references ?? {}} defaults={{}}
@@ -164,13 +171,14 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         edit={(next, references) => edit(graph.key, next, references)}
         promptMembers={promptMembers} draftRoles={draftRoles} draftSchemas={draftSchemas} editPrompt={editPrompt} newPrompt={newPrompt} savePrefab={savePrefab}
         previewMembers={preview.data.members}
-        onDerive={setDerivation} deriveDisabled={deriveDisabled} toolbarStart={memberPicker}
+        onDerive={setDerivation} deriveDisabled={deriveDisabled} toolbarStart={memberNavigation}
         initialViewport={viewports.get(graph.key)} onViewportChange={(viewport) => viewports.set(graph.key, viewport)}
-        openDraftSubflow={(key) => {
+        openDraftMember={(key) => {
           const child = graphs.find((member) => member.key === key && ["subflow", "pipeline"].includes(member.kind ?? ""));
-          return child ? <Button type="button" variant="outline" onClick={() => select(child.key)}>
-            {child.kind === "subflow" ? "Open draft Function" : "Open draft child workflow"}
-          </Button> : null;
+          const prefab = promptMembers.find((member) => member.key === key && member.body.prompt.nodePrefab);
+          const label = child?.kind === "subflow" ? "Open draft Function"
+            : child ? "Open draft child workflow" : prefab ? "Open draft Prefab" : null;
+          return label && <Button type="button" variant="outline" onClick={() => select(key)}>{label}</Button>;
         }} />}
       {derivation && graph && !prompt && <WorkflowReusableDerivationDialog projectId={projectId} graph={graph.graph}
         source={{ type: "package_revision", draftId, revision: savedRevision, memberKey: graph.key }} selection={derivation}
@@ -202,7 +210,7 @@ function acceptsStartSchema(node: WorkflowGraphNode, definition?: WorkflowDefini
     name === "inputs" && value.kind === "data" && value.artifact === "json_object") === true;
 }
 
-function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow,
+function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftMember,
   canvas, setCanvas, graphs, memberKey, isFunction, onDerive, deriveDisabled, toolbarStart, initialViewport, onViewportChange,
   promptMembers, draftRoles, draftSchemas, editPrompt, previewMembers, newPrompt, savePrefab }: {
   projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
@@ -215,7 +223,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   newPrompt?: (source?: PromptMember) => ReusableReference;
   savePrefab?: (name: string, prompt: PromptMember["body"]["prompt"], refs: Record<string, ReusableReference>) => void;
   previewMembers: Member[];
-  openDraftSubflow: (key: string) => React.ReactNode;
+  openDraftMember: (key: string) => React.ReactNode;
   canvas: WorkflowCanvasEdit;
   setCanvas: (canvas: WorkflowCanvasEdit) => void;
   graphs: GraphMember[];
@@ -461,7 +469,9 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
             const configuration: WorkflowNodeConfiguration = { kind: "prompt_overrides", ...typed.overrides, ...patch };
             edit({ ...graph, nodes: graph.nodes.map((node) => node.id === id ? { ...node, configuration } : node) }, nextReferences);
           };
-          return <TypedPromptInspector key={id} projectId={projectId} checkoutId={checkoutId}
+          const reference = references[id];
+          return <>{reference?.source === "draft" && openDraftMember(reference.key)}
+            <TypedPromptInspector key={id} projectId={projectId} checkoutId={checkoutId}
             prompt={typeof typed.overrides?.prompt === "string" ? typed.overrides.prompt : undefined}
             defaultPrompt={member.body.prompt.text} references={typed.local} defaults={member.references ?? {}} role={typed.role}
             defaultRoleOverrides={typed.defaults} roleOverrides={typed.fields} roleChoices={choices}
@@ -474,7 +484,8 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
               replaceConfiguration(slot === "role" && current !== resolved ? { roleOverrides: {} } : undefined, next);
             }}
             onRoleOverrides={(roleOverrides) => replaceConfiguration({ roleOverrides })}
-            onSavePrefab={savePrefab && persistPrefab} />;
+            onSavePrefab={savePrefab && persistPrefab} />
+          </>;
         }
         return <p role="alert">This Prompt uses a retired executor contract. Replace it with a typed AI Node Agent.</p>;
       }}
@@ -495,7 +506,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
         const reference = references[id];
         return <>
           {referencePicker(id)}
-          {reference?.source === "draft" && openDraftSubflow(reference.key)}
+          {reference?.source === "draft" && openDraftMember(reference.key)}
           {reference?.source === "published" && reference.version.kind === "subflow" &&
             <PublishedSubflow key={JSON.stringify(reference.version)} projectId={projectId} checkoutId={checkoutId} version={reference.version} />}
           {reference?.source === "published" && reference.version.kind === "preset" &&

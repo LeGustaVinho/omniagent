@@ -9,6 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import type { PackageDraft } from "@/workflow-authoring-package";
+import { defaultTypedPrompt } from "@/workflow-prompt-model";
 import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { testCheckout } from "@/test-fixtures/checkout";
@@ -186,6 +187,54 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
   }
   await user.click(screen.getByRole("button", { name: "Library" }));
   expect(await screen.findByRole("button", { name: "Open draft of Analyze requests" })).toBeTruthy();
+});
+
+it("opens the main pipeline first and returns to it from draft Functions and Prefabs", async () => {
+  const subflow = { ...start, kind: "subflow", title: "Function", inputs: [], outputs: [] };
+  const current: PackageDraft = {
+    id: "draft", revision: "saved", conversationId: null, publication: null, request: null,
+    package: { name: "Development Pipeline", members: [
+      { key: "clarify", name: "Clarify Requirements", body: { kind: "subflow", graph: {
+        name: "Clarify Requirements", nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }], wires: [],
+      } } },
+      { key: "discovery", name: "Discovery Analyst",
+        body: { kind: "prompt", prompt: { ...defaultTypedPrompt(), nodePrefab: true } } },
+      { key: "pipeline", name: "Development Pipeline", body: { kind: "pipeline", graph: {
+        name: "Development Pipeline", nodes: [
+          { id: "clarify-node", kind: "subflow", configuration: { kind: "none" } },
+          { id: "discovery-node", kind: "subflow", configuration: { kind: "none" } },
+        ], wires: [],
+      } }, references: { "clarify-node": { source: "draft", key: "clarify" }, "discovery-node": { source: "draft", key: "discovery" } } },
+    ] },
+  };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    switch (command) {
+      case "inspect_workflow_package": return current;
+      case "preview_workflow_package_revision": return { revision: "saved", revisions: ["saved"], members: [] };
+      case "workflow_node_definitions": return [start, subflow];
+      case "workflow_package_catalog": return [];
+      default: throw new Error(command);
+    }
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelineAuthoringEditor checkout={testCheckout} draftId="package:draft" openWorkspace={vi.fn()}
+      openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  expect(await screen.findByRole("textbox", { name: "Pipeline name" })).toHaveProperty("value", "Development Pipeline");
+  const members = screen.getByRole<HTMLSelectElement>("combobox", { name: "Graph member" });
+  expect(members.value).toBe("pipeline");
+  expect(members.options[0]?.value).toBe("pipeline");
+  expect(screen.queryByRole("button", { name: "Back to pipeline" })).toBeNull();
+
+  await user.click(await screen.findByRole("button", { name: "Open draft Function" }));
+  expect(await screen.findByRole("textbox", { name: "Function name" })).toHaveProperty("value", "Clarify Requirements");
+  await user.click(screen.getByRole("button", { name: "Back to pipeline" }));
+  await user.click(await screen.findByRole("button", { name: "Select discovery-node" }));
+  await user.click(screen.getByRole("button", { name: "Open draft Prefab" }));
+  expect(await screen.findByRole("textbox", { name: "Card title" })).toHaveProperty("value", "Discovery Analyst");
+  await user.click(screen.getByRole("button", { name: "Back to pipeline" }));
+  expect(await screen.findByRole("textbox", { name: "Pipeline name" })).toHaveProperty("value", "Development Pipeline");
 });
 
 it("uses the canvas node picker and saves an AI Node with its position and Schema references", async () => {
