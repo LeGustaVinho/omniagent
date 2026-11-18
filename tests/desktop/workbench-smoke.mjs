@@ -370,228 +370,41 @@ async function checkConversationActivity(browser) {
   return activity;
 }
 
-async function checkSimulation(browser, checkout) {
-  const conversationScope = { checkoutId: checkout.checkoutId };
-  const before = await invoke(browser, "list_conversations", conversationScope);
-  const settingsBefore = await invoke(browser, "appearance_settings");
-  const queueBefore = await invoke(browser, "project_job_queue", { projectId: checkout.projectId });
-  const realCapacity = queueBefore.settings.capacity;
+async function captureProductWorkspaces(browser, checkout) {
+  assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, checkout.checkoutId);
+  const queue = await invoke(browser, "project_job_queue", { projectId: checkout.projectId });
+  const realCapacity = queue.settings.capacity;
   await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1440, height: 900 } } });
   await checkSharedWorkspaceNavigation(browser, realCapacity);
-  await click(browser, '.work-titlebar button[title="Try a workflow with example data"]');
-  const simulation = browser.$('[aria-label="Simulation controls"]');
-  await simulation.waitForDisplayed();
-  await checkSharedWorkspaceNavigation(browser, 3);
 
-  const shown = ".work-deck:not([hidden]) .work-view:not([hidden])";
-  const knowledge = browser.$(shown);
+  const knowledge = browser.$('.work-view:not([hidden]) [aria-label="Knowledge workspace"]');
+  await click(knowledge, "button=AGENTS.md");
   await click(knowledge, "button=Reading");
-  await knowledge.$(".note-reading article").waitForDisplayed();
+  await knowledge.$('[aria-label="Reading view for AGENTS.md"] article').waitForDisplayed();
   await capture(browser, "08-knowledge-reading");
+
   await click(knowledge, "button=Graph");
-  await knowledge.$(".note-graph-canvas canvas:first-child").waitForDisplayed();
+  await knowledge.$('[aria-label="Graph of repository notes"] canvas').waitForDisplayed();
   await capture(browser, "08-knowledge-graph");
   await click(knowledge, "button=Graph");
-  await click(browser, "button=Simulate planning");
-  await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
-  await click(browser, 'button[aria-label="Tasks"]');
-  const taskWorkspace = browser.$(shown);
-  await click(taskWorkspace, "button=Add release readiness checklist");
-  await click(taskWorkspace, "button=Answer question");
-  await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
-  await click(browser, 'button[aria-label="Back to Tasks"]');
-  await taskWorkspace.$('[aria-label="Task details"]').$("button=Answer question").waitForDisplayed();
-  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "Answer question"));
-  await click(taskWorkspace, "button=Answer question");
-  await capture(browser, "01-conversations");
-  const conversationRow = browser.$(".conv-example-sidebar").$("button=Plan the release checklist");
-  await conversationRow.click({ button: "right" });
-  await browser.$('[role="menu"]').waitForDisplayed();
-  await capture(browser, "01-context-menu");
-  await browser.keys("Escape");
-  const conversation = browser.$(shown);
-  const composerHeight = () => browser.execute(() => document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer")
-    .getBoundingClientRect().height);
-  const heightBefore = await composerHeight();
-  await click(conversation, ".model-picker-trigger");
-  const modelMenu = browser.$(".model-picker-menu");
-  await modelMenu.waitForDisplayed();
-  assert.equal(await composerHeight(), heightBefore);
-  assert.equal(await browser.execute(() => {
-    const header = document.querySelector(".model-picker-catalog-header");
-    const heading = header.querySelector(".model-picker-heading").getBoundingClientRect();
-    const sort = header.querySelector(".model-picker-sort").getBoundingClientRect();
-    return Math.abs(heading.top + heading.height / 2 - sort.top - sort.height / 2) <= 1;
-  }), true, "Model sorting and title must share a line when the menu has room");
-  assert.equal(await conversation.$('select[aria-label="Provider"]').isExisting(), false);
-  await modelMenu.$('[role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]').waitForDisplayed();
-  await click(modelMenu, '[aria-label="Price, lowest first"]');
-  await modelMenu.$('[aria-label="Price, lowest first"][aria-checked="true"]').waitForDisplayed();
-  await capture(browser, "01-composer-model-picker");
-  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
-  const effortValues = () => browser.execute(() => {
-    const composer = document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer");
-    return Array.from(composer.querySelector('select[aria-label="Effort"]').options, (option) => option.value);
-  });
-  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max", "ultra"]);
-  const effort = conversation.$('select[aria-label="Effort"]');
-  await effort.selectByAttribute("value", "ultra");
-  await click(conversation, ".model-picker-trigger");
-  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6 Luna"]');
-  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max"]);
-  assert.equal(await effort.getValue(), "");
-  await click(conversation, ".model-picker-trigger");
-  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]');
-  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh"]);
-  await click(conversation, ".model-picker-trigger");
-  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
-  await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "goal");
-  const draft = conversation.$('textarea[aria-label="Message draft"]');
-  await draft.setValue("Verify recovery instructions against the release checklist.");
-  await click(conversation, "button=Start goal");
-  await click(conversation, "button=Continue goal");
-  await click(conversation, 'button[aria-label="View goal objective"]');
-  const goalDialog = browser.$('.conv-dialog[role="dialog"]');
-  const objective = goalDialog.$("textarea");
-  assert.equal(await objective.getValue(), "Verify recovery instructions against the release checklist.");
-  await replaceControlValue(browser, objective, "Verify backup and recovery instructions against the release checklist.");
-  await capture(browser, "01-goal-editor");
-  await click(goalDialog, "button=Save objective");
-  assert.match(await conversation.$('.conv-goal [role="status"]').getText(), /Running · 1\/3 turns/);
-  await click(conversation, "button=Cancel goal");
-  await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "plan");
-  await click(conversation, "button=Reply");
-  await click(conversation, "button=Approve implementation");
-  await click(conversation, "button=Open release task");
-  const taskModel = 'button[aria-label^="Filter tasks by model ·"]';
-  await click(browser.$(shown), taskModel);
-  await click(browser, '.model-picker-menu [aria-label="GPT-6.1 Sol"]');
-  assert.equal(await browser.$(shown).$(taskModel).getText(), "GPT-6.1 Sol");
-  await click(browser.$(shown), taskModel);
-  await click(browser.$(".model-picker-menu"), 'div=All models');
-  assert.equal(await browser.$(shown).$(taskModel).getText(), "All models");
-  await capture(browser, "09-agile-kanban");
-  await click(browser.$(shown), "button=Table");
-  const agile = browser.$(shown).$(".agile-table");
-  await click(agile, 'button[aria-label="Expand Windows release readiness"]');
-  await click(agile, 'button[aria-label="Expand Add release readiness checklist"]');
-  const checklistItem = agile.$('label=Review the candidate diff').$('input[type="checkbox"]');
-  assert.equal(await checklistItem.isSelected(), false);
-  await checklistItem.click();
-  assert.equal(await checklistItem.isSelected(), true);
-  await click(agile, 'button[aria-label="Expand Document the rollback exercise"]');
-  await agile.$('label=List the backup and restore requirements').waitForDisplayed();
-  await capture(browser, "09-agile-table");
-  await click(browser.$(shown), "button=Kanban");
-  await click(browser, 'button[aria-label="Queue"]');
-  const queue = browser.$('.work-queue-panel:not([hidden]) [aria-label="Execution queue"]');
-  await queue.waitForDisplayed();
-  await capture(browser, "10-queue");
-  await click(browser, "button=Start attempt");
-  await click(browser, "button=Capture candidate");
-  await click(queue, 'button=Inspect attempt');
-  const activity = await checkConversationActivity(browser);
-  await capture(browser, "10-activity-simulate");
-  await click(activity, 'button[aria-label="Close activity"]');
-  await click(queue, 'button[aria-label="Close queue"]');
-  await click(browser.$(shown), "button=Run verification");
-  await click(browser.$(shown), "button=Review saved diff");
-  const changes = () => browser.$('.work-inspector[data-kind="changes"]');
-  await changes().$('.monaco-diff-editor').waitForDisplayed({ timeout: 20_000 });
-  await click(changes(), 'button[aria-label="Expand side panel"]');
-  await changes().$('select[aria-label="Diff layout"]').selectByAttribute("value", "split");
-  await capture(browser, "02-saved-changes");
-  await changes().$('select[aria-label="Diff layout"]').selectByAttribute("value", "unified");
-  await capture(browser, "02-unified-changes");
-  await click(changes(), 'button[aria-label="Close changes"]');
-  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "Review saved diff"),
-    { timeoutMsg: "Closing Changes did not restore focus to the task's diff action" });
-  await click(browser.$(shown), "button=Review saved diff");
-  await click(changes(), "button=Accept diff");
-  await click(changes(), 'button[aria-label="Close changes"]');
-  await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').waitForDisplayed();
-  assert.equal(await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').getText(), "Waiting for Sub-Tasks to finish.");
 
-  await click(browser, 'button[aria-label="IDE"]');
-  const ide = browser.$(shown);
-  if (!await ide.$('button[aria-expanded="true"][title="src"]').isExisting()) await click(ide, 'button[title="src"][aria-expanded]');
-  await click(ide, "button=index.ts");
-  await ide.$(".monaco-editor").waitForDisplayed();
-  const bottom = ide.$('button[aria-label="Toggle bottom panel"]');
-  if ((await bottom.getAttribute("aria-expanded")) === "false") await bottom.click();
-  await ide.$(".xterm").waitForDisplayed();
-  await capture(browser, "11-editor-and-terminal");
-
-  const scenario = simulation.$("select");
-  await scenario.selectByAttribute("value", "recovery");
-  await click(browser, 'button[aria-label="Queue"]');
-  await click(browser, "button=Resume from checkpoint");
-  await browser.$("button=Start attempt").waitForEnabled();
-  await scenario.selectByAttribute("value", "pipelines");
-  await browser.$(shown).$(".react-flow").waitForDisplayed();
-  await capture(browser, "03-pipelines");
-  await click(browser.$(shown), "button=Compare");
-  await click(browser.$(shown).$(".pipeline-view:not([hidden])"), 'button[aria-label="Select models · 3 selected"]');
-  await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
-  assert.equal(await browser.$('.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]').getAttribute("aria-checked"), "false");
-  await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
-  await browser.keys("Escape");
-  await click(browser.$(shown), "button=Library");
-  await browser.$(shown).$('[aria-label="Workflow library"]').$("p=No items in the library.").waitForDisplayed();
-  await click(browser.$(shown).$('[aria-label="Pipelines views"]'), "button=Builder");
-  const demoCanvas = browser.$(shown).$('[aria-label="Simulation graph canvas"]');
-  assert.equal(await demoCanvas.$(".workflow-node-card").isExisting(), false);
-  await demoCanvas.$(".react-flow__controls-fitview").waitForDisplayed();
-  assert.equal(await browser.$(shown).$("button=Add node").isExisting(), false);
-  await click(browser, 'button[aria-label="Settings"]');
-  await click(browser, "button=Git and delivery");
-  const gitMode = browser.$('select[id="after-acceptance"]');
-  await gitMode.waitForEnabled();
-  assert.equal(await gitMode.getValue(), "automatic_commit_user_merge");
-  await gitMode.selectByAttribute("value", "user_commits_and_merges");
-  await click(browser, 'button[aria-label="Close settings"]');
-  await scenario.selectByAttribute("value", "windows");
-  await click(browser, "button=Create backup");
-  await click(browser, "button=Continue");
-  await click(browser, "button=Continue");
-  await click(browser, "button=Finish");
-  await capture(browser, "04-system-settings");
-  await click(browser, "button=Execution policies");
-  for (const field of ["planning-model", "implementation-model"]) {
-    assert.equal(await browser.$(`.settings-dialog [data-setting="${field}"]`).isExisting(), false);
-  }
-  await click(browser, "button=Appearance");
-  await capture(browser, "04-appearance-settings");
-  await click(browser, 'button[aria-label="Close settings"]');
-  await scenario.selectByAttribute("value", "pipelines");
-  await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 640, height: 440 } } });
-  await browser.waitUntil(() => browser.execute(() => Math.abs(window.innerWidth - 640) <= 4));
-  await checkSharedWorkspaceNavigation(browser, 3);
-  await click(browser, 'button[aria-label="Settings"]');
-  await click(browser, "button=Appearance");
-  await browser.$('[data-setting="theme"]').waitForDisplayed();
-  assert.equal(await browser.execute(() => {
-    const dialog = document.querySelector(".settings-dialog").getBoundingClientRect();
-    return dialog.top >= 0 && dialog.left >= 0 && dialog.right <= innerWidth && dialog.bottom <= innerHeight;
-  }), true, "Compact Settings must stay inside the window while it opens");
-  await capture(browser, "04-settings-compact");
-  await browser.keys("Escape");
-  await browser.waitUntil(() => browser.execute(() => document.activeElement?.getAttribute("aria-label") === "Settings"));
-  await click(browser, "button=Exit simulation");
-  await simulation.waitForExist({ reverse: true });
-  assert.equal(await browser.$('button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
-  assert.deepEqual(await browser.execute(() => {
-    const shown = [...document.querySelectorAll(".work-view")].filter((view) => view.getClientRects().length);
-    return shown.map((view) => view.querySelector("[aria-label]")?.getAttribute("aria-label"));
-  }), ["Knowledge workspace"]);
-  assert.equal((await invoke(browser, "active_checkout")).checkoutId, checkout.checkoutId);
-  assert.deepEqual(await invoke(browser, "list_conversations", conversationScope), before);
-  assert.deepEqual(await invoke(browser, "appearance_settings"), settingsBefore);
   for (const [width, height] of [[1440, 900], [1120, 760], [640, 440]]) {
     await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width, height } } });
     await browser.waitUntil(() => browser.execute((wanted) => Math.abs(window.innerWidth - wanted) <= 4, width));
     assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
-    if (width === 640) await checkSharedWorkspaceNavigation(browser, realCapacity);
+    if (width === 640) {
+      await checkSharedWorkspaceNavigation(browser, realCapacity);
+      await click(browser, 'button[aria-label="Settings"]');
+      await click(browser, "button=Appearance");
+      await browser.$('[data-setting="theme"]').waitForDisplayed();
+      assert.equal(await browser.execute(() => {
+        const dialog = document.querySelector(".settings-dialog").getBoundingClientRect();
+        return dialog.top >= 0 && dialog.left >= 0 && dialog.right <= innerWidth && dialog.bottom <= innerHeight;
+      }), true, "Compact Settings must stay inside the window while it opens");
+      await capture(browser, "04-settings-compact");
+      await browser.keys("Escape");
+      await browser.waitUntil(() => browser.execute(() => document.activeElement?.getAttribute("aria-label") === "Settings"));
+    }
     await capture(browser, "05-workspace-" + width);
   }
   if (process.env.OMNIAGENT_UI_TEST_DISPLAY === "1") await checkDisplayPreferences(browser);
@@ -1352,18 +1165,22 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       const providers = await invoke(browser, "cli_executables");
       return providers.find((provider) => provider.provider === "codex")?.executable === application;
     });
-    await form.$("button=Use PATH").click();
+    await form.$("button=Use automatic detection").click();
     await browser.waitUntil(async () => {
       const providers = await invoke(browser, "cli_executables");
       return providers.find((provider) => provider.provider === "codex")?.executable === null;
     });
     if (process.env.OMNIAGENT_LIVE_PLUGIN_INVENTORY === "1") {
-      await form.$("button=Check plugins").click();
-      const summary = browser.$("summary*=Installed plugins");
-      await summary.waitForDisplayed({ timeout: 45_000 });
+      const codex = browser.$('section[aria-labelledby="codex-executable-title"]');
+      const details = codex.$("summary*=Inventory and capabilities");
+      await browser.waitUntil(async () => (await details.getText()).includes("installed plugin"), { timeout: 70_000 });
+      await details.click();
+      const summary = codex.$("summary*=Installed plugins");
+      await summary.waitForDisplayed();
       const inventory = await invoke(browser, "cli_plugin_inventory", { provider: "codex", refresh: false });
       assert.equal(inventory.report.status, "reported");
       assert.ok(inventory.report.version);
+      assert.notEqual(inventory.report.executable, application);
       assert.equal(await summary.getText(), `Installed plugins (${inventory.report.plugins.length})`);
       await summary.click();
       await browser.$("p*=In-session plugin loads are unconfirmed").waitForDisplayed();
@@ -1663,7 +1480,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
         return run?.id === retry.runId && ["cancelled", "interrupted"].includes(run.status);
       }, { timeout: 15_000 });
     }
-    await checkSimulation(browser, main);
+    await captureProductWorkspaces(browser, main);
     await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
     await browser.waitUntil(() => browser.execute(() => Math.abs(window.innerWidth - 1120) <= 4));
     await t.test("checks the current worktree and required evidence on a linked retry", async () => {
@@ -1972,7 +1789,7 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
   }
 });
 
-test("builds, simulates and executes a real pipeline visually", { timeout: 180_000 }, async (t) => {
+test("builds, reviews and executes a pipeline visually", { timeout: 180_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Visual pipeline checkout");
   git(scratch, "init", "-q", repo);
@@ -2003,7 +1820,7 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
   }
 });
 
-test("authors, simulates and runs a pipeline of Prompt cards on Windows", { timeout: 180_000 }, async (t) => {
+test("authors, reviews and runs a pipeline of Prompt cards on Windows", { timeout: 180_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Prompt builder checkout");
   git(scratch, "init", "-q", repo);

@@ -246,34 +246,14 @@ async function verifyResponsiveView(browser, invoke, capture, emulateDisplay, { 
   await setWindow(browser, invoke, 1120, 760);
 }
 
-async function simulateSavedRevision(browser, saved, markdownName) {
-  await click(browser.$("button=Review changes and simulate"));
+async function reviewSavedRevision(browser, saved) {
+  await click(browser.$("button=Review changes"));
   const review = browser.$('[aria-label="Review workflow package"]');
-  const samplePath = review.$(".//label[normalize-space(.)='Sample Markdown path']/input");
-  await replaceText(browser, samplePath, markdownName);
-  await click(review.$("button=Simulate"));
-  const trace = review.$('[aria-label="Simulation trace"]');
-  await textIsVisible(browser, trace, saved.revision);
-  await click(trace.$("summary=Sample inputs used"));
-  await textIsVisible(browser, trace, JSON.stringify(markdownName));
-  const simulationCanvas = '[aria-label="Simulated workflow graph"]';
-  const graph = trace.$(simulationCanvas);
-  const evidence = trace.$('[aria-label="Simulation node evidence"]');
-  for (const id of [start, load, condition]) {
-    await textIsVisible(browser, graph.$(`.react-flow__node[data-id="${id}"]`), "Completed");
-  }
-  for (const wire of wires) {
-    await graph.$(`.react-flow__edge[aria-label="${wireLabel(wire)} · Selected path"]`).waitForDisplayed({ timeout });
-  }
-  closePosition(await nodePosition(browser, simulationCanvas), saved.layouts.pipeline[load]);
-  await select(evidence, "Inspect simulated stage", load);
-  await textIsVisible(browser, evidence.$('[aria-label="Stage inputs"]'), "start.document");
-  await textIsVisible(browser, evidence.$('[aria-label="Stage outputs"]'), JSON.stringify(markdownName));
-  await select(evidence, "Inspect simulated stage", condition);
-  const branch = evidence.$('[aria-label="Stage outputs"]');
-  await textIsVisible(browser, branch, "matched · control");
-  assert.doesNotMatch(await branch.getText(), /unmatched/);
-  await fitGraph(browser, simulationCanvas);
+  const revision = review.$(".//label[starts-with(normalize-space(.), 'Review saved revision')]/select");
+  await revision.waitForDisplayed({ timeout });
+  assert.equal(await revision.getValue(), saved.revision);
+  await review.$("summary=Changes and dependencies").waitForDisplayed({ timeout });
+  return review;
 }
 
 async function launchFromTask({ browser, invoke, capture, checkout, title, version, sourceRevision }) {
@@ -502,11 +482,11 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const previousRuns = new Set((await listRuns()).map(({ id }) => id));
   const listJobs = async () => (await invoke(browser, "project_job_queue", { projectId })).jobs;
   const previousJobs = await listJobs();
-  await simulateSavedRevision(browser, saved, markdownName);
+  await reviewSavedRevision(browser, saved);
   assert.deepEqual(new Set((await listRuns()).map(({ id }) => id)), previousRuns);
   assert.deepEqual(await listJobs(), previousJobs);
   assert.equal((await invoke(browser, "inspect_workflow_package", draftScope)).publication, null);
-  await capture?.(browser, "visual-pipeline-simulated");
+  await capture?.(browser, "visual-pipeline-reviewed");
   await click(browser.$('button[aria-label="Close review workflow package"]'));
 
   await click(browser.$("button=Review publication"));
@@ -869,32 +849,14 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   assert.deepEqual(saved.package.members[0].body.graph.wires.map(wireLabel).sort(), [first, reviewed, data].map(wireLabel).sort());
   const previousQueue = (await invoke(browser, "project_job_queue", { projectId })).jobs;
 
-  await click(browser.$("button=Review changes and simulate"));
-  const review = browser.$('[role="dialog"].workflow-builder-dialog');
-  const reviewRevision = review.$(".//label[starts-with(normalize-space(.), 'Review saved revision')]/select");
-  await reviewRevision.waitForDisplayed({ timeout });
-  assert.equal(await reviewRevision.getValue(), saved.revision);
-  const preview = await invoke(browser, "preview_workflow_package_revision", { ...draftScope, revision: saved.revision });
-  const pipelinePreview = preview.members.find(({ key }) => key === "pipeline");
-  assert.equal(pipelinePreview.simulatable, true, pipelinePreview.diagnostics.join("\n"));
-  assert.ok(pipelinePreview.sampleNodes.some(({ prompt }) => prompt), "The reviewed revision should expose Prompt samples");
-  await click(review.$("summary=Prompt responses"));
-  const chooseRoute = review.$('select[aria-label="Sample route for prompt::execute"]');
-  async function simulateRoute(route) {
-    await click(review.$("button=Simulate"));
-    const trace = review.$('[aria-label="Simulation trace"]');
-    await click(trace.$('[aria-label="Simulated subflows"] > summary'));
-    const evaluate = trace.$(".//details[./summary[contains(normalize-space(.),'Evaluate changes')]]");
-    await click(evaluate.$("./summary"));
-    await textIsVisible(browser, evaluate.$('[aria-label="Forwarded outputs"]'), route + " · selected");
-  }
-  await chooseRoute.selectByAttribute("value", "review");
-  await replaceText(browser, review.$(".//label[normalize-space(.)='summary']/input"), "Ready to review.");
-  await simulateRoute("review");
-  await chooseRoute.selectByAttribute("value", "deliver");
-  await simulateRoute("deliver");
+  const review = await reviewSavedRevision(browser, saved);
+  const artifacts = review.$(".//label[starts-with(normalize-space(.), 'Review artifact')]/select");
+  await artifacts.selectByVisibleText("Evaluate changes · prompt");
+  await review.$("summary=Changes and dependencies").waitForDisplayed({ timeout });
+  await click(review.$("summary=Dependencies"));
+  await textIsVisible(browser, review, "Draft fixture-role");
   assert.deepEqual((await invoke(browser, "project_job_queue", { projectId })).jobs, previousQueue);
-  await capture?.(browser, "visual-prompt-simulation");
+  await capture?.(browser, "visual-prompt-reviewed");
   await click(review.$('button[aria-label="Close review workflow package"]'));
 
   await click(browser.$("button=Review publication"));
