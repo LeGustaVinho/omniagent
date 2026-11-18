@@ -62,9 +62,9 @@ const data = (name: string, artifact: string): WorkflowPort => ({ name, value: {
 const start: WorkflowDefinition = { kind: "start", title: "Start", revision: 2, configuration: "none", executor: "bind_input", effect: "none",
   inputs: [], outputs: [control("start"), data("document", "markdown")] };
 const old = { ...start, revision: 1, outputs: [control("start"), data("old-document", "markdown")] };
-const context: WorkflowDefinition = { kind: "load_context", title: "Load context", revision: 1, configuration: "none", executor: "read_context", effect: "read_evidence",
+const context: WorkflowDefinition = { kind: "wait", title: "Load context", revision: 1, configuration: "none", executor: "read_context", effect: "read_evidence",
   inputs: [control("ready"), data("document", "markdown")], outputs: [control("loaded"), data("context", "markdown")] };
-const plan: WorkflowDefinition = { kind: "plan", title: "Plan", revision: 1, configuration: "agent_role", executor: "plan_agent", effect: "invoke_model",
+const plan: WorkflowDefinition = { kind: "agent", title: "Plan", revision: 1, configuration: "agent_role", executor: "plan_agent", effect: "invoke_model",
   inputs: [control("ready"), data("context", "markdown")], outputs: [control("planned"), data("plan", "plan")] };
 const wire = (from: string, output: string, to: string, input: string) => ({ from: { node: from, port: output }, to: { node: to, port: input } });
 
@@ -75,7 +75,7 @@ it("opens actions for the clicked node, connection, and canvas independently", a
     const [state, setState] = useState<WorkflowEditorState>({ graph: {
       name: "Test graph", wires: [connection], nodes: [
         { id: "start", kind: "start", configuration: { kind: "none" } },
-        { id: "context", kind: "load_context", configuration: { kind: "none" } },
+        { id: "context", kind: "wait", configuration: { kind: "none" } },
       ],
     }, layout: {}, updateDefinitions: {} });
     return <WorkflowGraphEditor projectId="test" state={state} setState={setState} definitions={definitions}
@@ -97,39 +97,6 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   fireEvent.contextMenu(screen.getByTestId("test-pipeline-pane"));
   await user.click(within(await screen.findByRole("menu", { name: "Pipeline canvas" })).getByRole("menuitem", { name: "Undo graph edit" }));
   expect(screen.getByTestId(edge)).toBeTruthy();
-});
-
-it("requires the reusable review's prompt and subject from the same evidence collector", () => {
-  const collector: WorkflowDefinition = {
-    kind: "collect_evidence", title: "Collect evidence", revision: 1, configuration: "none",
-    executor: "collect_evidence", effect: "none", inputs: [control("ready")],
-    outputs: [control("completed"), data("text", "rendered_text"), data("evidence", "evidence_set")],
-  };
-  const agent: WorkflowDefinition = {
-    kind: "agent", title: "Agent", revision: 2, configuration: "agent_role", executor: "read_only_agent",
-    effect: "invoke_model", inputs: [control("ready"), data("prompt", "rendered_text"),
-      data("comparison", "comparison_results"), data("review_subject", "evidence_set")], outputs: [control("completed")],
-  };
-  const definitions = { start, brief: collector, other: collector, agent };
-  const graph: WorkflowGraph = {
-    name: "Selective review",
-    nodes: [
-      { id: "start", kind: "start", configuration: { kind: "none" } },
-      { id: "brief", kind: "collect_evidence", configuration: { kind: "none" } },
-      { id: "other", kind: "collect_evidence", configuration: { kind: "none" } },
-      { id: "agent", kind: "agent", configuration: { kind: "agent_role", role: "reviewer", requirements: { reviewReuse: true } } },
-    ],
-    wires: [
-      wire("start", "start", "brief", "ready"), wire("start", "start", "other", "ready"),
-      wire("brief", "completed", "agent", "ready"), wire("brief", "text", "agent", "prompt"),
-    ],
-  };
-  const diagnostic = "agent review reuse requires prompt and review subject from the same Collect Evidence node.";
-  expect(graphProblems(graph, definitions)).toEqual([diagnostic]);
-  expect(graphProblems({ ...graph, wires: [...graph.wires, wire("other", "evidence", "agent", "review_subject")] },
-    definitions)).toEqual([diagnostic]);
-  expect(graphProblems({ ...graph, wires: [...graph.wires, wire("brief", "evidence", "agent", "review_subject")] },
-    definitions)).toEqual([]);
 });
 
 it("loads published Library artifacts without loading the Builder node registry", async () => {
@@ -262,7 +229,11 @@ it("uses the canvas node picker and saves an AI Node with its position and Schem
   const canvas = screen.getByLabelText("Workflow canvas actions");
   canvas.focus();
   fireEvent.keyDown(canvas, { key: "F10", shiftKey: true });
-  expect(await screen.findByRole("dialog", { name: "Add node" })).toBeTruthy();
+  const addNode = within(await screen.findByRole("dialog", { name: "Add node" }));
+  for (const name of ["AI Node Agent", "Parallel / Fork", "Join", "Wait", "Loop", "Human in the Loop"]) {
+    expect(addNode.getByRole("button", { name })).toBeTruthy();
+  }
+  expect(addNode.queryByRole("button", { name: "Validate Output" })).toBeNull();
   await user.keyboard("{Escape}");
   await waitFor(() => expect(document.activeElement).toBe(canvas));
 
@@ -293,8 +264,8 @@ it("duplicates the selected graph with its internal wires, exact old pin and und
   const internal = wire("context", "loaded", "plan", "ready");
   const original: WorkflowEditorState = { graph: { name: "Pinned stages", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "context", kind: "load_context", configuration: { kind: "none" } },
-    { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "Planner" } },
+    { id: "context", kind: "wait", configuration: { kind: "none" } },
+    { id: "plan", kind: "agent", configuration: { kind: "agent_role", role: "Planner" } },
   ], wires: [wire("start", "start", "context", "ready"), internal] },
   layout: { context: { x: 10, y: 20 }, plan: { x: 180, y: 90 } }, updateDefinitions: {} };
   const catalog = [start, { ...context, revision: 2 }, plan];
@@ -336,9 +307,9 @@ it("duplicates the selected graph with its internal wires, exact old pin and und
 it("fits and removes the exact node selection in one undoable operation", async () => {
   const original: WorkflowEditorState = { graph: { name: "Exact selection", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "context", kind: "load_context", configuration: { kind: "none" } },
-    { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "Planner" } },
-    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+    { id: "context", kind: "wait", configuration: { kind: "none" } },
+    { id: "plan", kind: "agent", configuration: { kind: "agent_role", role: "Planner" } },
+    { id: "other", kind: "wait", configuration: { kind: "none" } },
   ], wires: [
     wire("start", "start", "context", "ready"), wire("context", "loaded", "plan", "ready"),
     wire("start", "start", "other", "ready"),
@@ -391,8 +362,8 @@ it("reconnects only the edge source after validating the new output", async () =
   const newEdge = wire("other", "context", "context", "document");
   const original: WorkflowEditorState = { graph: { name: "Reconnect source", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "context", kind: "load_context", configuration: { kind: "none" } },
-    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+    { id: "context", kind: "wait", configuration: { kind: "none" } },
+    { id: "other", kind: "wait", configuration: { kind: "none" } },
   ], wires: [oldEdge] }, layout: {}, updateDefinitions: {} };
   let observed = original;
   function Editor() {
@@ -420,8 +391,8 @@ it("reconnects only the edge source after validating the new output", async () =
 it("opens a protected draft, reviews an affected port upgrade, wires typed nodes, and restores the saved graph and layout", async () => {
   const graph: WorkflowGraph = {
     name: "Versioned review",
-    nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }, { id: "context", kind: "load_context", configuration: { kind: "none" } },
-      { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "" } }],
+    nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } }, { id: "context", kind: "wait", configuration: { kind: "none" } },
+      { id: "plan", kind: "agent", configuration: { kind: "agent_role", role: "" } }],
     wires: [wire("start", "start", "context", "ready"), wire("start", "old-document", "context", "document")],
   };
   const original = {
@@ -510,101 +481,13 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   expect(save().disabled).toBe(true);
 });
 
-it("configures a typed list and a bounded iteration in the package graph", async () => {
-  const list: WorkflowDefinition = {
-    kind: "build_list", title: "Build list", revision: 1, configuration: "build_list", executor: "build_list", effect: "read_evidence",
-    inputs: [control("ready"), { name: "value", value: { kind: "evidence" } }], outputs: [control("completed"), data("items", "json_list")],
-  };
-  const iteration: WorkflowDefinition = {
-    kind: "for_each", title: "For each", revision: 1, configuration: "for_each", executor: "expand_for_each", effect: "none",
-    inputs: [control("ready"), data("items", "json_list")], outputs: [control("completed"), data("results", "iteration_results")],
-  };
-  const subflow: WorkflowDefinition = { ...iteration, kind: "subflow", configuration: "none", title: "Check result",
-    inputs: [control("ready"), data("item", "json_item"), data("wrong", "markdown")],
-    outputs: [control("completed"), data("result", "markdown"), data("check", "checks")] };
-  const catalog = [start, list, iteration, { ...iteration, kind: "for_each_begin", title: "Pin iteration list" }];
-  let edited: WorkflowGraph = { name: "Iteration", nodes: [
-    { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "list", kind: "build_list", configuration: defaultConfiguration("build_list") },
-    { id: "for-each", kind: "for_each", configuration: defaultConfiguration("for_each") },
-  ], wires: [wire("start", "start", "list", "ready")] };
-  function Editor() {
-    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
-    edited = state.graph;
-    const definitions = Object.fromEntries(edited.nodes.map((node) => [node.id, catalog.find(({ kind }) => kind === node.kind)!]));
-    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={definitions} catalog={catalog}
-      problems={graphProblems(edited, definitions)} disabled={false} allowDefinitionUpdates={false}
-      subflowDefinitionForNode={(id) => id === "for-each" ? subflow : undefined} />;
-  }
-
-  render(<Editor />);
-  const user = userEvent.setup();
-  const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "list");
-  await user.click(inspector.getByRole("button", { name: "Add item" }));
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Item 1 type" }), "number");
-  await user.click(inspector.getByRole("button", { name: "Add item" }));
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Item 2 type" }), "boolean");
-  expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "values", values: [0, false] });
-  await user.selectOptions(inspector.getByRole("combobox", { name: "List source" }), "evidence");
-  fireEvent.change(inspector.getByRole("textbox", { name: /Array path/ }), { target: { value: "/evidence/items" } });
-  expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "evidence", pointer: "/evidence/items" });
-  expect(screen.getByText(/list.value requires a connection/)).toBeTruthy();
-
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "for-each");
-  fireEvent.change(inspector.getByRole("spinbutton", { name: "Maximum items" }), { target: { value: "12" } });
-  expect(within(inspector.getByRole("combobox", { name: "Subflow item input" })).queryByRole("option", { name: /wrong/ })).toBeNull();
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Subflow result output" }), "check");
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Source node" }), "list");
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Output port" }), "items");
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Input port" }), "items");
-  await user.click(inspector.getByRole("button", { name: "Connect ports" }));
-  expect(edited.nodes.find(({ id }) => id === "for-each")?.configuration).toEqual({
-    kind: "for_each", maxItems: 12, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "check",
-  });
-  expect(edited.wires).toContainEqual(wire("list", "items", "for-each", "items"));
-});
-
-it("exposes a typed port when a pinned Repeat until output is selected", async () => {
-  const repeat: WorkflowDefinition = { kind: "repeat_until", title: "Repeat until", revision: 1,
-    configuration: "repeat_until", executor: "repeat_subflow", effect: "none", inputs: [], outputs: [] };
-  const body = { ...context, inputs: [control("ready"), data("document", "markdown")],
-    outputs: [control("completed"), data("result", "markdown"), data("failed", "checks")] };
-  let edited: WorkflowGraph = { name: "Approved output", nodes: [
-    { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "repeat", kind: "repeat_until", configuration: defaultConfiguration("repeat_until") },
-    { id: "context", kind: "load_context", configuration: { kind: "none" } },
-  ], wires: [] };
-  const catalog = [start, repeat, context];
-  function Editor() {
-    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
-    edited = state.graph;
-    const subflow = (id: string) => id === "repeat" ? body : undefined;
-    return <WorkflowGraphEditor projectId="project" state={state} setState={setState}
-      definitions={editorDefinitions(state, { start, repeat, context }, catalog, subflow)} catalog={catalog}
-      problems={[]} disabled={false} subflowDefinitionForNode={subflow} />;
-  }
-  render(<Editor />);
-  const user = userEvent.setup();
-  const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
-  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "repeat");
-  const exports = within(inspector.getByRole("group", { name: "Export from the approved iteration" }));
-  expect(exports.queryByRole("checkbox", { name: "failed" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Connect from repeat.result" })).toBeNull();
-  await user.click(exports.getByRole("checkbox", { name: "result" }));
-  expect(edited.nodes.find(({ id }) => id === "repeat")?.configuration.exports).toEqual(["result"]);
-  await user.click(screen.getByRole("button", { name: "Connect from repeat.result" }));
-  await user.click(screen.getByRole("button", { name: "Connect to context.document" }));
-  expect(edited.wires).toContainEqual(wire("repeat", "result", "context", "document"));
-});
-
 it("connects named ports with the keyboard, validates replacements, and restores the exact graph on undo", async () => {
   const included = [start, context];
   const existing = wire("start", "document", "context", "document");
   let edited: WorkflowGraph = { name: "Keyboard connections", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "context", kind: "load_context", configuration: { kind: "none" } },
-    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+    { id: "context", kind: "wait", configuration: { kind: "none" } },
+    { id: "other", kind: "wait", configuration: { kind: "none" } },
   ], wires: [existing] };
   function Editor() {
     const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
@@ -638,12 +521,12 @@ it("connects named ports with the keyboard, validates replacements, and restores
   expect(edited.wires).toEqual([moved, first]);
 });
 
-it("edits typed launch fields and a branch condition without raw configuration", async () => {
+it("edits typed launch fields and a Loop condition without raw configuration", async () => {
   const entry: WorkflowDefinition = { ...start, kind: "typed_start", configuration: "typed_start" };
-  const condition: WorkflowDefinition = { ...context, kind: "condition", title: "Condition", configuration: "condition" };
+  const condition: WorkflowDefinition = { ...context, kind: "loop", title: "Loop", configuration: "loop" };
   let edited: WorkflowGraph = { name: "Typed values", nodes: [
     { id: "start", kind: "typed_start", configuration: defaultConfiguration("typed_start") },
-    { id: "condition", kind: "condition", configuration: defaultConfiguration("condition") },
+    { id: "condition", kind: "loop", configuration: defaultConfiguration("loop") },
   ], wires: [] };
   function Editor() {
     const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
@@ -675,10 +558,11 @@ it("edits typed launch fields and a branch condition without raw configuration",
   }] }, entry)).toMatch(/Array for conversation history/);
 
   await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "condition");
+  await user.click(inspector.getByRole("checkbox", { name: "Exit after an iteration" }));
   await user.selectOptions(inspector.getByRole("combobox", { name: "Test" }), "equals");
   fireEvent.change(inspector.getByRole("textbox", { name: "Field path" }), { target: { value: "/approved" } });
   await user.selectOptions(inspector.getByRole("combobox", { name: "Expected value type" }), "boolean");
-  expect(edited.nodes[1]?.configuration).toEqual({ kind: "condition", predicate: { op: "equals", pointer: "/approved", value: false } });
+  expect(edited.nodes[1]?.configuration).toEqual({ ...defaultConfiguration("loop"), exitWhen: { op: "equals", pointer: "/approved", value: false } });
   expect(inspector.queryByRole("textbox", { name: "Node parameters" })).toBeNull();
 });
 
@@ -702,29 +586,4 @@ it("requires a conversation message in the selected Start Schema", () => {
   properties.history.items = { type: "object", properties: { role: { type: "string" }, text: { type: "string" } },
     required: ["role", "text"], additionalProperties: false };
   expect(graphProblems(graph, definitions)).toEqual([]);
-});
-
-it("matches the backend rules for Start events and optional or multiple Result evidence", () => {
-  const definitions: Record<string, WorkflowDefinition> = {
-    entry: { ...start, kind: "typed_start", configuration: "typed_start", outputs: [...start.outputs, data("event", "agile_event")] },
-    text: { kind: "build_text", title: "Build text", revision: 1, configuration: "build_text", executor: "build_text",
-      effect: "read_evidence", inputs: [control("ready")], outputs: [control("completed"), data("text", "rendered_text")] },
-    result: { kind: "summarize_result", title: "Result", revision: 1, configuration: "none", executor: "summarize_result",
-      effect: "read_evidence", inputs: [control("ready"), data("summary", "rendered_text"), { name: "evidence", value: { kind: "evidence" } }], outputs: [] },
-  };
-  const event = wire("entry", "event", "result", "evidence");
-  const otherEvidence = wire("entry", "document", "result", "evidence");
-  const graph: WorkflowGraph = { name: "Work results", nodes: [
-    { id: "entry", kind: "typed_start", configuration: { kind: "typed_start", fields: [{ name: "owner", valueType: "text", required: true }] } },
-    { id: "text", kind: "build_text", configuration: { kind: "build_text", template: "Result text" } },
-    { id: "result", kind: "summarize_result", configuration: { kind: "none" } },
-  ], wires: [wire("entry", "start", "text", "ready"), wire("text", "completed", "result", "ready"), wire("text", "text", "result", "summary")] };
-  expect(graphProblems(graph, definitions)).toEqual([]);
-  const diagnostic = "Make Start fields optional to connect the event port.";
-  expect(connectionProblem(graph, definitions, event)).toBe(diagnostic);
-  graph.wires.push(event);
-  expect(graphProblems(graph, definitions)).toEqual([diagnostic]);
-  graph.nodes[0]!.configuration = defaultConfiguration("typed_start");
-  expect(graphProblems(graph, definitions)).toEqual([]);
-  expect(connectionProblem(graph, definitions, otherEvidence)).toBeNull();
 });

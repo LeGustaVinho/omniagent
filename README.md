@@ -44,20 +44,12 @@ Suppose you need to make a nullable database field required. Ask each model to r
 
 ### Build a pipeline you can run again
 
-Create a small pipeline that loads a saved Markdown source and checks whether the resulting evidence records the source path. This is a starting point for workflows that need an explicit document input.
+Create a pipeline that passes a typed request through a Wait node and returns it.
 
-1. Open **Pipelines → Builder → New pipeline**. Keep the **Start** node and add **Load context** and **Condition**.
-2. Connect the control and data ports below. Set the condition to check that the field path `/evidence/relativePath` exists.
-
-   | Output port | Input port |
-   | --- | --- |
-   | `start.start` | `load-context.ready` |
-   | `start.document` | `load-context.document` |
-   | `load-context.loaded` | `condition.ready` |
-   | `load-context.context` | `condition.value` |
-
-3. Save the package revision and open **Review changes** to inspect the graph and its execution requirements. Review and confirm publication.
-4. From a task's **Workflow** tab, choose **Run published workflow**, select its revision, and provide the checkout and saved source note. Open **Pipelines → Runs** to inspect the pinned revision, node inputs, and the condition's selected output.
+1. Open **Pipelines → Builder → New pipeline**. Add a text input named `request` on **Start**.
+2. Add **Wait** and set its delay. Replace the initial control connection with `Start.start → Wait.ready → End.ready`, using `Wait.completed` as the second output.
+3. Wire `Start.inputs → Wait.input` and `Wait.result → End.result`.
+4. Save the draft, review the graph and publish it. Launch the revision and enter a request. Open **Pipelines → Runs** to inspect the wait and returned result.
 
 ### Pick up an interrupted run
 
@@ -69,7 +61,7 @@ If OmniAgent restarts during a task, open **Queue** and select the interrupted a
 | --- | --- |
 | **Conversations** | Stream responses, attach files or reference earlier conversations, and resume, rewind, or fork at a message. Use **Read-only**, **Plan Mode**, or **Goal Mode** where supported. |
 | **Tasks** | Organize epics, tasks, and subtasks in Kanban or table views. Set dependencies and acceptance criteria, assign work by role and model, and track checklists or run them by item. |
-| **Pipelines** | Build workflows with typed ports, branch conditions, approvals, and reusable nodes or subflows. Review and publish revisions, launch workflows manually or through rules on work-item events, and inspect recorded results in Runs. |
+| **Pipelines** | Build workflows with Start, End/Return, AI Node Agents, Parallel / Fork, Join, Wait, Loop, Human in the Loop, Node Prefabs, and Functions. Review and publish revisions, launch workflows manually or through rules on work-item events, and inspect recorded results in Runs. |
 | **Model comparison** | Compare models from the same provider or across providers. Review original responses, individual run states, and recorded execution details. |
 | **Git** | Browse changes, worktrees, and history. Compare branches, inspect staged changes and saved attempt diffs, and review verified commits and merges. |
 | **IDE** | Edit repository files in Monaco, search within the selected checkout, and run commands in the integrated terminal. |

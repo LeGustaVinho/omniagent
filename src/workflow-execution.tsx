@@ -8,20 +8,13 @@ import { ContextActions, PositionedContextActions, useContextActionFeedback, typ
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunList, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
-import { initialNodePositions, wireKey } from "@/workflow-graph-model";
+import { initialNodePositions, isSupportedWorkflowNode, wireKey } from "@/workflow-graph-model";
 import { RecordedInputs, WorkflowNodeEvidence } from "@/workflow-execution-evidence";
-import { WorkflowPromptRunPanel } from "@/workflow-prompt-run";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
-import { WorkflowExecutionHost } from "@/workflow-execution-host";
-import { WorkflowExecutionUnitChecks } from "@/workflow-execution-candidate";
-import { WorkflowDiffStage } from "@/workflow-execution-diff";
-import { WorkflowApprovalInspector } from "@/workflow-approval";
 import { WorkflowStageDecisionForm } from "@/workflow-stage-decisions";
-import { WorkflowExecutionComparison } from "@/workflow-execution-comparison";
-import { comparisonReviewStages, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import {
-  comparisonForNode, controlForNode, executionCanvasGraph, executionOutputForWire, needsExecutionRefresh,
+  controlForNode, executionCanvasGraph, executionOutputForWire, needsExecutionRefresh,
   presentation, subflowForStage, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
   type ExecutionSubflow, type ExecutionUnit, type WorkflowExecutionFocus, type WorkflowExecutionSnapshot,
   type WorkflowExecutionState, type WorkflowRun,
@@ -74,23 +67,19 @@ function subflowPresentation(snapshot: WorkflowExecutionSnapshot, group: Executi
   return { status: details.some(({ status }) => status === "completed") ? "completed" : "skipped" };
 }
 
-function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHandoff, runFocus }: {
+function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: {
   snapshot: WorkflowExecutionSnapshot;
   navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
   runPicker: ReactNode;
-  comparisonHandoff?: ComparisonHandoff;
   runFocus?: WorkflowExecutionFocus;
 }) {
   const { definition, run, launch } = snapshot;
+  const focusedNode = definition.nodes.find(({ instance }) => instance.id === runFocus?.nodeId);
   const origin = launch?.origin;
   const workId = origin && origin.kind !== "editor" ? origin.workId : undefined;
-  const review = comparisonHandoff && comparisonHandoff.planRevision === run.planRevision &&
-    comparisonReviewStages(snapshot, comparisonHandoff.sourceCheckoutId).some(({ instance }) => instance.id === comparisonHandoff.nodeId)
-    ? comparisonHandoff : undefined;
-  const focusedNode = definition.nodes.find(({ instance }) => instance.id === runFocus?.nodeId);
   const focusedOutput = focusedNode && runFocus?.artifactId ? snapshot.outputs.find(({ artifact }) =>
     artifact.id === runFocus.artifactId && artifact.nodeInstanceId === focusedNode.instance.id)?.artifact : undefined;
-  const [selected, setSelected] = useState(focusedNode?.instance.id ?? review?.nodeId ?? definition.nodes[0]?.instance.id ?? "");
+  const [selected, setSelected] = useState(focusedNode?.instance.id ?? definition.nodes[0]?.instance.id ?? "");
   const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
   function viewStage(id: string) {
     if (!graph.nodes.some(({ instance }) => instance.id === id)) {
@@ -101,7 +90,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
   }
   const [selectedUnit, setSelectedUnit] = useState<string>();
   const [subflowPath, setSubflowPath] = useState(() =>
-    subflowForStage(definition, focusedNode?.instance.id ?? review?.nodeId ?? "")?.path ?? "");
+    subflowForStage(definition, focusedNode?.instance.id ?? "")?.path ?? "");
   const [theme, setTheme] = useState(readTheme);
   const [menu, setMenu] = useState<{ target: ExecutionTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement }>();
   const { copy, feedback } = useContextActionFeedback();
@@ -123,18 +112,15 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
   const concreteStages = definition.nodes
     .map((node) => {
       const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
-      const pending = snapshot.pendingDecisions?.find((decision) => decision.nodeId === node.instance.id &&
+      const pending = node.instance.kind === "human" ? snapshot.pendingDecisions?.find((decision) => decision.nodeId === node.instance.id &&
         decision.nodeRevision === node.revision && decision.planRevision === run.planRevision &&
-        (unitScoped ? unit && unit.planRevision === run.planRevision && decision.unitId === unit.unit.id : decision.unitId === null));
-      const comparison = comparisonForNode(snapshot, node, unit);
+        (unitScoped ? unit && unit.planRevision === run.planRevision && decision.unitId === unit.unit.id : decision.unitId === null)) : undefined;
       const detail: ReturnType<typeof presentation> = pending ? {
         status: "waiting",
-        reason: pending.request.kind === "approval" || pending.request.kind === "human" && pending.request.interaction === "approval"
+        reason: pending.request.interaction === "approval"
           ? "Waiting for operator approval." : "Waiting for operator input.",
-      } : comparison && comparison.stage.state !== "settled" ? {
-        status: comparison.stage.state,
       } : presentation(snapshot, node, unit);
-      return { node, detail, pending, comparison };
+      return { node, detail, pending };
     });
   const staged = new Map(concreteStages.map((entry) => [entry.node.instance.id, entry]));
   const stages = graph.nodes.map((node) => {
@@ -144,14 +130,14 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       const stage = staged.get(id);
       return stage ? [stage.detail] : [];
     });
-    return { node, detail: subflowPresentation(snapshot, group, descendants, unit), group, pending: undefined, comparison: undefined };
+    return { node, detail: subflowPresentation(snapshot, group, descendants, unit), group, pending: undefined };
   });
   const positions = useMemo(() => initialNodePositions({
     nodes: graph.nodes.map(({ instance }) => instance),
     wires: graph.wires,
   }), [graph]);
   const active = stages.find(({ node }) => node.instance.id === selected);
-  const approval = active?.node.instance.kind === "approve_implementation";
+  const retired = definition.nodes.some(({ instance }) => !isSupportedWorkflowNode(instance.kind));
   const scopedStages = subflow ? concreteStages.filter(({ node }) => subflow.nodes.includes(node.instance.id)) : concreteStages;
   const waiting = scopedStages.find(({ pending }) => pending) ?? scopedStages.find(({ detail }) => detail.status === "waiting");
   const failed = scopedStages.find(({ detail }) => detail.status === "failed" || detail.status === "interrupted");
@@ -238,10 +224,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
         {failed && <Button variant="outline" type="button" onClick={() => viewStage(failed.node.instance.id)}>View failed stage</Button>}
       </div>
     </PipelineToolbar>
-    {comparisonHandoff && !review && !snapshot.jobs.some(({ nodeId, inputs }) =>
-      nodeId === comparisonHandoff.nodeId && inputs?.plan === comparisonHandoff.planRevision) &&
-      <p className="pipeline-banner" role="status">The selected plan review changed. Choose a current destination from Compare models.</p>}
     {feedback && <p className="pipeline-banner" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+    {retired && <p className="pipeline-banner" role="status">This run uses retired nodes. Its recorded evidence is available here.</p>}
     <header className="workflow-run-summary">
       <div><h2>{definition.name}</h2>
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
@@ -314,48 +298,29 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
               </section>;
             })}
           </section> : <>
-          <WorkflowPromptRunPanel snapshot={snapshot} nodeId={active.node.instance.id} unit={unit} navigation={navigation} />
           {snapshot.rolePins?.filter((pin) => pin.nodeId === active.node.instance.id && pin.nodeRevision === active.node.revision)
             .map((pin) => <PinnedRole key={`${pin.version.destination}:${pin.version.id}:${pin.version.revision}`} pin={pin} />)}
-          {approval && <WorkflowApprovalInspector key={`approval:${active.node.instance.id}`}
-            scope={{ projectId: run.projectId, runId: run.id }} nodeId={active.node.instance.id} planRevision={run.planRevision} />}
-          {!approval && active.detail.reason && <p>{active.detail.reason}</p>}
+          {active.detail.reason && <p>{active.detail.reason}</p>}
           {active.node.instance.kind === "fork" && <ul aria-label="Fork branches" className="pipeline-stack">
             {snapshot.forkBranches?.filter(({ forkId, unitId }) => forkId === active.node.instance.id &&
               (unitId === null || unitId === unit?.unit.id)).map(({ branch, state }) => <li className="pipeline-actions" key={branch}>
               <span>{branch}</span><WorkflowExecutionStateBadge status={state} />
             </li>)}
           </ul>}
-          {active.pending && <WorkflowStageDecisionForm key={active.pending.requestId}
+          {!retired && active.pending && <WorkflowStageDecisionForm key={active.pending.requestId}
             projectId={run.projectId} runId={run.id} pending={active.pending}
             evidence={Object.keys(active.pending.inputs).length > 0 && <RecordedInputs inputs={active.pending.inputs}
               snapshot={snapshot} scope={{ projectId: run.projectId, runId: run.id }} navigation={navigation}
               consumer={{ nodeInstanceId: active.pending.nodeId, nodeRevision: active.pending.nodeRevision,
                 unitId: active.pending.unitId, planRevision: active.pending.planRevision, decisionRequestId: active.pending.requestId }} />} />}
-          {active.comparison && <WorkflowExecutionComparison projectId={run.projectId}
-            stage={active.comparison.stage} recorded={active.comparison.recorded}
-            openActivity={navigation.openActivity} openQueueJob={navigation.openQueueJob} />}
-          {!approval && !!active.detail.missing?.length && <section aria-label="Waiting for dependencies">
+          {!!active.detail.missing?.length && <section aria-label="Waiting for dependencies">
             <p>Waiting for recorded upstream outputs.</p>
             <ul className="list-disc pl-4">{active.detail.missing.map((wire) => <li key={wireKey(wire)}>
               {wire.to.port} needs {wire.from.node}.{wire.from.port}
             </li>)}</ul>
           </section>}
-          <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity}
-            initialComparison={review?.nodeId === active.node.instance.id ? review.selection : undefined} />
-          <WorkflowExecutionHost snapshot={snapshot} node={active.node} />
-          <WorkflowExecutionUnitChecks key={`checks:${active.node.instance.id}`} snapshot={snapshot} node={active.node} unit={unit} />
-          <WorkflowDiffStage snapshot={snapshot} node={active.node} />
-          {snapshot.backlogExecutions?.filter(({ nodeId, tasks }) => nodeId === active.node.instance.id && tasks.length > 0)
-            .map(({ backlogArtifactId, tasks }) => <section key={backlogArtifactId} className="workflow-record-card pipeline-stack" aria-label="Backlog child workflows">
-              <h3>Task runs</h3>
-              <ul className="pipeline-stack">{tasks.map(({ key, workflowRunId }) => <li key={workflowRunId}>
-                <Button type="button" variant="outline" className="gap-2"
-                  onClick={() => navigation.openWorkspace("pipelines", workflowRunTarget(workflowRunId))}>
-                  <Workflow size={14} aria-hidden /> Open run for {key} <ArrowUpRight size={14} aria-hidden />
-                </Button>
-              </li>)}</ul>
-            </section>)}
+          {!retired && active.node.instance.kind === "agent" && active.node.definition.executor !== "conversation_agent" &&
+            <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity} />}
           <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit ? unitKey(unit) : ""}`} node={active.node} snapshot={snapshot}
             unitId={unit?.unit.id} focusedArtifactId={focusedOutput?.id}
             control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
@@ -367,7 +332,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
   </section>;
 }
 
-export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string; runFocus?: WorkflowExecutionFocus; comparisonHandoff?: ComparisonHandoff }) {
+export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string; runFocus?: WorkflowExecutionFocus }) {
   const { checkout: { projectId }, runId, runFocus, openWorkspace } = props;
   const runs = useQuery({ queryKey: ["repository-delivery", projectId, "list"], queryFn: () => invoke<WorkflowRun[]>("list_repository_deliveries", { projectId }) });
   const execution = useQuery({
@@ -413,7 +378,7 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
     {loadError && <p className="pipeline-banner" role="alert">{String(loadError)}</p>}
     {clipboard && <p className="pipeline-banner" role={clipboard.failed ? "alert" : "status"}>{clipboard.message}</p>}
     {execution.data ? <WorkflowExecutionCanvas key={workflowRunTarget(execution.data.run.id, runFocus)}
-      snapshot={execution.data} navigation={props} runPicker={runPicker} runFocus={runFocus} comparisonHandoff={props.comparisonHandoff} /> : <>
+      snapshot={execution.data} navigation={props} runPicker={runPicker} runFocus={runFocus} /> : <>
       <PipelineToolbar><div className="workflow-run-selectors">{runPicker}</div></PipelineToolbar>
       {!runId && runs.data?.length === 0 ? (
         <PipelineRunsEmpty onOpenBuilder={() => openWorkspace("pipelines", "drafts")} />

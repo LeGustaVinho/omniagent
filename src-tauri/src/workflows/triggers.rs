@@ -158,6 +158,9 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let definition = load_definition(&tx, &project, &spec.pipeline)?
                 .context("Choose an exact pipeline revision from this project")?;
+            if spec.enabled {
+                definition.ensure_supported_nodes()?;
+            }
             let start = WorkflowStartSchema::for_definition(&definition);
             ensure!(start.as_ref().is_none_or(WorkflowStartSchema::accepts_automation),
                 "This pipeline requires inputs supplied at manual launch");

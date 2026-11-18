@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bot, Braces, CirclePause, GitFork, GitMerge, Layers3, Plus, Repeat2, UserRoundCheck, Waypoints } from "lucide-react";
+import { Bot, CirclePause, GitFork, GitMerge, Layers3, Plus, Repeat2, Square, UserRoundCheck, Waypoints } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
@@ -8,7 +8,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 const nodeTypes = [
   { kind: "subflow", label: "AI Node Agent", icon: Bot },
-  { kind: "validate_output", label: "Validate Output", icon: Braces },
   { kind: "fork", label: "Parallel / Fork", icon: GitFork },
   { kind: "join_results", label: "Join", icon: GitMerge },
   { kind: "wait", label: "Wait", icon: CirclePause },
@@ -19,9 +18,10 @@ const nodeTypes = [
 export const builderNodeKinds = nodeTypes.map(({ kind }) => kind);
 export type WorkflowCatalogItem = { name: string; version: ReusableVersion; blockers: string[]; typedPrompt?: boolean; nodePrefab?: boolean; prompt?: boolean };
 
-export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, onOpenChange, onCloseAutoFocus, canvasActions }: {
+export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, onOpenChange, onCloseAutoFocus, canvasActions, terminal }: {
   projectId: string; disabled: boolean; onAdd: (kind: string) => void; onReuse: (node: ReusableDescription) => void;
   open: boolean; onOpenChange: (open: boolean) => void; onCloseAutoFocus: (event: Event) => void; canvasActions?: ReactNode;
+  terminal?: "End" | "Return";
 }) {
   const catalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
@@ -40,7 +40,8 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, 
       <Plus size={15} aria-hidden /> Add node
     </Button>}>
     <div className="workflow-node-picker-list">
-      {nodeTypes.map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" disabled={load.isPending} onClick={() => {
+      {(terminal ? [...nodeTypes, { kind: "end", label: terminal, icon: Square }] : nodeTypes)
+        .map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" disabled={load.isPending} onClick={() => {
         onAdd(kind);
         onOpenChange(false);
       }}><Icon size={16} aria-hidden /> {label}</Button>)}

@@ -47,7 +47,10 @@ pub(super) fn copy_node_definitions(
     copies: BTreeMap<String, WorkflowDefinitionCopy>,
 ) -> Result<()> {
     for (id, copy) in copies {
-        ensure!(!previous.contains_key(&id), "Node {id} already has a saved definition");
+        ensure!(
+            !previous.contains_key(&id),
+            "Node {id} already has a saved definition"
+        );
         let source = previous
             .get(&copy.source_id)
             .context("The copied node's saved definition is unavailable")?;
@@ -227,11 +230,11 @@ mod tests {
                 },
                 NodeInstance {
                     id: "context".into(),
-                    kind: BuiltinNode::LoadContext,
-                    configuration: NodeConfiguration::None,
+                    kind: BuiltinNode::End,
+                    configuration: NodeConfiguration::End,
                 },
             ],
-            wires: vec![edge("legacy-start", "ready"), edge("document", "document")],
+            wires: vec![edge("legacy-start", "ready")],
         };
         let mut previous = DraftDocument::from_graph(graph.clone());
         let expected = previous.definitions["start"].revision;
@@ -305,10 +308,14 @@ mod tests {
                 },
             )])
         };
-        assert!(copy_node_definitions(&mut next, &previous, requested(older.revision + 1)).is_err());
+        assert!(
+            copy_node_definitions(&mut next, &previous, requested(older.revision + 1)).is_err()
+        );
         copy_node_definitions(&mut next, &previous, requested(older.revision))?;
         assert_eq!(next["copy"], older);
-        assert!(copy_node_definitions(&mut next, &BTreeMap::new(), requested(older.revision)).is_err());
+        assert!(
+            copy_node_definitions(&mut next, &BTreeMap::new(), requested(older.revision)).is_err()
+        );
         Ok(())
     }
 }

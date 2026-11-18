@@ -126,7 +126,7 @@ it("shows why the isolated candidate reviewer cannot opt in", async () => {
 
 it("keeps the authored package reference when the graph editor saves the Goal settings", async () => {
   const definition = {
-    kind: "implement", revision: 1, title: "Implement", configuration: "agent_role",
+    kind: "agent", revision: 1, title: "Implement", configuration: "agent_role",
     executor: "write_agent", effect: "write_repository", inputs: [], outputs: [],
   };
   const authored = { source: "published", version };

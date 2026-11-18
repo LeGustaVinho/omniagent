@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -192,28 +194,6 @@ impl Store {
         })
     }
 
-    pub async fn publish_workflow_candidate(
-        &self,
-        project: String,
-        workflow: String,
-        node: String,
-        task: String,
-        selection_id: String,
-    ) -> Result<WorkflowArtifact> {
-        let selection = self
-            .selected_candidate(project.clone(), task, selection_id)
-            .await?
-            .context("candidate selection is outside this project and task")?;
-        self.publish_workflow_artifact(
-            project,
-            workflow,
-            node,
-            "candidate".into(),
-            ArtifactValue::Candidate(selection),
-        )
-        .await
-    }
-
     pub async fn workflow_approval_reference(
         &self,
         project: String,
@@ -239,57 +219,6 @@ impl Store {
                 decision_artifact_id,
                 release,
             })
-        })
-        .await
-    }
-
-    pub async fn publish_workflow_artifact(
-        &self,
-        project: String,
-        run: String,
-        node: String,
-        port: String,
-        value: ArtifactValue,
-    ) -> Result<WorkflowArtifact> {
-        ensure!(
-            matches!(
-                value,
-                ArtifactValue::Plan { .. }
-                    | ArtifactValue::Review { .. }
-                    | ArtifactValue::Candidate(_)
-            ),
-            "host artifacts must be issued by their executor"
-        );
-        self.check_artifact_source(&project, &run, &node, &value)
-            .await?;
-        let attempt_id = match &value {
-            ArtifactValue::Plan { run_id, .. } | ArtifactValue::Review { run_id } => run_id,
-            ArtifactValue::Candidate(reference) => &reference.target.run_id,
-            _ => unreachable!(),
-        };
-        let unit = self
-            .workflow_attempt(project.clone(), attempt_id.clone())
-            .await?
-            .and_then(|attempt| attempt.pin.unit_id);
-        let attempt_id = attempt_id.clone();
-        self.execute(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let candidate = match &value {
-                ArtifactValue::Candidate(candidate) => Some(candidate),
-                _ => None,
-            };
-            super::stage_goal::require_stage_goal_result(
-                &tx,
-                &project,
-                &run,
-                &node,
-                &attempt_id,
-                candidate,
-            )?;
-            let artifact = insert_scoped_artifact(&tx, &project, run, node, port, unit, value)?;
-            super::control::refresh(&tx, &project, &artifact.workflow_run_id)?;
-            tx.commit()?;
-            Ok(artifact)
         })
         .await
     }
@@ -336,8 +265,14 @@ impl Store {
                 run_id,
                 event_sequence,
             } => {
-                self.check_artifact_attempt(project, run, node, run_id, &[BuiltinNode::Plan])
-                    .await?;
+                self.check_artifact_attempt(
+                    project,
+                    run,
+                    node,
+                    run_id,
+                    &[BuiltinNode::Archived(ArchivedNode::Plan)],
+                )
+                .await?;
                 self.workflow_plan_text(run_id.clone(), *event_sequence)
                     .await?;
             }
@@ -365,9 +300,9 @@ impl Store {
                     node,
                     run_id,
                     &[
-                        BuiltinNode::ReviewPlan,
-                        BuiltinNode::ReviewCandidate,
-                        BuiltinNode::ReviewDiffCandidate,
+                        BuiltinNode::Archived(ArchivedNode::ReviewPlan),
+                        BuiltinNode::Archived(ArchivedNode::ReviewCandidate),
+                        BuiltinNode::Archived(ArchivedNode::ReviewDiffCandidate),
                     ],
                 )
                 .await?;
@@ -435,7 +370,7 @@ impl Store {
                     run,
                     node,
                     &reference.target.run_id,
-                    &[BuiltinNode::Implement],
+                    &[BuiltinNode::Archived(ArchivedNode::Implement)],
                 )
                 .await?;
                 let issued = self
@@ -519,9 +454,8 @@ impl Store {
                 ensure!(
                     self.pinned_workflow_node(project.into(), run.into(), node.into())
                         .await?
-                        .is_some_and(
-                            |pinned| pinned.definition.kind == BuiltinNode::PublishDiffReport
-                        ),
+                        .is_some_and(|pinned| pinned.definition.kind
+                            == BuiltinNode::Archived(ArchivedNode::PublishDiffReport)),
                     "Only the pinned diff report stage can publish this result"
                 );
             }
@@ -728,31 +662,29 @@ pub(super) fn insert_scoped_artifact(
     }
     let stage_scoped = matches!(
         pinned.definition.kind,
-        BuiltinNode::RequestInput
+        BuiltinNode::Archived(ArchivedNode::RequestInput)
             | BuiltinNode::Wait
             | BuiltinNode::Human
             | BuiltinNode::End
-            | BuiltinNode::Approval
-            | BuiltinNode::SetFields
-            | BuiltinNode::FilterMapList
-            | BuiltinNode::BuildText
-            | BuiltinNode::ValidateOutput
-            | BuiltinNode::PromptDecision
-            | BuiltinNode::PromptOutcome
+            | BuiltinNode::Archived(ArchivedNode::Approval)
+            | BuiltinNode::Archived(ArchivedNode::SetFields)
+            | BuiltinNode::Archived(ArchivedNode::FilterMapList)
+            | BuiltinNode::Archived(ArchivedNode::BuildText)
+            | BuiltinNode::Archived(ArchivedNode::ValidateOutput)
+            | BuiltinNode::Archived(ArchivedNode::PromptDecision)
+            | BuiltinNode::Archived(ArchivedNode::PromptOutcome)
             | BuiltinNode::Fork
             | BuiltinNode::JoinResults
-            | BuiltinNode::LoopGate
-            | BuiltinNode::LoopStep
-            | BuiltinNode::LoopResult
-            | BuiltinNode::CollectEvidence
-            | BuiltinNode::QualityGate
-            | BuiltinNode::FindWork
-            | BuiltinNode::UpdateProgress
-            | BuiltinNode::CompareModels
+            | BuiltinNode::Loop
+            | BuiltinNode::Archived(ArchivedNode::CollectEvidence)
+            | BuiltinNode::Archived(ArchivedNode::QualityGate)
+            | BuiltinNode::Archived(ArchivedNode::FindWork)
+            | BuiltinNode::Archived(ArchivedNode::UpdateProgress)
+            | BuiltinNode::Archived(ArchivedNode::CompareModels)
             | BuiltinNode::Agent
-            | BuiltinNode::SummarizeResult
-            | BuiltinNode::LoadWorkContext
-            | BuiltinNode::ManageWork
+            | BuiltinNode::Archived(ArchivedNode::SummarizeResult)
+            | BuiltinNode::Archived(ArchivedNode::LoadWorkContext)
+            | BuiltinNode::Archived(ArchivedNode::ManageWork)
     );
     if stage_scoped {
         let workflow = super::runtime::load_workflow_run(db, project, &run)?

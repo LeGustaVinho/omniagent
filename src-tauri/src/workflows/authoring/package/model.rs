@@ -140,6 +140,34 @@ pub enum PackageArtifactBody {
 }
 
 impl PackageArtifactBody {
+    pub(super) fn ensure_supported_nodes(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Pipeline { graph } | Self::Subflow { graph, .. } => {
+                for node in &graph.nodes {
+                    node.validate_authored()?;
+                }
+            }
+            Self::Preset {
+                node_kind,
+                configuration,
+                ..
+            } => {
+                anyhow::ensure!(
+                    node_kind.is_supported() && !configuration.is_generated(),
+                    "The preset uses a retired node type"
+                );
+            }
+            Self::Prompt { prompt } => {
+                anyhow::ensure!(
+                    prompt.schema_contract && prompt.executor == BuiltinNode::Agent,
+                    "Use a typed AI Node Agent with Input and Output Schemas"
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn kind(&self) -> PackageArtifactKind {
         match self {
             Self::Schema { .. } => PackageArtifactKind::Schema,

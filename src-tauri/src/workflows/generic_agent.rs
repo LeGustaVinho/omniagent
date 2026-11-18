@@ -397,6 +397,15 @@ pub(super) fn evaluate(
                 )));
             }
         };
+        let rejection = (config.review_verdict && output.get("approved") != Some(&true.into()))
+            .then(|| {
+                output
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or("The reviewer did not approve the agent result")
+                    .to_owned()
+            });
         let artifact = insert_scoped_artifact(
             db,
             project,
@@ -412,6 +421,9 @@ pub(super) fn evaluate(
             run.plan_revision.as_deref().unwrap_or(""),
             inputs,
         )?;
+        if let Some(reason) = rejection {
+            return Ok(Some(AgentStageOutcome::failed(Some(run_id), &reason)));
+        }
         return Ok(Some(AgentStageOutcome {
             state: ControlStageState::Completed,
             port: "completed",

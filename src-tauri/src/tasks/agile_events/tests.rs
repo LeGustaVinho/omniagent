@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use super::*;
-use crate::{repository, workflows::DeliveryRoles};
+use crate::{repository, workflows::tests::simple_graph};
 
 async fn register(store: &Store, root: &Path) -> Result<String> {
     fs::create_dir(root)?;
@@ -51,12 +51,17 @@ async fn scoped_events_preserve_automation_chain_and_receipts_after_restart() ->
     );
     assert_eq!(created[0].origin, AgileEventOrigin::Operator);
 
+    let workflow = store
+        .save_workflow_revision(
+            project.clone(),
+            "work-events".into(),
+            simple_graph("Work events"),
+        )
+        .await?;
     let first = store
-        .start_builtin_delivery(project.clone(), DeliveryRoles::default())
+        .start_workflow_run(project.clone(), workflow.clone())
         .await?;
-    let loop_candidate = store
-        .start_builtin_delivery(project.clone(), DeliveryRoles::default())
-        .await?;
+    let loop_candidate = store.start_workflow_run(project.clone(), workflow).await?;
     let origin = store
         .bind_pipeline_work_event_origin(project.clone(), first.id.clone(), created[0].id.clone())
         .await?;

@@ -1,13 +1,10 @@
 // @vitest-environment jsdom
 
-import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Job } from "@/bindings/Job";
-import type { ModelOption } from "@/bindings/ModelOption";
-import { DeliveryAgent } from "@/repository-delivery-agent";
 import { RunPlanHistory } from "@/run-plan-history";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -29,56 +26,6 @@ afterEach(() => {
 function queryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
 }
-
-it("queues a read-only revision from the exact completed planning proposal", async () => {
-  const scope = { projectId: "project", runId: "workflow" };
-  const source = { sourceAttemptId: "original-planner", expectedPlanRevision: "version-one", proposalSequence: "26" };
-  const job: Job = {
-    id: "planner-job", projectId: scope.projectId, checkoutId: "checkout", taskId: null,
-    kind: "agent", origin: { type: "pipeline" }, worktreeOwnerTaskId: null, context: null, mode: "plan",
-    pipeline: { pipelineRunId: scope.runId, nodeInstanceId: "plan", planRevision: null, release: null },
-    priority: 0, queueState: "queued", queuedRecovery: null, downstreamWait: null,
-    latestAttempt: { ordinal: 1, runId: source.sourceAttemptId, conversationId: null, status: "succeeded",
-      cancelRequested: false, previousRunId: null, recovery: null },
-  };
-  const option: ModelOption = {
-    selection: { provider: "codex", profileId: "coder", modelId: "planning-model" },
-    name: "Fixture planning model", selectable: true, unavailableReason: null, rating: null, catalogVersion: 1,
-  };
-  vi.mocked(invoke).mockImplementation(async (command, args) => {
-    if (command === "conversation_models") return (args as { provider: string }).provider === "codex" ? [{ option }] : [];
-    if (command === "project_model_defaults") return { conversation: null, planning: null, implementation: null };
-    if (command === "request_repository_plan_revision") return job;
-    throw new Error(`Unexpected command ${command}`);
-  });
-  function Fixture() {
-    const action = useMutation({ mutationFn: (operation: () => Promise<unknown>) => operation() });
-    return <DeliveryAgent scope={scope} nodeId="plan" inputs={{ context: "pinned-document" }} job={job} label="Planning"
-      planRevision={source} actions={{ execute: (operation) => action.mutate(operation), busy: action.isPending }}
-      openActivity={() => {}} />;
-  }
-
-  render(<QueryClientProvider client={queryClient()}><Fixture /></QueryClientProvider>);
-  const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Request plan revision" }));
-  const submit = screen.getByRole<HTMLButtonElement>("button", { name: "Queue plan revision" });
-  expect(submit.disabled).toBe(true);
-  const feedback = "Require a smoke test";
-  await user.type(screen.getByRole("textbox", { name: "Feedback for proposal 26" }), feedback);
-  expect(submit.disabled).toBe(true);
-  await user.click(await screen.findByRole("button", { name: "Planning model · Choose model" }));
-  const menu = await screen.findByRole("menu");
-  await user.click(within(menu).getByRole("menuitemradio", { name: option.name }));
-  expect(submit.disabled).toBe(false);
-  await user.click(submit);
-
-  await screen.findByRole("button", { name: "Request plan revision" });
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command !== "conversation_models" && command !== "project_model_defaults")).toEqual([
-    ["request_repository_plan_revision", { input: {
-      ...scope, contextId: "pinned-document", ...source, selection: option.selection, effort: null, feedback,
-    } }],
-  ]);
-});
 
 it("opens frozen plan versions, revision feedback, and the prior release in the run inspector", async () => {
   const projectId = "project";
@@ -172,5 +119,4 @@ it("prepares feedback about only the selected lines of a saved plan revision", a
     checkoutId, conversationId: "target-chat", context: expect.stringContaining(`\n\n\`\`\`markdown\n${excerpt}\n\`\`\``),
   }));
   expect(open).toHaveBeenCalledWith("target-chat");
-  expect(invoke).not.toHaveBeenCalledWith("request_repository_plan_revision", expect.anything());
 });

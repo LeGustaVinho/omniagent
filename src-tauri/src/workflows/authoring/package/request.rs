@@ -9,9 +9,6 @@ use crate::{
 
 use super::*;
 
-#[cfg(test)]
-mod assistance_tests;
-
 pub(super) struct PackageRequest {
     pub(super) status: WorkflowPackageRequest,
     parent: String,

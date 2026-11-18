@@ -1,10 +1,5 @@
 use serde_json::{Value, json};
 
-use crate::workflows::{
-    BuiltinNode, NodeConfiguration, command::validate_command_binding,
-    mcp_tools::validate_mcp_binding,
-};
-
 use super::*;
 
 #[derive(Serialize)]
@@ -239,19 +234,7 @@ impl<'a> ReviewCatalog<'a> {
             } => (graph, Some((inputs.clone(), outputs.clone()))),
             _ => anyhow::bail!("Choose a pipeline or subflow to review its graph"),
         };
-        if member.destination == PackageDestination::Library {
-            for node in &graph.nodes {
-                if let NodeConfiguration::McpTool(tool) = &node.configuration {
-                    publish::require_portable_mcp(
-                        tool,
-                        &node.id,
-                        &artifact.references,
-                        &dependencies,
-                    )?;
-                }
-            }
-        }
-        let (definition, authoring_definitions) = publish::compile_review_graph(
+        let (_, authoring_definitions) = publish::compile_review_graph(
             self.db,
             self.project,
             &artifact.version.id,
@@ -262,73 +245,6 @@ impl<'a> ReviewCatalog<'a> {
             interface.as_ref(),
             &|version| self.load(version),
         )?;
-        for node in &definition.nodes {
-            let named_checks = match &node.instance.configuration {
-                NodeConfiguration::VerifyTestPhase(test) => std::slice::from_ref(&test.check),
-                NodeConfiguration::IntegratedChecks(checks) => checks.checks.as_slice(),
-                NodeConfiguration::StagedChecks { names, .. } => names.as_slice(),
-                NodeConfiguration::CandidateAcceptance(acceptance) => {
-                    std::slice::from_ref(&acceptance.build_check)
-                }
-                _ => &[],
-            };
-            for name in named_checks {
-                if !crate::repository::verification::test_phase::load_test_gate(
-                    self.db,
-                    self.project,
-                    name,
-                )?
-                .has_registered_command()
-                {
-                    requirements.push(format!("Register the project check {name}."));
-                }
-            }
-            match node.instance.kind {
-                BuiltinNode::SearchPublicRepositories => {
-                    requirements.push(
-                        "Authenticate the GitHub CLI (gh) for public repository research.".into(),
-                    );
-                }
-                BuiltinNode::OpenOrUpdatePullRequest
-                | BuiltinNode::WaitForCi
-                | BuiltinNode::MergePullRequest => {
-                    let bound: bool = self.db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM workflow_github_project_settings WHERE project_id = ?1)",
-                        [self.project], |row| row.get(0),
-                    )?;
-                    if !bound {
-                        requirements.push("Set the GitHub account, repository, destination and required checks in project settings.".into());
-                    }
-                }
-                BuiltinNode::RunBacklog => {
-                    if crate::tasks::load_delivery_milestone_policy(self.db, self.project)?
-                        .destination_branch
-                        .is_none()
-                    {
-                        requirements.push(
-                            "Set the delivery destination branch in the project's Agile policy."
-                                .into(),
-                        );
-                    }
-                }
-                _ => {}
-            }
-            let binding = match &node.instance.configuration {
-                NodeConfiguration::Command(command) => {
-                    validate_command_binding(self.db, self.project, command)
-                }
-                NodeConfiguration::McpTool(tool) if !tool.is_package_placeholder() => {
-                    validate_mcp_binding(self.db, self.project, tool)
-                }
-                _ => continue,
-            };
-            if let Err(error) = binding {
-                requirements.push(format!(
-                    "{} {} needs a local binding. {error}",
-                    node.definition.title, node.instance.id
-                ));
-            }
-        }
         Ok(authoring_definitions)
     }
 }

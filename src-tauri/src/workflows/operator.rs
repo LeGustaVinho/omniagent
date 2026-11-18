@@ -203,7 +203,7 @@ impl Store {
             .await?
             .context("the pinned planning stage is unavailable")?;
         ensure!(
-            node.definition.kind == BuiltinNode::Plan,
+            node.definition.kind == BuiltinNode::Archived(crate::workflows::ArchivedNode::Plan),
             "the pinned stage cannot publish plan proposals"
         );
         self.execute(move |db| {

@@ -43,14 +43,7 @@ const endpointLabel = ({ node, port }: WorkflowEndpoint) => `${node}.${port}`;
 const slug = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 export function reusableEditableFields(configuration: WorkflowNodeConfiguration) {
-  switch (configuration.kind) {
-    case "agent_role": return ["role"];
-    case "required_checks": return ["names"];
-    case "condition": return ["predicate"];
-    case "command": return ["output"];
-    case "build_list": return configuration.source === "values" ? ["values"] : ["pointer"];
-    default: return [];
-  }
+  return configuration.kind === "agent_role" ? ["role"] : [];
 }
 
 export function reusableNodeQuery(projectId: string, version: ReusableVersion) {

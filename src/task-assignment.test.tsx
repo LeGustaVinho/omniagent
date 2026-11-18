@@ -6,7 +6,6 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
-import { DeliveryAgent } from "@/repository-delivery-agent";
 import { TaskAssignment } from "@/task-assignment";
 import { TaskParticipants, type TaskParticipantAttempt } from "@/task-participants";
 
@@ -30,8 +29,6 @@ it("saves a planned model with a shared rating and preserves the previous partic
     ...original, requestedModel: original.modelId, reportedModel: "gpt-6.1-sol-recorded", status: "succeeded",
   };
   const assignment = { role: "implementer", ...original };
-  const workflow = { projectId: scope.projectId, runId: "delivery" };
-  const inputs = { release: "approved-release" };
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     switch (command) {
       case "project_task_assignments":
@@ -52,11 +49,6 @@ it("saves a planned model with a shared rating and preserves the previous partic
         }
         expect(args).toEqual({ ...scope, role: "implementer", selection: replacement.selection });
         return [{ role: "implementer", ...replacement.selection }];
-      case "submit_repository_delivery_agent":
-        expect(args).toEqual({ input: {
-          ...workflow, nodeId: "implement", unitId: "unit", inputs, selection: replacement.selection, effort: null,
-        } });
-        return;
       default:
         throw new Error(`Unexpected command ${command}`);
     }
@@ -68,9 +60,6 @@ it("saves a planned model with a shared rating and preserves the previous partic
   render(<QueryClientProvider client={client}>
     <TaskAssignment {...scope} />
     <TaskParticipants {...scope} openActivity={openActivity} />
-    <DeliveryAgent scope={workflow} nodeId="implement" unitId="unit" taskId={scope.taskId}
-      inputs={inputs} label="Implementation" actions={{ execute: (operation) => { void operation(); }, busy: false }}
-      openActivity={openActivity} />
   </QueryClientProvider>);
 
   await user.click(screen.getByText("Planned model assignments"));
@@ -87,17 +76,11 @@ it("saves a planned model with a shared rating and preserves the previous partic
   expect(within(screen.getByRole("group", { name: "Reference rating for Claude Sonnet 5.5" }))
     .getByText("73.9/100")).toBeTruthy();
 
-  const delivery = within(screen.getByRole("region", { name: "Implementation" }));
-  expect(delivery.getByRole("button", { name: "Implementation model · Claude Sonnet 5.5" })).toBeTruthy();
-  expect(delivery.getByText("Model from task assignment")).toBeTruthy();
-  await user.click(delivery.getByRole("button", { name: "Queue implementation" }));
-  expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", expect.any(Object));
-
   const saved = within(screen.getByRole("region", { name: "Work history" }));
   expect(saved.getByText("gpt-6.1-sol-recorded")).toBeTruthy();
   await user.click(saved.getByRole("button", { name: "Open attempt 1" }));
   expect(openActivity).toHaveBeenCalledWith("original", "conversation");
   await user.click(screen.getByRole("button", { name: "Clear assignment" }));
-  await delivery.findByRole("button", { name: "Implementation model · Choose model" });
+  await screen.findByRole("button", { name: "Assignment model · Choose model" });
   expect(saved.getByText("gpt-6.1-sol-recorded")).toBeTruthy();
 });

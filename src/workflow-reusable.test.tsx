@@ -35,14 +35,14 @@ const start: WorkflowDefinition = {
   inputs: [], outputs: [{ name: "start", value: control }],
 };
 const verify: WorkflowDefinition = {
-  kind: "verify_candidate", revision: 1, title: "Verify candidate", configuration: "required_checks", executor: "verify",
+  kind: "agent", revision: 1, title: "Verify candidate", configuration: "agent_role", executor: "read_only_agent",
   effect: "read_checkout", inputs: [{ name: "ready", value: control }], outputs: [{ name: "checks", value: checks }],
 };
 const edge: WorkflowWire = { from: { node: "start", port: "start" }, to: { node: "verify", port: "ready" } };
 const graph: WorkflowGraph = {
   name: "Pipeline",
   nodes: [{ id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "verify", kind: "verify_candidate", configuration: { kind: "required_checks", names: ["Build"] } }],
+    { id: "verify", kind: "agent", configuration: { kind: "agent_role", role: "Build" } }],
   wires: [edge],
 };
 const draft = {
@@ -72,11 +72,11 @@ it("derives a preset and a typed subflow selection from the immutable package re
   await user.click(screen.getByText("Save a reusable node"));
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Reusable verification" } });
   await user.selectOptions(screen.getByLabelText("Configured node"), "verify");
-  await user.click(screen.getByRole("checkbox", { name: "names" }));
+  await user.click(screen.getByRole("checkbox", { name: "role" }));
   await user.click(screen.getByRole("button", { name: "Save as preset" }));
   expect(invoke).toHaveBeenCalledWith("derive_workflow_reusable", { projectId, source, request: {
     name: "Reusable verification", key: "reusable-verification", destination: "project",
-    selection: { type: "preset", nodeId: "verify", editableFields: ["names"] },
+    selection: { type: "preset", nodeId: "verify", editableFields: ["role"] },
   } });
   await waitFor(() => expect(saved).toHaveBeenCalledWith(result));
   await user.selectOptions(screen.getByLabelText("Reusable type"), "subflow");
@@ -143,8 +143,8 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
   const subflowVersion = { kind: "subflow", id: "subflow", revision: "subflow-r1", destination: "library" };
   const preset = {
     artifact: { version: presetVersion, name: "Test preset", blockers: [], references: {},
-      body: { kind: "preset", configuration: graph.nodes[1]?.configuration, editableFields: ["names"] } },
-    definition: { ...verify, title: "Test preset" }, graphDefinitions: {}, editableOverrides: ["names"],
+      body: { kind: "preset", configuration: graph.nodes[1]?.configuration, editableFields: ["role"] } },
+    definition: { ...verify, title: "Test preset" }, graphDefinitions: {}, editableOverrides: ["role"],
   };
   const subflow = {
     artifact: { version: subflowVersion, name: "Review subflow", blockers: [], references: {}, body: { kind: "subflow", graph } },
@@ -154,7 +154,7 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
   const member = draft.package.members[0]!;
   const opened = { ...draft, package: { ...draft.package, members: [{
     ...member, body: { ...member.body, graph: { ...graph, nodes: [...graph.nodes,
-      { id: "reusable-verify-candidate", kind: "verify_candidate", configuration: { kind: "preset_overrides", fields: {} } },
+      { id: "reusable-verify-candidate", kind: "agent", configuration: { kind: "preset_overrides", fields: {} } },
       { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } },
     ] } },
     references: { "reusable-verify-candidate": { source: "published", version: presetVersion },
@@ -179,8 +179,8 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
   const parent = await screen.findByRole("region", { name: "Pipeline graph editor" });
   const inspect = within(parent).getByLabelText("Inspect node");
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Test preset · reusable/ }));
-  const names = within(parent).getByLabelText(/Required checks/);
-  expect((names as HTMLTextAreaElement).value).toBe("Build");
+  const names = within(parent).getByLabelText(/Agent role/);
+  expect((names as HTMLInputElement).value).toBe("Build");
   fireEvent.change(names, { target: { value: "Lint" } });
   const pinnedNode = "reusable-verify-candidate";
   fireEvent.contextMenu(screen.getByRole("button", { name: `Select graph node ${pinnedNode}` }));
@@ -196,18 +196,18 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
   expect(within(child).getByText("subflow-r1")).toBeTruthy();
   const childInspect = within(child).getByLabelText("Inspect node");
   await user.selectOptions(childInspect, "verify");
-  expect((within(child).getByLabelText(/Required checks/) as HTMLTextAreaElement).disabled).toBe(true);
+  expect((within(child).getByLabelText(/Agent role/) as HTMLInputElement).disabled).toBe(true);
   await user.click(screen.getByRole("button", { name: "Close pinned subflow" }));
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
   expect(await screen.findByText("saved-next")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({
     expectedRevision: "saved",
     package: { ...draft.package, members: [{ ...draft.package.members[0], body: { kind: "pipeline", graph: {
-      ...graph, nodes: [...graph.nodes, { id: "reusable-verify-candidate", kind: "verify_candidate",
-        configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } },
+      ...graph, nodes: [...graph.nodes, { id: "reusable-verify-candidate", kind: "agent",
+        configuration: { kind: "preset_overrides", fields: { role: "Lint" } } },
       { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } },
-      { id: "reusable-verify-candidate-2", kind: "verify_candidate",
-        configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } }],
+      { id: "reusable-verify-candidate-2", kind: "agent",
+        configuration: { kind: "preset_overrides", fields: { role: "Lint" } } }],
     } }, references: {
       "reusable-verify-candidate": { source: "published", version: presetVersion },
       "reusable-verify-candidate-2": { source: "published", version: presetVersion },

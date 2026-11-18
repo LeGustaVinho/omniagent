@@ -6,19 +6,14 @@ import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineToolbar } from "@/pipeline-layout";
-import { WorkflowAgileFields } from "@/workflow-agile-editor";
 import { WorkflowControlFields } from "@/workflow-control-editor";
-import { CommandNodeConfiguration } from "@/workflow-command";
-import { DecisionNodeFields, type WorkflowDecisionConfiguration } from "@/workflow-decision-editor";
-import { WorkflowMcpNodeConfiguration } from "@/workflow-mcp-tools";
-import { StructuredObjectField } from "@/workflow-structured-fields";
-import { BuildListFields, BuildTextFields, CandidateAcceptanceFields, CompareModelsFields, ConditionFields, FilterMapListFields, IntegratedChecksFields, LoopFields, RequiredChecksFields, RunBacklogFields, SetFieldsFields, StartInputFields, TestPhaseFields } from "@/workflow-node-fields";
+import { StartInputFields } from "@/workflow-node-fields";
 import { AgentRoleFields } from "@/workflow-stage-model";
 import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import type { ReusableReference } from "@/workflow-reusable";
 import {
   changedPorts, configurationProblem, configuredBranches, connectionProblem, defaultConfiguration, incompatibility,
-  initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, readableGraphViewport, wireKey,
+  initialNodePositions, isPresetEligible, isStartNode, isSupportedWorkflowNode, outputPort, portType, readableGraphViewport, wireKey,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
   type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowReuseSelection, type WorkflowWire,
 } from "@/workflow-graph-model";
@@ -43,6 +38,7 @@ export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDe
   subflowDefinition?: (nodeId: string) => WorkflowDefinition | undefined): WorkflowDefinitions {
   const available = new Map(catalog.map((entry) => [entry.kind, entry]));
   return Object.fromEntries(state.graph.nodes.flatMap((node) => {
+    if (!isSupportedWorkflowNode(node.kind)) return [];
     const copy = state.definitionCopies && Object.hasOwn(state.definitionCopies, node.id) ? state.definitionCopies[node.id] : undefined;
     const stored = Object.hasOwn(pinned, node.id) ? pinned[node.id] : copy && pinned[copy.sourceId];
     const current = available.get(node.kind);
@@ -61,22 +57,6 @@ export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDe
     if (node.configuration.kind === "subflow_entry" && Array.isArray(node.configuration.outputs)) {
       definition = { ...definition, configuration: "subflow_entry", outputs: node.configuration.outputs };
     }
-    if (node.kind === "find_work") {
-      const query = node.configuration.query as { result?: unknown } | undefined;
-      if (query?.result !== "single") return [[node.id, {
-        ...definition, outputs: definition.outputs.filter(({ name }) => name !== "task" && name !== "target"),
-      }]];
-    }
-    if (node.kind === "verify_test_phase") {
-      const { phase } = node.configuration;
-      definition = { ...definition, inputs: definition.inputs.filter(({ name }) =>
-        name === "tests" ? phase === "red" : !["candidate", "prior"].includes(name) || phase !== "baseline") };
-    }
-    if (node.kind === "accept_candidate") {
-      const missing = node.configuration.kind === "none" ? ["quality", "build"] : [];
-      if (node.configuration.reviewMode !== "selected") missing.push("selected_reviews");
-      definition = { ...definition, inputs: definition.inputs.filter(({ name }) => !missing.includes(name)) };
-    }
     return [[node.id, definition]];
   }));
 }
@@ -92,19 +72,7 @@ function scopedSubflowPorts(node: WorkflowGraphNode, definition: WorkflowDefinit
         required: ["iterations", "reason"], additionalProperties: false },
     } : undefined };
   }
-  if (node.kind === "repeat_until") {
-    const exports = Array.isArray(node.configuration.exports) ? node.configuration.exports : [];
-    return { ...definition, inputs: bound.inputs, outputs: [
-      ...["completed", "failed"].map((name) => ({ name, value: { kind: "control" } as const })),
-      ...bound.outputs.filter(({ name, value }) => value.kind === "data" && exports.includes(name)
-        && name !== "completed" && name !== "failed"),
-    ] };
-  }
-  if (node.kind !== "for_each") return definition;
-  const { readyInput, itemInput } = node.configuration;
-  const standard = definition.inputs.filter(({ name }) => name === "ready" || name === "items");
-  const additional = bound.inputs.filter(({ name }) => name !== readyInput && name !== itemInput && !standard.some((port) => port.name === name));
-  return { ...definition, inputs: [...standard, ...additional] };
+  return definition;
 }
 
 type PortSide = "input" | "output";
@@ -119,7 +87,7 @@ function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   const update = useUpdateNodeInternals();
   const definition = data.definition;
   useEffect(() => { update(id); }, [definition, id, update]);
-  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={data.promptRole ?? id} prompt={data.promptRole !== undefined}
+  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable or retired node"} detail={data.promptRole ?? id} prompt={data.promptRole !== undefined}
     selected={selected || data.inspected}
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
@@ -210,7 +178,7 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
-  backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
+  onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
   promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
   projectId: string;
   checkoutId?: string;
@@ -225,7 +193,6 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   editablePresetFields?: Record<string, string[]>;
   goalRoleForNode?: (nodeId: string) => { version?: StageGoalRoleRevision; pending?: boolean } | undefined;
   subflowDefinitionForNode?: (nodeId: string) => WorkflowDefinition | undefined;
-  backlogBound?: (nodeId: string) => boolean;
   onDerive?: (selection: WorkflowReuseSelection) => void;
   deriveDisabled?: boolean;
   fullHeight?: boolean;
@@ -361,7 +328,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const binding = state.nodeBindings && Object.hasOwn(state.nodeBindings, id) ? state.nodeBindings[id] : undefined;
         const current = catalog.find((definition) => definition.kind === kind);
         const version = definitions[id];
-        const retainsNativePin = !binding?.preset && !["subflow", "repeat_until", "for_each"].includes(kind)
+        const retainsNativePin = !binding?.preset && kind !== "subflow" && kind !== "loop"
           && current && version && version.revision !== current.revision;
         const definition = retainsNativePin ? state.definitionCopies?.[id] ?? { sourceId: id, revision: version.revision } : undefined;
         return { node, position, binding, definition };
@@ -371,7 +338,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   }
 
   function insert(selection: GraphSelection, anchor?: { x: number; y: number }, clone = true) {
-    if (disabled || !selection.nodes.length) return;
+    if (disabled || !selection.nodes.length || selection.nodes.some(({ node }) => !isSupportedWorkflowNode(node.kind))) return;
     const ids = new Map(selection.nodes.map(({ node }) => [node.id, allocateId(node.id)]));
     const nextLayout = { ...layout };
     const definitionCopies = { ...state.definitionCopies };
@@ -398,7 +365,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
 
   function insertNew(kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) {
     const definition = catalog.find((entry) => entry.kind === kind);
-    if (!definition) return;
+    if (!definition || !isSupportedWorkflowNode(kind)) return;
     const bounds = canvas.current?.getBoundingClientRect();
     const point = insertion?.position ?? (bounds && flow ? flow.screenToFlowPosition({
       x: bounds.left + bounds.width / 2,
@@ -526,7 +493,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       graph: { ...graph, nodes: graph.nodes.map((item) => item.id !== node.id
         || definitions[item.id]?.configuration === version.configuration
         || item.configuration.kind === version.configuration
-        || !configurationProblem(item.configuration, version, backlogBound?.(item.id))
+        || !configurationProblem(item.configuration, version)
         ? item : { ...item, configuration: defaultConfiguration(version.configuration) }) } });
   }
 
@@ -564,7 +531,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const first = scoped[0]!;
     const multiple = scoped.length > 1;
     const selection = `${scoped.length} selected nodes`;
-    const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind) && !isBoundary(kind)).map(({ id }) => id);
+    const subflowNodes = scoped.filter(({ kind }) => isSupportedWorkflowNode(kind) && !isStartNode(kind) && !isBoundary(kind)).map(({ id }) => id);
     const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && !isBoundary(kind) && definitions[id] !== undefined);
     return [[
       ...(multiple ? [{ label: "Fit selection to view", disabled: !flow,
@@ -638,7 +605,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const defined = definitions[item.id];
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
       ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, promptRole: promptRoles?.[item.id], readOnly: disabled, inspected: item.id === selected,
-        problem: !defined || Boolean(configurationProblem(item.configuration, defined, backlogBound?.(item.id))),
+        problem: !defined || Boolean(configurationProblem(item.configuration, defined)),
         portActions: { nodeId: item.id, activeOutput: pending?.side === "output" ? pending.endpoint : undefined,
           activate: (side, name) => activatePort(item.id, side, name) },
       } };
@@ -781,7 +748,6 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
               <NodeFields projectId={projectId} checkoutId={checkoutId} node={node} definition={definition} nodes={graph.nodes}
                 presetFields={editablePresetFields?.[node.id]} goalRole={goalRoleForNode?.(node.id)}
                 subflow={subflowDefinitionForNode?.(node.id)}
-                backlogBound={backlogBound?.(node.id)}
                 disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
             </div>
           </details>}
@@ -807,12 +773,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   </section>;
 }
 
-function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, goalRole, subflow, backlogBound, onChange, nodes }: {
+function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, goalRole, subflow, onChange, nodes }: {
   projectId: string; checkoutId?: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
   presetFields?: string[];
   goalRole?: { version?: StageGoalRoleRevision; pending?: boolean };
   subflow?: WorkflowDefinition;
-  backlogBound?: boolean;
   nodes: WorkflowGraphNode[];
 }) {
   const { configuration } = node;
@@ -827,41 +792,9 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, presetF
     case "human":
     case "loop": return <WorkflowControlFields configuration={configuration} disabled={locked} nodes={nodes} subflow={subflow} onChange={onChange} />;
     case "agent_role": return <AgentRoleFields projectId={projectId} checkoutId={checkoutId}
-      mode={definition.kind === "plan" ? "plan" : definition.effect === "write_repository" ? "approved_write" : "read_only"}
+      mode={definition.effect === "write_repository" ? "approved_write" : "read_only"}
       nodeId={node.id} nodeKind={node.kind} goalRole={goalRole}
       configuration={configuration} onChange={onChange} disabled={locked || !allow("role")} fixedModel={Boolean(presetFields)} />;
-    case "required_checks":
-    case "candidate_checks": return <RequiredChecksFields configuration={configuration} disabled={locked}
-      fixedNames={!allow("names")} fixedGroups={!allow("parallelGroups")}
-      strategyOptions={!presetFields && definition.inputs.some(({ name }) => name === "strategy")}
-      stageOptions={definition.configuration === "candidate_checks" && !presetFields} onChange={onChange} />;
-    case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration}
-      onChange={onChange} disabled={locked || !allow("output")} fixedInvocation={Boolean(presetFields)} />;
-    case "mcp_tool": return <WorkflowMcpNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={locked} />;
-    case "build_list": return <BuildListFields configuration={configuration} disabled={locked}
-      fixedSource={Boolean(presetFields)} onChange={onChange} />;
-    case "for_each":
-    case "repeat_until": return <LoopFields configuration={configuration} subflow={subflow} disabled={locked} onChange={onChange} />;
-    case "run_backlog": return <RunBacklogFields projectId={projectId} configuration={configuration}
-      backlogBound={backlogBound} disabled={locked} onChange={onChange} />;
-    case "verify_test_phase": return <TestPhaseFields projectId={projectId} configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "integrated_checks": return <IntegratedChecksFields projectId={projectId} configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "candidate_acceptance": return <CandidateAcceptanceFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "search_public_repositories": return <label>Maximum repositories<input type="number" min={1} max={30} step={1}
-      disabled={locked} value={typeof configuration.limit === "number" ? configuration.limit : ""}
-      onChange={(event) => onChange({ ...configuration, limit: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} /></label>;
-    case "condition": return <ConditionFields configuration={configuration} disabled={locked || !allow("predicate")} onChange={onChange} />;
-    case "set_fields": return <SetFieldsFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "filter_map_list": return <FilterMapListFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "build_text": return <BuildTextFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "validate_output": return definition.outputSchemas?.object ? null : <StructuredObjectField label="Output JSON Schema" value={configuration.schema} disabled={locked}
-      onChange={(schema) => onChange({ ...configuration, schema })} />;
-    case "quality_gate": return <>
-      <p className="pipeline-meta">Use field paths into the evidence array, in wire order.</p>
-      <StructuredObjectField label="Quality rules" value={configuration.rules} disabled={locked}
-        onChange={(rules) => onChange({ ...configuration, rules })} />
-    </>;
-    case "compare_models": return <CompareModelsFields configuration={configuration} disabled={locked} onChange={onChange} />;
     case "typed_start": return definition.outputSchemas?.inputs ? <div className="pipeline-stack">
       <label className="pipeline-checkline">
         <input type="checkbox" checked={configuration.conversation === true} disabled={locked} onChange={(event) =>
@@ -869,12 +802,6 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, presetF
       </label>
       {configuration.conversation === true && <small className="pipeline-meta">The chat supplies message and history fields declared in this Schema.</small>}
     </div> : <StartInputFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "find_work":
-    case "update_progress":
-    case "manage_work":
-    case "load_work_context": return <WorkflowAgileFields projectId={projectId} configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "request_input":
-    case "approval": return <DecisionNodeFields configuration={configuration as WorkflowDecisionConfiguration} disabled={locked} onChange={onChange} />;
     case "subflow_entry": return null;
     default: return <p className="pipeline-meta">The parameters for this node version are unavailable in the editor.</p>;
   }

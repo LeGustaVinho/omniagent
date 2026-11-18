@@ -9,8 +9,7 @@ use crate::{protection, runtime_inspection::BuildIdentity, store::Store};
 
 use super::{
     ApprovalDecisionSource, BuiltinNode, Executor, NodeInputs, PinnedNode, Wire, WorkflowRevision,
-    artifacts::insert_scoped_artifact, control,
-    inspection::record_workflow_input_ids,
+    artifacts::insert_scoped_artifact, control, inspection::record_workflow_input_ids,
 };
 
 mod evidence;
@@ -389,8 +388,9 @@ pub(crate) fn load_settings(db: &Connection, project: &str) -> Result<Option<Mai
 
 #[cfg(test)]
 pub(super) fn builtin_enabled(db: &Connection, project: &str) -> Result<bool> {
-    Ok(load_settings(db, project)?
-        .is_some_and(|settings| settings.configuration.workflow_id == super::builtin::BUILTIN_DELIVERY_ID))
+    Ok(load_settings(db, project)?.is_some_and(|settings| {
+        settings.configuration.workflow_id == super::builtin::BUILTIN_DELIVERY_ID
+    }))
 }
 
 pub(super) fn validate_activation_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Result<()> {
@@ -418,7 +418,8 @@ pub(super) fn validate_activation_wires(nodes: &[PinnedNode], wires: &[Wire]) ->
             && ready.port == "verified"
             && git.port == "git"
             && nodes.iter().any(|node| node.instance.id == git.node
-                && node.instance.kind == BuiltinNode::VerifyCommit),
+                && node.instance.kind
+                    == BuiltinNode::Archived(crate::workflows::ArchivedNode::VerifyCommit)),
         "Wire maintenance activation to both outputs of the same Verify commit node"
     );
     Ok(())

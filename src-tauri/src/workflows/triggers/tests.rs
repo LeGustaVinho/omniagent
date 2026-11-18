@@ -6,8 +6,8 @@ use super::*;
 use crate::{
     tasks::TaskPlacement,
     workflows::{
-        ArtifactValue, DeliveryRoles, WorkflowGraph, WorkflowLaunchRequest, builtin_delivery_graph,
-        tests::approved_delivery_repository,
+        ArtifactValue, WorkflowGraph,
+        tests::{approved_delivery_repository, simple_graph},
     },
 };
 
@@ -25,27 +25,17 @@ async fn typed_start_rules_bind_the_real_agile_event_without_a_markdown_source()
                 {"id":"entry","kind":"typed_start","configuration":{"kind":"typed_start","fields":[
                     {"name":"extra","valueType":"text","required":required}
                 ]}},
-                {"id":"text","kind":"build_text","configuration":{"kind":"build_text","template":"Task created"}},
-                {"id":"result","kind":"summarize_result","configuration":{"kind":"none"}}
+                {"id":"end","kind":"end","configuration":{"kind":"end"}}
             ],
             "wires": [
-                {"from":{"node":"entry","port":"start"},"to":{"node":"text","port":"ready"}},
-                {"from":{"node":"text","port":"completed"},"to":{"node":"result","port":"ready"}},
-                {"from":{"node":"text","port":"text"},"to":{"node":"result","port":"summary"}},
-                {"from":{"node":"entry","port":"event"},"to":{"node":"result","port":"evidence"}}
+                {"from":{"node":"entry","port":"start"},"to":{"node":"end","port":"ready"}}
             ]
         }))
     };
     let accepted = store
         .save_workflow_revision(project.clone(), "rules".into(), graph(false)?)
         .await?;
-    let mut manual = graph(true)?;
-    let invalid_graph = store
-        .save_workflow_revision(project.clone(), "invalid-start".into(), manual.clone())
-        .await
-        .expect_err("An event wire requires a Start whose fields can all be omitted");
-    assert!(invalid_graph.to_string().contains("event port"));
-    manual.wires.retain(|wire| wire.from.port != "event");
+    let manual = graph(true)?;
     let manual_only = store
         .save_workflow_revision(project.clone(), "manual".into(), manual)
         .await?;
@@ -64,20 +54,6 @@ async fn typed_start_rules_bind_the_real_agile_event_without_a_markdown_source()
     let invalid = store.save_workflow_trigger_rule(project.clone(), None, None, spec(manual_only)).await
         .expect_err("A rule must be rejected before its required manual inputs can cause a failed activation");
     assert!(invalid.to_string().contains("manual launch"));
-    let manual_request: WorkflowLaunchRequest = serde_json::from_value(json!({
-        "projectId": project,
-        "workflow": accepted,
-        "checkoutId": repo.checkout_id,
-        "requestId": "cannot-spoof-an-event"
-    }))?;
-    assert!(
-        store
-            .launch_workflow_request(manual_request)
-            .await
-            .expect_err("The event is service-owned")
-            .to_string()
-            .contains("Agile event")
-    );
     let rule = store
         .save_workflow_trigger_rule(project.clone(), None, None, spec(accepted))
         .await?;
@@ -141,14 +117,14 @@ async fn rules_pin_activation_deduplicate_and_stop_a_cycle_after_restart() -> Re
         .save_workflow_revision(
             project.clone(),
             "task-rule".into(),
-            builtin_delivery_graph(DeliveryRoles::default()),
+            simple_graph("Workflow for work events"),
         )
         .await?;
     let second = store
         .save_workflow_revision(
             project.clone(),
             "child-rule".into(),
-            builtin_delivery_graph(DeliveryRoles::default()),
+            simple_graph("Workflow for work events"),
         )
         .await?;
     let spec = |name: &str, work, pipeline| WorkflowTriggerSpec {
@@ -307,7 +283,7 @@ async fn status_and_checklist_rules_isolate_a_failed_launch_from_the_work_change
         .save_workflow_revision(
             project.clone(),
             "progress-rules".into(),
-            builtin_delivery_graph(DeliveryRoles::default()),
+            simple_graph("Workflow for work events"),
         )
         .await?;
     for (event, state) in [
@@ -424,15 +400,7 @@ async fn status_and_checklist_rules_isolate_a_failed_launch_from_the_work_change
 
 #[tokio::test]
 async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Result<()> {
-    use crate::{
-        jobs::AdmissionEnvironment,
-        providers::SessionMode,
-        tasks::ChecklistExecutionMode,
-        workflows::{
-            ArtifactValue,
-            tests::{approve_delivery_fixture_in_run, submission},
-        },
-    };
+    use crate::tasks::ChecklistExecutionMode;
 
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("checklist-launch.sqlite");
@@ -462,9 +430,6 @@ async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Resu
     let selected = store
         .append_project_checklist_item(project.clone(), subtask.id.clone(), "Selected item".into())
         .await?;
-    let unrelated = store
-        .append_project_checklist_item(project.clone(), subtask.id.clone(), "Separate item".into())
-        .await?;
     let source = store
         .capture_repository_markdown(
             repo.checkout_id.clone(),
@@ -475,7 +440,7 @@ async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Resu
         .save_workflow_revision(
             project.clone(),
             "checklist-workflow".into(),
-            builtin_delivery_graph(DeliveryRoles::default()),
+            simple_graph("Workflow for work events"),
         )
         .await?;
     let rule = store
@@ -518,27 +483,6 @@ async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Resu
         .run_id
         .clone()
         .context("The checklist trigger did not record its run")?;
-    let run = store
-        .workflow_run(project.clone(), run_id.clone())
-        .await?
-        .context("Missing workflow run")?;
-    let fixture = approve_delivery_fixture_in_run(
-        &store,
-        directory.path(),
-        repo.clone(),
-        Some(subtask.id.clone()),
-        run,
-    )
-    .await?;
-    let ArtifactValue::Task(linked) = &fixture.task.value else {
-        anyhow::bail!("The workflow did not record linked work");
-    };
-    assert_eq!(linked.task_id, subtask.id);
-    let dispatch = store
-        .project_checklist_dispatch(project.clone(), subtask.id.clone())
-        .await?
-        .context("The selected Sub-Task has no prepared checklist target")?;
-
     // Reopen a receipt written before the item field was present. Reconstruction
     // must use the retained Agile event and keep its original item revision.
     let old_pin = store
@@ -583,101 +527,5 @@ async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Resu
             .as_ref(),
         Some(&pinned_item)
     );
-    assert!(
-        inspected
-            .outputs
-            .iter()
-            .any(|output| output.artifact == fixture.task)
-    );
-    assert!(
-        inspected
-            .outputs
-            .iter()
-            .any(|output| output.artifact == fixture.decision)
-    );
-
-    assert!(
-        store
-            .set_pipeline_checklist_item_checked(
-                project.clone(),
-                run_id.clone(),
-                subtask.id.clone(),
-                unrelated.id.clone(),
-                unrelated.revision,
-                true,
-            )
-            .await
-            .is_err()
-    );
-    let current = store
-        .set_pipeline_checklist_item_checked(
-            project.clone(),
-            run_id,
-            subtask.id.clone(),
-            selected.id.clone(),
-            pinned_item.revision,
-            false,
-        )
-        .await?;
-    assert_ne!(current.revision, pinned_item.revision);
-    let mut scope = submission(
-        &repo,
-        &fixture.run,
-        "implement",
-        None,
-        SessionMode::ApprovedWrite,
-    )
-    .scope;
-    scope.checkout = fixture.checkout.checkout_root.into();
-    assert!(
-        store
-            .queue_project_checklist_work(
-                project.clone(),
-                subtask.id.clone(),
-                dispatch.release_id.clone(),
-                dispatch.unit_id.clone(),
-                Some(unrelated.id),
-                scope.clone(),
-            )
-            .await
-            .is_err()
-    );
-    let job = store
-        .queue_project_checklist_work(
-            project.clone(),
-            subtask.id.clone(),
-            dispatch.release_id,
-            dispatch.unit_id,
-            Some(selected.id),
-            scope,
-        )
-        .await?;
-    let attempt = store
-        .claim_next_job(AdmissionEnvironment {
-            runner: "fixture-runner".into(),
-            bridge_available: false,
-        })
-        .await?
-        .context("The pinned checklist job was not admitted")?;
-    let access = store
-        .task_dispatch_context(attempt.run.id.clone())
-        .await?
-        .context("Missing checklist dispatch context")?;
-    let saved_job = store
-        .job(project, job.id)
-        .await?
-        .context("Missing pinned checklist job")?;
-    assert_eq!(
-        saved_job
-            .latest_attempt
-            .context("Missing checklist attempt")?
-            .run_id,
-        attempt.run.id
-    );
-    assert_eq!(access.task_id, subtask.id);
-    assert_eq!(access.checklist.len(), 1);
-    assert_eq!(access.checklist[0].id, pinned_item.item_id);
-    assert_eq!(access.checklist[0].revision, pinned_item.revision);
-    assert!(access.checklist[0].checked);
     Ok(())
 }

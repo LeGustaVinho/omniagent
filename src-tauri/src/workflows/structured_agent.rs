@@ -24,6 +24,8 @@ pub struct StructuredAgentConfiguration {
     pub effective_role: ConversationTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_role: Option<ConversationTemplate>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_verdict: bool,
 }
 
 impl StructuredAgentConfiguration {
@@ -296,6 +298,7 @@ mod tests {
                 "completionContract": "Return a structured result."
             }))?,
             reviewer_role: None,
+            review_verdict: false,
         };
         config.validate()?;
         assert_eq!(

@@ -729,7 +729,7 @@ mod tests {
             destination: PackageDestination::Library,
             base: None,
             body: PackageArtifactBody::Preset {
-                node_kind: BuiltinNode::McpTool,
+                node_kind: BuiltinNode::Archived(crate::workflows::ArchivedNode::McpTool),
                 configuration: NodeConfiguration::McpTool(config.clone()),
                 editable_fields: vec![],
             },

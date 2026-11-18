@@ -15,7 +15,7 @@ use crate::{
 
 mod jobs;
 mod protocol;
-pub use jobs::{McpAttemptEvidence, McpJobReview, WorkflowMcpToolSubmission};
+pub use jobs::{McpAttemptEvidence, McpJobReview};
 pub(crate) use jobs::{
     is_mcp_job, load_mcp_artifact, mcp_admission_blocker, run_isolated_mcp, settle_mcp_restart,
     settle_mcp_result,

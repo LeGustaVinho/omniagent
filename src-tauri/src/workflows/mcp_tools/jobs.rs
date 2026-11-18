@@ -5,7 +5,7 @@ use tokio::{runtime::Handle, sync::watch};
 use uuid::Uuid;
 
 use crate::{
-    jobs::{Job, LaunchGate, PipelineDispatch, queue_pipeline_mcp, record_launch_intent},
+    jobs::{Job, LaunchGate, record_launch_intent},
     providers::SessionMode,
     runner::Runner,
     runs::{self, RunRecord, RunStatus},
@@ -16,23 +16,13 @@ use super::{
     McpToolConfiguration, McpToolContract, SavedServer, WorkflowArtifact, WorkflowMcpToolResult,
     binding, destination, digest, protocol::Client, seal, unseal,
 };
-use crate::workflows::{ArtifactValue, NodeConfiguration, NodeInputs, WorkflowJobInput};
+use crate::workflows::ArtifactValue;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct McpInvocation {
     config: McpToolConfiguration,
     server: SavedServer,
     contract: McpToolContract,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkflowMcpToolSubmission {
-    pub project_id: String,
-    pub run_id: String,
-    pub node_id: String,
-    pub checkout_id: String,
-    pub inputs: NodeInputs,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,55 +46,6 @@ pub struct McpAttemptEvidence {
 }
 
 impl Store {
-    pub async fn submit_workflow_mcp_tool(
-        &self,
-        submission: WorkflowMcpToolSubmission,
-    ) -> Result<Job> {
-        let WorkflowMcpToolSubmission {
-            project_id,
-            run_id,
-            node_id,
-            checkout_id,
-            inputs,
-        } = submission;
-        let (node, resolved) = self
-            .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
-            .await?;
-        let NodeConfiguration::McpTool(config) = node.instance.configuration else {
-            anyhow::bail!("The pinned workflow node is not a local MCP tool")
-        };
-        let outcome = self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let config = config.with_resolved_arguments(resolved.get("arguments"))?;
-            let (server, contract) = binding(&tx, &project_id, &config)?;
-            let workflow = super::super::runtime::load_workflow_run(&tx, &project_id, &run_id)?
-                .context("The MCP tool workflow run is unavailable")?;
-            let pipeline = PipelineDispatch { pipeline_run_id: run_id, node_instance_id: node_id, plan_revision: workflow.plan_revision, release_id: None };
-            let execution = digest(&serde_json::to_vec(&(&checkout_id, &pipeline.plan_revision, &inputs, &config))?);
-            let previous: Option<String> = tx.query_row("SELECT job_id FROM workflow_mcp_jobs WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND execution_digest = ?3",
-                params![pipeline.pipeline_run_id, pipeline.node_instance_id, execution], |row| row.get(0)).optional()?;
-            if let Some(id) = previous {
-                return crate::jobs::load_job(&tx, &project_id, &id)?.context("The existing MCP tool job is unavailable");
-            }
-            ensure!(!unresolved_effect(&tx, &pipeline.pipeline_run_id, &pipeline.node_instance_id, None)?,
-                "This workflow node has an unresolved external effect");
-            let grant = grant_id(&tx, &project_id, &config)?;
-            let invocation = McpInvocation { config, server, contract };
-            let job = queue_pipeline_mcp(&tx, &project_id, &pipeline, checkout_id,
-                &WorkflowJobInput { unit_id: None, artifacts: inputs, plan_revision_request: None, comparison: None },
-                &invocation.server.summary.executable, &invocation.server.executable_revision)?;
-            tx.execute("INSERT INTO workflow_mcp_jobs VALUES (?1,?2,?3,?4,?5,?6,?7)", params![job.id,
-                pipeline.pipeline_run_id, pipeline.node_instance_id, execution,
-                if grant.is_some() { "preauthorized" } else { "pending" }, grant, seal(&invocation)?])?;
-            if grant.is_none() { tx.execute("UPDATE jobs SET queue_state = 'paused' WHERE id = ?1", [&job.id])?; }
-            let loaded = crate::jobs::load_job(&tx, &project_id, &job.id)?.context("The MCP tool job is unavailable")?;
-            tx.commit()?;
-            Ok(loaded)
-        }).await?;
-        self.job_signal.send_replace(());
-        Ok(outcome)
-    }
-
     pub async fn set_workflow_mcp_grant(
         &self,
         project: String,

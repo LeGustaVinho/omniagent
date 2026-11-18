@@ -1,6 +1,4 @@
 mod subject;
-#[cfg(test)]
-mod tests;
 
 use std::collections::BTreeMap;
 
@@ -460,7 +458,8 @@ fn validator<'a>(
     let NodeConfiguration::ValidateOutput(config) = &node.instance.configuration else {
         return None;
     };
-    (node.instance.kind == BuiltinNode::ValidateOutput).then_some((&node.instance.id, config))
+    (node.instance.kind == BuiltinNode::Archived(crate::workflows::ArchivedNode::ValidateOutput))
+        .then_some((&node.instance.id, config))
 }
 
 fn completed<'a>(

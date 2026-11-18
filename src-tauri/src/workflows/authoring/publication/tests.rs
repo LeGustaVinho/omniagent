@@ -7,10 +7,8 @@ use crate::{
     providers::{Provider, SessionMode},
     repository::ProjectCheckout,
     workflows::{
-        BuiltinNode, CommandConfiguration, CommandOutputFormat, CommandRegistrationRequest,
-        CommandTarget, DeliveryRoles, Endpoint, ManualWorkflowLaunch, NodeInstance, Wire,
-        WorkflowGraph, WorkflowLaunchSource, builtin_delivery_graph,
-        tests::approved_delivery_repository,
+        BuiltinNode, ManualWorkflowLaunch, NodeConfiguration, NodeInstance, WorkflowGraph,
+        WorkflowLaunchSource, tests::approved_delivery_repository,
     },
 };
 
@@ -334,121 +332,5 @@ async fn reviewed_workflow_publication_preserves_stale_drafts_and_survives_resta
         serde_json::to_value(&followup.head.unwrap().layout)?,
         json!({"start": {"x": 25.0, "y": 50.0}})
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn reviewed_workflow_publication_resolves_exact_command_registration_before_any_write()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = Store::open(temp.path().join("protected.sqlite"))?;
-    let (repo, conversation, scope) = fixture(&store, temp.path()).await?;
-    let project = repo.project_id.clone();
-    let registration = store
-        .register_workflow_command(
-            project.clone(),
-            CommandRegistrationRequest {
-                name: "Local fixture".into(),
-                target: CommandTarget::Executable {
-                    path: std::env::current_exe()?,
-                },
-            },
-        )
-        .await?;
-    let mut graph = builtin_delivery_graph(DeliveryRoles::default());
-    let mut binding = CommandConfiguration {
-        registration_id: registration.id.clone(),
-        registration_revision: "a".repeat(64),
-        arguments: vec![],
-        input: Default::default(),
-        output: CommandOutputFormat::Json,
-    };
-    graph.nodes.push(NodeInstance {
-        id: "command".into(),
-        kind: BuiltinNode::Command,
-        configuration: NodeConfiguration::Command(binding.clone()),
-    });
-    graph.wires.extend(
-        [
-            ("prepared", "ready"),
-            ("release", "release"),
-            ("worktree", "worktree"),
-        ]
-        .map(|(output, input)| Wire {
-            from: Endpoint {
-                node: "prepare".into(),
-                port: output.into(),
-            },
-            to: Endpoint {
-                node: "command".into(),
-                port: input.into(),
-            },
-        }),
-    );
-    let draft = store
-        .start_workflow_authoring(
-            conversation,
-            repo.checkout_id.clone(),
-            scope.clone(),
-            None,
-            "Create workflow with a registered command".into(),
-        )
-        .await?;
-    let (draft, _) = proposal(
-        &store,
-        &repo,
-        &draft,
-        &scope,
-        &graph,
-        "Create workflow with a registered command",
-    )
-    .await?;
-    let reviewed = draft
-        .head
-        .as_ref()
-        .context("Expected draft head")?
-        .id
-        .clone();
-    assert!(
-        store
-            .publish_reviewed_workflow(project.clone(), draft.id.clone(), reviewed.clone(), None)
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .workflow_authoring_bases(project.clone())
-            .await?
-            .is_empty()
-    );
-    assert!(store.list_workflow_runs(project.clone()).await?.is_empty());
-    let restored = store
-        .inspect_workflow_authoring(project.clone(), draft.id.clone())
-        .await?;
-    assert_eq!(restored.head.as_ref().unwrap().id, reviewed);
-    assert!(restored.publication.is_none());
-    binding.registration_revision = registration.revision;
-    graph.nodes.last_mut().unwrap().configuration = NodeConfiguration::Command(binding);
-    let fixed = store
-        .save_workflow_authoring_draft(project.clone(), draft.id, reviewed, graph)
-        .await?;
-    let WorkflowPublicationOutcome::Published { publication } = store
-        .publish_reviewed_workflow(
-            project.clone(),
-            fixed.id,
-            fixed.head.as_ref().unwrap().id.clone(),
-            None,
-        )
-        .await?
-    else {
-        anyhow::bail!("The existing exact registration should resolve")
-    };
-    assert!(
-        store
-            .workflow_definition(project.clone(), publication.workflow)
-            .await?
-            .is_some()
-    );
-    assert!(store.list_workflow_runs(project).await?.is_empty());
     Ok(())
 }

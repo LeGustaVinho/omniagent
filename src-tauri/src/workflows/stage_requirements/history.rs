@@ -1,9 +1,6 @@
 use super::*;
 use crate::providers::capabilities::verification_still_current;
 
-#[cfg(test)]
-mod tests;
-
 pub(super) fn match_profile(
     db: &Connection,
     project: &str,

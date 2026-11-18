@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
@@ -70,8 +72,8 @@ impl CandidateAcceptanceConfiguration {
             .get("build")
             .context("Acceptance needs the exact candidate build result")?;
         for (artifact, expected_kind) in [
-            (quality, BuiltinNode::QualityGate),
-            (build, BuiltinNode::VerifyCandidate),
+            (quality, BuiltinNode::Archived(ArchivedNode::QualityGate)),
+            (build, BuiltinNode::Archived(ArchivedNode::VerifyCandidate)),
         ] {
             ensure!(
                 artifact.unit_id.as_deref() == Some(unit.unit.id.as_str())
@@ -152,7 +154,8 @@ impl CandidateAcceptanceConfiguration {
                     let review_producer =
                         load_pinned_node(db, project, &run.id, &artifact.node_instance_id)?
                             .is_some_and(|node| {
-                                node.instance.kind == BuiltinNode::ReviewCandidate
+                                node.instance.kind
+                                    == BuiltinNode::Archived(ArchivedNode::ReviewCandidate)
                                     && artifact.port == "report"
                             });
                     if review_producer {
@@ -270,7 +273,8 @@ impl CandidateAcceptanceConfiguration {
             selected.unit_id.as_deref() == Some(unit_id)
                 && selected.port == "outcome"
                 && load_pinned_node(db, project, &run.id, &selected.node_instance_id)?
-                    .is_some_and(|node| node.instance.kind == BuiltinNode::PromptOutcome),
+                    .is_some_and(|node| node.instance.kind
+                        == BuiltinNode::Archived(ArchivedNode::PromptOutcome)),
             "Acceptance needs a native Prompt outcome from this delivery unit"
         );
         let receipts = recorded_control(db, run)?;
@@ -391,7 +395,7 @@ impl CandidateAcceptanceConfiguration {
             let reviewer = load_pinned_node(db, project, &run.id, &call.stage_id)?
                 .context("A selected reviewer lost its stage")?;
             ensure!(
-                reviewer.instance.kind == BuiltinNode::ReviewCandidate,
+                reviewer.instance.kind == BuiltinNode::Archived(ArchivedNode::ReviewCandidate),
                 "Acceptance needs native candidate reviewers"
             );
             let NodeConfiguration::AgentRole { requirements, .. } = reviewer.instance.configuration

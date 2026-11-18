@@ -37,14 +37,14 @@ const props = {
 const definitions: WorkflowDefinition[] = [
   { kind: "start", title: "Start", revision: 1, configuration: "none", executor: "bind_input", effect: "none",
     inputs: [], outputs: [{ name: "start", value: { kind: "control" } }] },
-  { kind: "plan", title: "Plan", revision: 1, configuration: "agent_role", executor: "plan_agent", effect: "invoke_model",
+  { kind: "agent", title: "Plan", revision: 1, configuration: "agent_role", executor: "plan_agent", effect: "invoke_model",
     inputs: [{ name: "ready", value: { kind: "control" } }], outputs: [] },
 ];
 const graph: WorkflowGraph = {
   name: "Pinned planner",
   nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
-    { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "planner" } },
+    { id: "plan", kind: "agent", configuration: { kind: "agent_role", role: "planner" } },
   ],
   wires: [{ from: { node: "start", port: "start" }, to: { node: "plan", port: "ready" } }],
 };

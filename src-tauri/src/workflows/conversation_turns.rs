@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -38,12 +40,12 @@ mod native;
 mod tests;
 pub(crate) use dispatch::prepare_next_conversation_stage;
 use dispatch::{RunningTurn, TurnState};
+pub(super) use native::validate_conversation_template;
 pub(super) use native::{NativeOutcome, WORKFLOW_ID as DIRECT_WORKFLOW_ID, native_outcome};
 pub(crate) use native::{
     is_conversation_template, launch_direct_turn, pin_direct_conversation, reopen_direct_turn,
     revise_direct_turn_input,
 };
-pub(super) use native::validate_conversation_template;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -494,7 +496,8 @@ fn agents(
                     && super::structured_agent::configuration(node).is_none()
                     && !matches!(
                         node.instance.kind,
-                        BuiltinNode::ReviewCandidate | BuiltinNode::ReviewDiffCandidate
+                        BuiltinNode::Archived(ArchivedNode::ReviewCandidate)
+                            | BuiltinNode::Archived(ArchivedNode::ReviewDiffCandidate)
                     );
                 Ok(ConversationPipelineAgent {
                     node_id: node.instance.id.clone(),
@@ -558,8 +561,13 @@ fn load_turn(db: &Connection, sequence: i64) -> Result<Turn> {
         |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     )?;
     let mut request = open_request(&payload)?;
-    if request.native_job.is_some() && let Some(revision) = &message_revision_id {
-        request.inputs.values.insert("messageRevisionId".into(), revision.clone().into());
+    if request.native_job.is_some()
+        && let Some(revision) = &message_revision_id
+    {
+        request
+            .inputs
+            .values
+            .insert("messageRevisionId".into(), revision.clone().into());
     }
     Ok(Turn {
         sequence,

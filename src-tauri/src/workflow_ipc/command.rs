@@ -1,10 +1,6 @@
 use omniagent::{
-    jobs::Job,
     store::Store,
-    workflows::{
-        CommandRegistration, CommandRegistrationRequest, WorkflowArtifact,
-        WorkflowCommandSubmission,
-    },
+    workflows::{CommandRegistration, CommandRegistrationRequest, WorkflowArtifact},
 };
 use tauri::State;
 
@@ -29,17 +25,6 @@ pub async fn register_workflow_command(
 ) -> Result<CommandRegistration, String> {
     store
         .register_workflow_command(project_id, request)
-        .await
-        .map_err(report)
-}
-
-#[tauri::command]
-pub async fn submit_workflow_command(
-    store: State<'_, Store>,
-    submission: WorkflowCommandSubmission,
-) -> Result<Job, String> {
-    store
-        .submit_workflow_command(submission)
         .await
         .map_err(report)
 }

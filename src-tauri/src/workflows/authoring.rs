@@ -105,17 +105,19 @@ impl Store {
                 "SELECT definition FROM workflow_revisions WHERE project_id = ?1 AND workflow_id <> ?2
                  ORDER BY workflow_id, revision",
             )?;
-            statement
-                .query_map(params![project, DIRECT_WORKFLOW_ID], |row| row.get::<_, Vec<u8>>(0))?
-                .map(|payload| {
-                    let definition: WorkflowDefinition = open(&payload?)?;
-                    Ok(AuthoringBase {
+            let mut bases = Vec::new();
+            for payload in statement.query_map(params![project, DIRECT_WORKFLOW_ID], |row| row.get::<_, Vec<u8>>(0))? {
+                let mut definition: WorkflowDefinition = open(&payload?)?;
+                definition.normalize_prompt_joins();
+                if definition.unsupported_node().is_none() {
+                    bases.push(AuthoringBase {
                         start: super::WorkflowStartSchema::for_definition(&definition),
                         version: definition.version,
                         name: definition.name,
-                    })
-                })
-                .collect()
+                    });
+                }
+            }
+            Ok(bases)
         })
         .await
     }
@@ -385,7 +387,10 @@ fn queue_request(
     let request = new_id();
     let revision = load_head(db, id, draft.head.as_deref())?;
     let (graph, definitions): (_, Vec<_>) = match revision {
-        Some(revision) => (Some(revision.graph), revision.definitions.into_values().collect()),
+        Some(revision) => (
+            Some(revision.graph),
+            revision.definitions.into_values().collect(),
+        ),
         None => (
             None,
             builtin_registry()

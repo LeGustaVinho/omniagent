@@ -42,7 +42,8 @@ fn graph() -> Result<WorkflowDefinition> {
                     .output_schemas
                     .insert("inputs".into(), input.clone());
             }
-            BuiltinNode::ConversationAgent => {
+            BuiltinNode::Agent => {
+                crate::workflows::registry::configure_conversation_agent(definition);
                 definition
                     .input_schemas
                     .insert("input".into(), input.clone());
@@ -83,11 +84,7 @@ fn graph() -> Result<WorkflowDefinition> {
             name: "Direct conversation".into(),
             nodes: vec![
                 instance("start", BuiltinNode::TypedStart, start),
-                instance(
-                    AGENT_ID,
-                    BuiltinNode::ConversationAgent,
-                    NodeConfiguration::None,
-                ),
+                instance(AGENT_ID, BuiltinNode::Agent, NodeConfiguration::None),
                 instance("end", BuiltinNode::End, NodeConfiguration::End),
             ],
             wires: vec![
@@ -402,6 +399,7 @@ pub(crate) fn is_conversation_template(definition: &WorkflowDefinition) -> bool 
 pub(in crate::workflows) fn validate_conversation_template(
     definition: &WorkflowDefinition,
 ) -> Result<()> {
+    definition.ensure_supported_nodes()?;
     let start = super::WorkflowStartSchema::for_definition(definition)
         .filter(|schema| schema.conversation_enabled())
         .context("A conversation pipeline needs a text message input on Start")?;

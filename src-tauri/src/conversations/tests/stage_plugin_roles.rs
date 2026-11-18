@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use super::*;
 
 use crate::{
@@ -144,7 +146,7 @@ async fn save_role(
 fn agent(id: &str, role: StageRoleRevision, model: ModelSelection) -> NodeInstance {
     NodeInstance {
         id: id.into(),
-        kind: BuiltinNode::Plan,
+        kind: BuiltinNode::Archived(ArchivedNode::Plan),
         configuration: NodeConfiguration::AgentRole {
             role: id.into(),
             model: Some(model),
@@ -517,7 +519,7 @@ async fn exercise(root: &Path) -> Result<()> {
             },
             NodeInstance {
                 id: "context".into(),
-                kind: BuiltinNode::LoadContext,
+                kind: BuiltinNode::Archived(ArchivedNode::LoadContext),
                 configuration: NodeConfiguration::None,
             },
             agent("local-role", local_role.clone(), local_model.clone()),

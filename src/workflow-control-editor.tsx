@@ -131,7 +131,7 @@ export function WorkflowControlFields({ configuration, nodes, subflow, disabled,
       return <fieldset className="pipeline-stack" key={field}>
         <label className="pipeline-checkline"><input type="checkbox" checked={configuration[field] != null}
           onChange={(event) => set(field, event.currentTarget.checked ? { op: "exists", pointer: field === "breakWhen" ? "/previous" : "/result" } : null)} /> {label}</label>
-        {configuration[field] != null && <PredicateFields label={label} allowChecks={false} value={configuration[field]} disabled={disabled}
+        {configuration[field] != null && <PredicateFields label={label} value={configuration[field]} disabled={disabled}
           onChange={(value) => set(field, value)} />}
       </fieldset>;
     })}

@@ -56,7 +56,6 @@ pub use worktrees::manual::{ManualGitWorktree, create_git_worktree};
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub(crate) use worktrees::strategy::{branch_strategy_for_scope, write_task_branch_strategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
-pub(crate) use worktrees::{IntegratedWorktreeBase, provision_task_worktree_at};
 pub(crate) use worktrees::{
     capture_worktree_start, observe_interrupted_writer, validate_task_worktree_checkout,
     verify_managed_recovery_candidate, verify_managed_recovery_checkout,

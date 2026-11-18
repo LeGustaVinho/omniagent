@@ -40,20 +40,9 @@ export type WorkflowReuseSelection = { type: "preset"; nodeId: string } | { type
 
 export type WorkflowScalar = string | number | boolean | null;
 export type WorkflowPredicate = { op: "exists"; pointer: string }
-  | { op: "equals"; pointer: string; value: WorkflowScalar }
-  | { op: "candidate_checks_passed" };
+  | { op: "equals"; pointer: string; value: WorkflowScalar };
 
-export type SetFieldOperation = { op: "set"; path: string; value: { source: "literal"; value: unknown } | { source: "input"; pointer: string } }
-  | { op: "rename"; from: string; path: string }
-  | { op: "choose_object"; pointers: string[] };
-
-export const MAX_ITERATION_ITEMS = 32;
-export const ITERATION_PORT_FIELDS = [
-  ["readyInput", "Subflow ready input"],
-  ["itemInput", "Subflow item input"],
-  ["completionOutput", "Subflow completion output"],
-  ["resultOutput", "Subflow result output"],
-] as const;
+const MAX_ITERATION_ITEMS = 32;
 
 export const START_VALUE_TYPES = ["text", "number", "boolean", "null", "object", "array"] as const;
 export const CONVERSATION_START_INPUT_TYPES = { message: "text", history: "array" } as const;
@@ -69,9 +58,17 @@ export function isStartNode(kind: string) {
   return kind === "start" || kind === "typed_start";
 }
 
+const workflowNodeKinds = new Set([
+  "start", "typed_start", "end", "agent", "subflow", "fork", "join_results", "wait", "loop", "human",
+]);
+
+export function isSupportedWorkflowNode(kind: string) {
+  return workflowNodeKinds.has(kind);
+}
+
 export function isPresetEligible({ kind, configuration }: WorkflowGraphNode) {
-  return !isStartNode(kind) && configuration.kind !== "preset_overrides"
-    && !["subflow", "repeat_until", "for_each", "for_each_begin", "for_each_gate", "for_each_collect", "repeat_output", "delivery_attempt"].includes(kind);
+  return isSupportedWorkflowNode(kind) && !isStartNode(kind) && kind !== "end" && kind !== "subflow" && kind !== "loop"
+    && configuration.kind !== "preset_overrides";
 }
 
 export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
@@ -84,35 +81,7 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
     case "loop": return { kind, maxIterations: 3, breakWhen: null, exitWhen: null, limit: "complete",
       readyInput: "ready", contextInput: "context", completionOutput: "completed", resultOutput: "result" };
     case "agent_role": return { kind, role: "" };
-    case "required_checks": return { kind, names: [] };
-    case "candidate_checks": return { kind: "required_checks", names: [] };
-    case "condition": return { kind, predicate: { op: "exists", pointer: "/evidence" } };
-    case "command": return { kind, registrationId: "", registrationRevision: "", arguments: [], input: {}, output: "text" };
-    case "mcp_tool": return { kind, serverId: "", serverRevision: "", toolName: "", contractRevision: "", arguments: {}, argumentMappings: {}, destinationPointer: null };
-    case "build_list": return { kind, source: "values", values: [] };
-    case "for_each": return { kind, maxItems: 8, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "result" };
-    case "repeat_until": return {
-      kind, maxIterations: 3, readyInput: "ready", completionOutput: "completed", evidenceOutput: "result",
-      until: { op: "exists", pointer: "/evidence" },
-    };
-    case "run_backlog": return { kind, child: { id: "", revision: "" }, maxParallel: 3, failed: { node: "", port: "" } };
-    case "verify_test_phase": return { kind, phase: "baseline", check: "" };
-    case "integrated_checks": return { kind, checks: [] };
-    case "candidate_acceptance": return { kind: "none" };
-    case "search_public_repositories": return { kind, limit: 5 };
-    case "set_fields": return { kind, mode: "build", operations: [] };
-    case "filter_map_list": return { kind, predicate: null, mappings: [] };
-    case "build_text": return { kind, template: "" };
-    case "validate_output": return { kind, schema: { type: "object" } };
-    case "quality_gate": return { kind, rules: {} };
-    case "compare_models": return { kind, selections: [] };
-    case "request_input": return { kind, message: "Input requested", fields: [{ id: "answer", label: "Answer", required: true, input: { kind: "text" } }] };
-    case "approval": return { kind, message: "Does this stage have your approval?" };
     case "typed_start": return { kind, fields: [] };
-    case "find_work": return { kind, query: { kind: "work", result: "list" } };
-    case "update_progress": return { kind, action: { kind: "checklist", checked: true } };
-    case "manage_work": return { kind, action: { kind: "link" } };
-    case "load_work_context": return { kind, mode: "work" };
     default: return { kind };
   }
 }
@@ -173,12 +142,8 @@ function wireProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wir
 export function connectionProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wire: WorkflowWire) {
   const incompatible = wireProblem(graph, definitions, wire);
   if (incompatible) return incompatible;
-  const target = definitions[wire.to.node]?.kind;
-  const multiple = (target === "join" && wire.to.port === "branches") ||
-    ((target === "summarize_result" || target === "collect_evidence") && wire.to.port === "evidence") ||
-    (target === "for_each_collect" && (wire.to.port === "finished" || wire.to.port === "result"));
   if (graph.wires.some((existing) => wireKey(existing) === wireKey(wire))) return "These ports are already connected.";
-  if (!multiple && graph.wires.some(({ to }) => to.node === wire.to.node && to.port === wire.to.port)) {
+  if (graph.wires.some(({ to }) => to.node === wire.to.node && to.port === wire.to.port)) {
     return `Input ${wire.to.node}.${wire.to.port} accepts one connection.`;
   }
   const pending = [wire.to.node];
@@ -198,9 +163,8 @@ function validPointer(value: unknown, maxLength: number, allowRoot: boolean): va
     new TextEncoder().encode(value).length <= maxLength && !/~(?![01])/.test(value);
 }
 
-function predicateProblem(input: unknown, allowChecks = true) {
+function predicateProblem(input: unknown) {
   const predicate = input as { op?: unknown; pointer?: unknown; value?: unknown } | undefined;
-  if (allowChecks && predicate?.op === "candidate_checks_passed") return null;
   if (!predicate || !validPointer(predicate.pointer, 1024, true)) return "Enter a valid field path.";
   if (predicate.op === "exists") return null;
   const { value } = predicate;
@@ -209,24 +173,14 @@ function predicateProblem(input: unknown, allowChecks = true) {
   return new TextEncoder().encode(JSON.stringify(value)).length <= 4096 ? null : "The equality value is too long.";
 }
 
-function namedPort(value: unknown) {
-  return typeof value === "string" && Boolean(value.trim());
-}
-
 function validIterationLimit(limit: unknown) {
   return typeof limit === "number" && Number.isInteger(limit) && limit >= 1 && limit <= MAX_ITERATION_ITEMS;
 }
 
-function setOperations(configuration: WorkflowNodeConfiguration): SetFieldOperation[] {
-  return Array.isArray(configuration.operations) ? configuration.operations : [];
-}
-
-export function configurationProblem(configuration: WorkflowNodeConfiguration, definition: WorkflowDefinition, backlogBound = false) {
-  if (definition.configuration === "candidate_acceptance" && configuration.kind === "none") return null;
+export function configurationProblem(configuration: WorkflowNodeConfiguration, definition: WorkflowDefinition) {
+  if (!isSupportedWorkflowNode(definition.kind)) return "This node type was removed.";
   if (definition.kind === "subflow" && configuration.kind === "prompt_overrides") return null;
-  const candidateChecks = definition.configuration === "candidate_checks"
-    && (configuration.kind === "required_checks" || configuration.kind === "staged_checks");
-  if (configuration.kind !== definition.configuration && !candidateChecks) return "Review the parameters for this node version.";
+  if (configuration.kind !== definition.configuration) return "Review the parameters for this node version.";
   switch (configuration.kind) {
     case "fork":
     case "join_results": {
@@ -251,134 +205,11 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
     case "loop":
       if (!validIterationLimit(configuration.maxIterations)) return "Enter an iteration limit between 1 and 32.";
       if (configuration.breakWhen != null) {
-        const problem = predicateProblem(configuration.breakWhen, false);
+        const problem = predicateProblem(configuration.breakWhen);
         if (problem) return problem;
       }
-      return configuration.exitWhen == null ? null : predicateProblem(configuration.exitWhen, false);
+      return configuration.exitWhen == null ? null : predicateProblem(configuration.exitWhen);
     case "agent_role": return typeof configuration.role === "string" && configuration.role.trim() ? null : "Agent role is required.";
-    case "required_checks":
-    case "staged_checks": {
-      const { names, parallelGroups = [], deferredNames, strategyChecks = [] } = configuration;
-      if (!Array.isArray(names) || !names.every(namedPort)) return "Check names must contain text.";
-      if (!Array.isArray(parallelGroups) || !parallelGroups.every((group) =>
-        Array.isArray(group) && group.length > 0 && group.every(namedPort))) return "Enter a check name in each parallel group.";
-      const checks = parallelGroups.flat();
-      if (new Set(checks).size !== checks.length) return "A check can appear in only one parallel group.";
-      if (configuration.kind === "staged_checks" && (!Array.isArray(deferredNames) || deferredNames.length === 0
-        || new Set(deferredNames).size !== deferredNames.length
-        || !deferredNames.every((name) => namedPort(name) && !names.includes(name) && !checks.includes(name)))) {
-        return "Choose distinct deferred checks that this stage does not require or group.";
-      }
-      if (configuration.kind === "staged_checks" && (!Array.isArray(strategyChecks) || strategyChecks.length > 32
-        || new Set(strategyChecks).size !== strategyChecks.length || !strategyChecks.every((name) =>
-          namedPort(name) && name.length <= 256 && !names.includes(name) && !checks.includes(name)
-          && !(Array.isArray(deferredNames) && deferredNames.includes(name))))) {
-        return "Choose distinct checks that the approved test strategy may require.";
-      }
-      return null;
-    }
-    case "condition": return predicateProblem(configuration.predicate);
-    case "command":
-      if (!configuration.registrationId || !configuration.registrationRevision) return "A registered command revision is required.";
-      return configuration.input && typeof configuration.input === "object" && !Array.isArray(configuration.input)
-        ? null : "Enter a JSON object for input.";
-    case "mcp_tool":
-      if (!configuration.serverId || !configuration.serverRevision || !configuration.toolName || !configuration.contractRevision) return "Select a pinned MCP server and tool.";
-      if (configuration.argumentMappings === null) return "Enter a JSON object of argument names and JSON Pointers.";
-      return configuration.arguments && typeof configuration.arguments === "object" && !Array.isArray(configuration.arguments) ? null : "Enter a JSON object for the mapped arguments.";
-    case "build_list": {
-      if (configuration.source === "values") {
-        return Array.isArray(configuration.values) && configuration.values.length <= MAX_ITERATION_ITEMS
-          ? null : `Add at most ${MAX_ITERATION_ITEMS} items.`;
-      }
-      const pointer = configuration.pointer;
-      return configuration.source === "evidence" && validPointer(pointer, 2048, false) ? null : "Enter the path to a list in the source artifact.";
-    }
-    case "for_each": {
-      const { maxItems, readyInput, itemInput, completionOutput, resultOutput } = configuration;
-      if (!validIterationLimit(maxItems)) {
-        return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} items.`;
-      }
-      return ITERATION_PORT_FIELDS.every(([field]) => namedPort(configuration[field])) &&
-        readyInput !== itemInput && completionOutput !== resultOutput ? null : "Choose distinct input and output ports on the pinned subflow.";
-    }
-    case "repeat_until": {
-      const { maxIterations, deliveryAttemptBudget, readyInput, completionOutput, evidenceOutput, until } = configuration;
-      if (!validIterationLimit(maxIterations)) return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} iterations.`;
-      if (deliveryAttemptBudget !== undefined && !validIterationLimit(deliveryAttemptBudget)) {
-        return `Enter a delivery attempt budget between 1 and ${MAX_ITERATION_ITEMS}.`;
-      }
-      if (![readyInput, completionOutput, evidenceOutput].every(namedPort)) return "Select the required subflow ports.";
-      const feedback = configuration.feedback as { input?: unknown; output?: unknown } | undefined;
-      if (feedback && (!namedPort(feedback.input) || !namedPort(feedback.output) || feedback.input === readyInput)) {
-        return "Choose matching feedback ports.";
-      }
-      const exports = configuration.exports;
-      if (exports !== undefined && (!Array.isArray(exports) || exports.length > 32 ||
-        new Set(exports).size !== exports.length || !exports.every((name) =>
-          namedPort(name) && name.length <= 128 && name !== "completed" && name !== "failed"))) {
-        return "Select unique data outputs to export from the approved iteration.";
-      }
-      return predicateProblem(until);
-    }
-    case "run_backlog": {
-      const child = configuration.child as { id?: unknown; revision?: unknown } | undefined;
-      const failed = configuration.failed as { node?: unknown; port?: unknown } | undefined;
-      return validIterationLimit(configuration.maxParallel) && [failed?.node, failed?.port].every(namedPort)
-        && (backlogBound || [child?.id, child?.revision].every(namedPort))
-        ? null : "Select the published child workflow, failure output and parallel task limit.";
-    }
-    case "verify_test_phase": {
-      const paths = configuration.allowedTestPaths;
-      return namedPort(configuration.check) && ["baseline", "red", "green"].includes(String(configuration.phase))
-        && (configuration.phase === "red"
-          ? Array.isArray(paths) && paths.length > 0 && paths.every(namedPort)
-          : paths === undefined || Array.isArray(paths) && paths.length === 0)
-        ? null : "Choose a registered check and add the permitted test paths for red.";
-    }
-    case "search_public_repositories":
-      return typeof configuration.limit === "number" && Number.isInteger(configuration.limit)
-        && configuration.limit >= 1 && configuration.limit <= 30 ? null : "Enter a search limit between 1 and 30.";
-    case "integrated_checks":
-      return Array.isArray(configuration.checks) && configuration.checks.length > 0
-        && configuration.checks.length <= 32 && configuration.checks.every(namedPort)
-        && new Set(configuration.checks).size === configuration.checks.length
-        ? null : "Select the registered checks to run on the integrated revision.";
-    case "candidate_acceptance":
-      return namedPort(configuration.buildCheck) && typeof configuration.minimumReviews === "number"
-        && Number.isInteger(configuration.minimumReviews) && configuration.minimumReviews >= 1 && configuration.minimumReviews <= 32
-        ? null : "Choose the required build check and a minimum of 1 to 32 independent reviews.";
-    case "set_fields":
-      return (configuration.mode === "build" || configuration.mode === "update") && Array.isArray(configuration.operations) &&
-        setOperations(configuration).every((operation) => operation?.op === "choose_object"
-          ? configuration.mode === "build" && setOperations(configuration).length === 1 && Array.isArray(operation.pointers)
-            && operation.pointers.length >= 1 && operation.pointers.length <= 8
-            && new Set(operation.pointers).size === operation.pointers.length
-            && operation.pointers.every((pointer) => validPointer(pointer, 1024, true))
-          : validPointer(operation?.path, 1024, false) &&
-          (operation.op === "rename" ? validPointer(operation.from, 1024, false) && operation.from !== operation.path
-            : operation.op === "set" && (operation.value?.source === "literal" ||
-              (operation.value?.source === "input" && validPointer(operation.value.pointer, 1024, true)))))
-        ? null : "Review the source and destination of each field operation.";
-    case "filter_map_list":
-      return (configuration.predicate === null ? null : predicateProblem(configuration.predicate, false)) ??
-        (Array.isArray(configuration.mappings) && configuration.mappings.every((mapping) =>
-          validPointer(mapping?.from, 1024, true) && validPointer(mapping?.path, 1024, false)) ? null : "Review the field mappings.");
-    case "build_text": return typeof configuration.template === "string" ? null : "Enter a text template.";
-    case "validate_output": return configuration.schema && typeof configuration.schema === "object"
-      && !Array.isArray(configuration.schema) ? null : "Enter a JSON Schema object.";
-    case "quality_gate": {
-      const { rules } = configuration;
-      const entries = rules && typeof rules === "object" && !Array.isArray(rules) ? Object.entries(rules) : [];
-      return entries.length && entries.every(([label, rule]) => label.trim() && !predicateProblem(rule, false))
-        ? null : "Set a label and an exists or equality predicate for each required rule.";
-    }
-    case "compare_models": {
-      const selections = Array.isArray(configuration.selections) ? configuration.selections : [];
-      const keys = selections.flatMap((entry) => entry && typeof entry.provider === "string" && typeof entry.profileId === "string"
-        && typeof entry.modelId === "string" ? [JSON.stringify([entry.provider, entry.profileId, entry.modelId])] : []);
-      return keys.length === selections.length && keys.length >= 2 && new Set(keys).size === keys.length ? null : "Select at least two distinct models.";
-    }
     case "typed_start": {
       const fields = Array.isArray(configuration.fields) ? configuration.fields : null;
       if (!fields?.every((field) => typeof field?.name === "string" && /^[A-Za-z_][A-Za-z0-9_-]{0,159}$/.test(field.name)) ||
@@ -394,15 +225,11 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
           CONVERSATION_START_INPUT_TYPES[conversationSource as ConversationStartSource] === valueType))
         ? null : "Use Text for a conversation message and Array for conversation history.";
     }
-    case "request_input":
-      return typeof configuration.message === "string" && configuration.message.trim() && Array.isArray(configuration.fields) && configuration.fields.length
-        ? null : "Enter a question and add at least one answer field.";
-    case "approval": return typeof configuration.message === "string" && configuration.message.trim() ? null : "Describe what needs approval.";
     default: return null;
   }
 }
 
-export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinitions, backlogBound?: (nodeId: string) => boolean) {
+export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinitions) {
   const problems: string[] = [];
   if (!graph.name.trim()) problems.push("Enter a pipeline name.");
   if (graph.nodes.filter(({ kind }) => isStartNode(kind)).length !== 1) problems.push("The pipeline needs one Start node.");
@@ -428,70 +255,24 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
     }
   }
   for (const node of graph.nodes) {
+    if (!isSupportedWorkflowNode(node.kind)) {
+      problems.push(`Node ${node.id} uses a retired node type. Replace it before publishing.`);
+      continue;
+    }
     const definition = definitions[node.id];
     if (!definition) {
       problems.push(`Node ${node.id} has no available definition.`);
       continue;
     }
-    const configuration = configurationProblem(node.configuration, definition, backlogBound?.(node.id));
+    const configuration = configurationProblem(node.configuration, definition);
     if (configuration) problems.push(`${definition.title} · ${node.id} · ${configuration}`);
-    const requirements = node.configuration.requirements as { reviewReuse?: boolean; goal?: unknown; plan?: unknown } | undefined;
-    const reuse = requirements?.reviewReuse === true;
-    if (reuse) {
-      const input = (port: string) => graph.wires.find(({ to }) => to.node === node.id && to.port === port)?.from;
-      const prompt = input("prompt");
-      const subject = input("review_subject");
-      if (node.kind !== "agent" || requirements?.goal || requirements?.plan || input("comparison") ||
-        !prompt || !subject || prompt.port !== "text" || subject.port !== "evidence" || prompt.node !== subject.node ||
-        !graph.nodes.some((candidate) => candidate.id === prompt.node && candidate.kind === "collect_evidence")) {
-        problems.push(`${node.id} review reuse requires prompt and review subject from the same Collect Evidence node.`);
-      }
-    }
     for (const port of definition.inputs) {
-      const wired = graph.wires.some(({ to }) => to.node === node.id && to.port === port.name);
-      if (node.configuration.kind === "mcp_tool" && port.name === "arguments") {
-        const mappings = node.configuration.argumentMappings;
-        if (wired !== Boolean(mappings && Object.keys(mappings).length)) {
-          problems.push(`${node.id}.arguments requires a connection and argument mappings together.`);
-        }
-      } else if (node.configuration.kind === "build_list" && port.name === "value") {
-        if (wired !== (node.configuration.source === "evidence")) {
-          problems.push(`${node.id}.value requires a connection in source artifact mode.`);
-        }
-      } else if (node.kind === "set_fields" && port.name === "source") {
-        const needsSource = node.configuration.mode === "update" || setOperations(node.configuration)
-          .some((operation) => operation.op === "choose_object" || operation.op === "set" && operation.value?.source === "input");
-        if (needsSource && !wired) problems.push(`${node.id}.source requires a connection for the selected operations.`);
-      } else if (node.kind === "verify_candidate" && port.name === "strategy") {
-        const selected = node.configuration.strategyChecks;
-        const required = node.configuration.kind === "staged_checks" && Array.isArray(selected) && selected.length > 0;
-        if (wired !== required) problems.push(`${node.id}.strategy requires a connection when configured to use approved test strategy.`);
-      } else if (node.kind === "agent" && port.name === "review_subject") {
-        if (wired && !reuse) problems.push(`${node.id}.review_subject requires review reuse to be enabled.`);
-      } else if (node.kind === "accept_candidate" && port.name === "selected_reviews") {
-        const required = node.configuration.reviewMode === "selected";
-        if (wired !== required) problems.push(`${node.id}.selected_reviews requires a connection when using the selected reviews.`);
-      } else if (((node.kind === "approval" || node.kind === "summarize_result") && port.name === "evidence") ||
-        (node.kind === "end" && port.name === "result" && !definition.inputSchemas?.result) ||
-        (node.kind === "wait" && port.name === "input") ||
-        (node.kind === "human" && port.name === "input" && node.configuration.interaction !== "review") ||
-        (node.kind === "join_results" && port.name.startsWith("result:")) ||
-        (node.kind === "build_text" && port.name === "values") ||
-        (node.kind === "agent" && port.name === "comparison") ||
-        (["implement", "review_plan", "review_candidate", "review_diff_candidate"].includes(node.kind) && port.name === "brief") ||
-        (node.kind === "accept_candidate" && node.configuration.kind === "none" && ["quality", "build"].includes(port.name)) ||
-        (node.kind === "open_or_update_pull_request" && port.name === "risk") ||
-        (node.kind === "materialize_backlog" && ["design", "strategy"].includes(port.name)) ||
-        (node.kind === "merge_pull_request" && port.name === "approval")) {
-        continue;
-      } else if (node.kind === "manage_work" && (port.name === "task" || port.name === "title")) {
-        const action = node.configuration.action as { kind?: string } | undefined;
-        const required = port.name === "task" ? action?.kind !== "create_task" : action?.kind !== "link";
-        if (required && !wired) problems.push(`${node.id}.${port.name} requires a connection for the selected work action.`);
-      } else if (node.kind === "load_work_context" && (port.name === "task" || port.name === "document")) {
-        const required = port.name === "task" ? node.configuration.mode !== "markdown" : node.configuration.mode !== "work";
-        if (required && !wired) problems.push(`${node.id}.${port.name} requires a connection for the selected context source.`);
-      } else if (!wired) {
+      const optional = (node.kind === "end" && port.name === "result" && !definition.inputSchemas?.result)
+        || (node.kind === "wait" && port.name === "input")
+        || (node.kind === "human" && port.name === "input" && node.configuration.interaction !== "review")
+        || (node.kind === "join_results" && port.name.startsWith("result:"))
+        || (node.kind === "agent" && ["comparison", "review_subject"].includes(port.name));
+      if (!optional && !graph.wires.some(({ to }) => to.node === node.id && to.port === port.name)) {
         problems.push(`${node.id}.${port.name} (${portType(port.value)}) requires a connection.`);
       }
     }

@@ -2,27 +2,16 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    jobs::{PipelineReleaseScope, issue_pipeline_release},
-    repository::ManagedWorktree,
-    store::Store,
-};
+use crate::store::Store;
 
 use super::{
-    ApprovalReference, ArtifactKind, ArtifactValue, TaskReference, WorkflowArtifact,
-    WorkflowPlanUnit,
-    artifacts::{insert_artifact, load_artifact},
-    units::record_delivery_units,
+    ArtifactKind, ArtifactValue, TaskReference, WorkflowArtifact, artifacts::load_artifact,
 };
 
 mod rules;
-#[cfg(test)]
-mod tests;
-pub(super) use rules::activate_selected_approval;
 pub use rules::{
     ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings,
-    BacklogApprovalScope, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalStage,
-    WorkflowApprovalSubmission,
+    BacklogApprovalScope, UnmetApproval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,8 +143,8 @@ pub(crate) fn workflow_release_authorized(
     let Some(workflow) = super::runtime::load_workflow_run(db, project, run)? else {
         return Ok(Some(false));
     };
-    if super::authoring::package::ensure_package_repeat_guards(db, project, &workflow.version)
-        .is_err()
+    if super::runtime::load_definition(db, project, &workflow.version)?
+        .is_none_or(|definition| definition.unsupported_node().is_some())
     {
         return Ok(Some(false));
     }
@@ -181,53 +170,6 @@ pub(crate) fn detach_active_delivery_workflow(
         params![project, task],
     )?;
     Ok(())
-}
-
-pub(super) fn record_decision(
-    db: &Connection,
-    decision: ApprovalDecision,
-) -> Result<WorkflowArtifact> {
-    let project = decision.task.project_id.clone();
-    let task = decision.task.task_id.clone();
-    let run = decision.workflow_run_id.clone();
-    let node = decision.node_instance_id.clone();
-    let plan = decision.plan_revision.clone();
-    require_current_plan(db, &project, &run, &plan)?;
-    validate_linked_task(db, &decision)?;
-    crate::tasks::validate_repository_delivery_open(db, &project, &task)?;
-    ensure!(
-        rules::rule_authorizes(db, &decision)?,
-        "the automatic approval rule no longer applies"
-    );
-    let rule_revision = if decision.source == ApprovalDecisionSource::AutomaticRule {
-        decision
-            .rule_evidence
-            .as_ref()
-            .map(|evidence| evidence.revision.clone())
-    } else {
-        None
-    };
-    let artifact = insert_artifact(
-        db,
-        &project,
-        run.clone(),
-        node.clone(),
-        "decision".into(),
-        ArtifactValue::Approval(decision),
-    )?;
-    db.execute(
-        "INSERT INTO workflow_approval_decisions
-            (pipeline_run_id, node_instance_id, plan_revision, decision_artifact_id, generation, rule_revision)
-         SELECT ?1, ?2, ?3, ?4, coalesce(max(generation), 0) + 1, ?5
-         FROM workflow_approval_decisions WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND plan_revision = ?3",
-        params![run, node, plan, artifact.id, rule_revision],
-    )?;
-    detach_active_delivery_workflow(db, &project, &task)?;
-    db.execute(
-        "INSERT INTO workflow_delivery_heads VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![project, task, run, plan, artifact.id],
-    )?;
-    Ok(artifact)
 }
 
 pub(super) fn validate_linked_task(db: &Connection, decision: &ApprovalDecision) -> Result<()> {
@@ -285,92 +227,4 @@ fn decision_is_active(
         |row| row.get::<_, bool>(0),
     )?;
     Ok(active && rules::rule_authorizes(db, decision)?)
-}
-
-pub(super) fn active_approval(
-    db: &Connection,
-    target: &ApprovalDecision,
-) -> Result<Option<String>> {
-    let id: Option<String> = db.query_row(
-        "SELECT decision_artifact_id FROM workflow_delivery_heads WHERE project_id = ?1 AND task_id = ?2
-            AND pipeline_run_id = ?3 AND plan_revision = ?4",
-        params![target.task.project_id, target.task.task_id, target.workflow_run_id, target.plan_revision],
-        |row| row.get(0),
-    ).optional()?;
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    let saved = load_artifact(
-        db,
-        &target.task.project_id,
-        &target.workflow_run_id,
-        &id,
-        ArtifactKind::Approval,
-    )?;
-    let Some(ArtifactValue::Approval(decision)) = saved.map(|artifact| artifact.value) else {
-        return Ok(None);
-    };
-    Ok((decision.node_instance_id == target.node_instance_id
-        && decision.task == target.task
-        && decision.task_artifact_id == target.task_artifact_id
-        && decision.source_checkout_id == target.source_checkout_id
-        && decision_is_active(db, &decision, &id)?)
-    .then_some(id))
-}
-
-pub(super) fn issue_prepared_release(
-    db: &Connection,
-    decision: ApprovalDecision,
-    decision_artifact_id: String,
-    preparation_node: String,
-    worktree: ManagedWorktree,
-    units: Vec<WorkflowPlanUnit>,
-) -> Result<WorkflowArtifact> {
-    require_active_decision(db, &decision, &decision_artifact_id)?;
-    let project = decision.task.project_id.clone();
-    let run = decision.workflow_run_id.clone();
-    ensure!(
-        worktree.project_id == project,
-        "prepared checkout is outside the approved project"
-    );
-    let release = issue_pipeline_release(
-        db,
-        PipelineReleaseScope {
-            project: &project,
-            pipeline_run: &run,
-            approval_node: &decision.node_instance_id,
-            plan_revision: &decision.plan_revision,
-            checkout: &worktree.checkout_id,
-            task: &decision.task.task_id,
-        },
-    )?;
-    let release_id = release.id.clone();
-    let release_artifact = insert_artifact(
-        db,
-        &project,
-        run.clone(),
-        preparation_node.clone(),
-        "release".into(),
-        ArtifactValue::Release(ApprovalReference {
-            workflow_run_id: run.clone(),
-            decision_artifact_id: decision_artifact_id.clone(),
-            release,
-        }),
-    )?;
-    db.execute(
-        "INSERT INTO workflow_release_bindings VALUES (?1, ?2, ?3)",
-        params![release_id, decision_artifact_id, release_artifact.id],
-    )?;
-    record_delivery_units(db, &decision, &worktree.checkout_id, units)?;
-    insert_artifact(
-        db,
-        &project,
-        run,
-        preparation_node,
-        "worktree".into(),
-        ArtifactValue::Worktree {
-            checkout_id: worktree.checkout_id,
-            task: decision.task,
-        },
-    )
 }

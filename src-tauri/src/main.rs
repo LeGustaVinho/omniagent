@@ -6,8 +6,8 @@ mod composer_customization_ipc;
 mod composer_suggestion_ipc;
 mod conversation_attachment_ipc;
 mod conversation_compaction_ipc;
-mod conversation_export_ipc;
 mod conversation_continuation_runtime;
+mod conversation_export_ipc;
 mod conversation_fork_runtime;
 mod conversation_goal_runtime;
 mod conversation_runtime;
@@ -271,12 +271,10 @@ fn main() {
                 );
             }
             let scheduler = tauri::async_runtime::block_on(async {
-                JobScheduler::start_with_workflow_storage(
+                JobScheduler::start(
                     store.clone(),
                     Arc::new(DirectWindowsRunner),
                     std::env::current_exe().ok(),
-                    root.join("comparison-checkouts"),
-                    root.join("worktrees"),
                 )
             });
             let monitor = AutomaticUpdateMonitor::start(
@@ -383,11 +381,9 @@ fn main() {
             workflow_ipc::launch::workflow_launch,
             workflow_ipc::command::list_workflow_command_registrations,
             workflow_ipc::command::register_workflow_command,
-            workflow_ipc::command::submit_workflow_command,
             workflow_ipc::command::workflow_command_result,
             workflow_ipc::mcp_tools::workflow_mcp_servers,
             workflow_ipc::mcp_tools::register_workflow_mcp_server,
-            workflow_ipc::mcp_tools::submit_workflow_mcp_tool,
             workflow_ipc::mcp_tools::workflow_mcp_job_review,
             workflow_ipc::mcp_tools::decide_workflow_mcp_job,
             workflow_ipc::mcp_tools::set_workflow_mcp_grant,
@@ -403,20 +399,8 @@ fn main() {
             workflow_ipc::maintenance::automatic_update_settings,
             workflow_ipc::maintenance::set_automatic_update_policy,
             workflow_ipc::list_repository_deliveries,
-            workflow_ipc::execute_repository_delivery_host,
-            workflow_ipc::approval::preview_workflow_approval,
-            workflow_ipc::approval::workflow_approval_stage,
-            workflow_ipc::approval::set_workflow_approval_rule,
-            workflow_ipc::approval::evaluate_workflow_approval,
-            workflow_ipc::approval::approve_workflow_implementation,
             workflow_ipc::submit_repository_delivery_agent,
-            workflow_ipc::repository_delivery_plan_proposals,
-            workflow_ipc::request_repository_plan_revision,
             workflow_ipc::repository_plan_history,
-            workflow_ipc::publish_repository_delivery_evidence,
-            workflow_ipc::publish_repository_delivery_candidate,
-            workflow_ipc::execute_repository_delivery_unit,
-            workflow_ipc::repository_delivery_tasks,
             workflow_ipc::authoring::workflow_authoring_bases,
             workflow_ipc::authoring::conversation_workflow_authoring,
             workflow_ipc::authoring::start_workflow_authoring,
@@ -435,16 +419,12 @@ fn main() {
             workflow_ipc::authoring::create_workflow_package,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,
-            workflow_ipc::authoring::request_prompt_contract_suggestion,
-            workflow_ipc::authoring::prompt_contract_suggestion,
             workflow_ipc::authoring::start_workflow_package_authoring,
             workflow_ipc::authoring::start_workflow_editor_authoring,
             workflow_ipc::authoring::publish_reviewed_workflow_package,
             workflow_ipc::authoring::workflow_package_catalog,
             workflow_ipc::authoring::read_published_workflow_package_artifact,
             workflow_ipc::authoring::export_workflow_exchange,
-            workflow_ipc::diff::workflow_diff_candidates,
-            workflow_ipc::diff::execute_workflow_diff_stage,
             workflow_ipc::authoring::describe_workflow_reusable_boundary,
             workflow_ipc::authoring::derive_workflow_reusable,
             workflow_ipc::authoring::describe_workflow_reusable_node,

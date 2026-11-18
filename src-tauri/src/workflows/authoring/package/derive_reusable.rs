@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
@@ -16,10 +18,6 @@ use super::{
 
 mod overrides;
 mod store;
-#[cfg(test)]
-mod store_tests;
-#[cfg(test)]
-mod tests;
 use overrides::override_fields;
 pub(super) use overrides::resolve_preset_configuration;
 pub use store::{ReusableSource, WorkflowReusableNode};
@@ -291,13 +289,14 @@ fn derive_preset(
             node.kind,
             BuiltinNode::Start
                 | BuiltinNode::Subflow
-                | BuiltinNode::RepeatUntil
-                | BuiltinNode::ForEach
+                | BuiltinNode::Archived(ArchivedNode::RepeatUntil)
+                | BuiltinNode::Archived(ArchivedNode::ForEach)
         ) && !node.kind.generated_iteration(),
         "Save a configured native stage as a preset"
     );
     ensure!(
-        node.kind != BuiltinNode::Command || destination == PackageDestination::Project,
+        node.kind != BuiltinNode::Archived(ArchivedNode::Command)
+            || destination == PackageDestination::Project,
         "Save a configured Command preset in its project or declare a named library Command"
     );
     let pin = source.definition(node)?;

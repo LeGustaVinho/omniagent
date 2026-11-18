@@ -22,8 +22,6 @@ pub mod decision_nodes;
 pub mod diff;
 mod execution;
 mod generic_agent;
-#[cfg(test)]
-mod git_integration;
 pub mod github;
 pub mod inspection;
 pub(crate) mod integrated_checks;
@@ -32,12 +30,9 @@ mod job_inputs;
 mod launch;
 pub mod maintenance;
 pub mod mcp_tools;
-mod merge_execution;
 mod operator;
 mod orchestration;
 mod plan_revision;
-#[cfg(test)]
-mod planning_integration;
 pub(crate) mod prompt;
 mod registry;
 mod repetition;
@@ -48,14 +43,12 @@ pub(crate) mod structured_agent;
 pub(crate) use runtime::load_definition;
 pub mod settings_proposals;
 pub mod stage_goal;
-#[cfg(test)]
-mod stage_models;
 pub mod stage_plan;
 pub mod stage_requirements;
 mod subflow;
 pub(crate) mod test_phase;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod timed;
 pub mod triggers;
 mod unit_execution;
@@ -64,7 +57,6 @@ mod units;
 pub use approval::{
     ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence,
     ApprovalRuleOutcome, ApprovalRuleSettings, BacklogApprovalScope, UnmetApproval,
-    WorkflowApprovalPreview, WorkflowApprovalStage, WorkflowApprovalSubmission,
 };
 pub(crate) use approval::{
     active_delivery_workflow, detach_active_delivery_workflow, workflow_release_authorized,
@@ -73,15 +65,14 @@ pub use artifacts::{
     ApprovalReference, ArtifactValue, CandidateReference, ScopedEvidence, TaskReference,
     WorkflowAcceptanceReference, WorkflowArtifact, WorkflowMergeReference,
 };
-pub use builtin::{DeliveryRoles, builtin_delivery_graph};
 pub(crate) use command::publish_command_result;
 pub use command::{
     CommandConfiguration, CommandData, CommandOutputFormat, CommandRegistration,
-    CommandRegistrationRequest, CommandTarget, WorkflowCommandResult, WorkflowCommandSubmission,
+    CommandRegistrationRequest, CommandTarget, WorkflowCommandResult,
 };
 pub use control::{ConditionPredicate, ControlStageReceipt};
 pub(crate) use control::{refresh_from_attempt, validate_attempt_control};
-pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
+pub use execution::NodeInputs;
 pub use iteration::{
     BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration,
     ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem,
@@ -101,15 +92,14 @@ pub(crate) use operator::waiting_for_delivery_commit;
 pub use operator::{WorkflowAgentTarget, WorkflowOperatorJob, WorkflowPlanProposal};
 pub use plan_revision::{WorkflowPlanHistory, WorkflowPlanRevisionRequest};
 pub use registry::{
-    ArtifactKind, BuiltinNode, ConfigurationKind, Effect, Executor, NodeConfiguration,
-    NodeDefinition, Port, PortType, builtin_registry,
+    ArchivedNode, ArtifactKind, BuiltinNode, ConfigurationKind, Effect, Executor,
+    NodeConfiguration, NodeDefinition, Port, PortType, builtin_registry,
 };
 pub use repetition::{RepeatFeedback, RepeatUntilConfiguration};
 pub use runtime::{NodeAttempt, NodePin, WorkflowAgentSubmission, WorkflowRun};
 pub(crate) use runtime::{load_definition as load_workflow_definition, load_node_attempt};
 pub use subflow::WorkflowSubflow;
 pub(crate) use unit_execution::validate_unit_acceptance;
-pub use unit_execution::{WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission};
 pub use units::{WorkflowDeliveryUnit, WorkflowPlanUnit};
 pub(crate) use units::{
     bind_delivery_commit, load_delivery_unit, load_delivery_units, validate_selected_plan_revision,
@@ -172,6 +162,71 @@ pub struct WorkflowDefinition {
     pub subflows: Vec<WorkflowSubflow>,
 }
 
+impl WorkflowDefinition {
+    pub fn unsupported_node(&self) -> Option<&PinnedNode> {
+        self.nodes
+            .iter()
+            .find(|node| !node.instance.kind.is_supported())
+    }
+
+    pub(crate) fn ensure_supported_nodes(&self) -> Result<()> {
+        if let Some(node) = self.unsupported_node() {
+            anyhow::bail!(
+                "Node {} ({}) was removed. Replace it in the Builder before running this workflow.",
+                node.instance.id,
+                node.definition.title
+            );
+        }
+        Ok(())
+    }
+
+    fn normalize_prompt_joins(&mut self) {
+        let generated_joins = self
+            .subflows
+            .iter()
+            .filter_map(|scope| {
+                let failure = scope.outputs.get("failed")?;
+                let execute = format!("{}::execute", scope.path);
+                (failure.node == format!("{}::failure", scope.path)
+                    && failure.port == "joined"
+                    && self.nodes.iter().any(|node| {
+                        node.instance.id == execute
+                            && structured_agent::configuration(node).is_some()
+                    }))
+                .then(|| failure.node.clone())
+            })
+            .collect::<HashSet<_>>();
+        for node in &mut self.nodes {
+            if generated_joins.contains(&node.instance.id)
+                && node.instance.kind == BuiltinNode::Archived(ArchivedNode::Join)
+                && node.instance.configuration == NodeConfiguration::None
+                && node.definition.executor == Executor::JoinBranches
+            {
+                node.instance.kind = BuiltinNode::JoinResults;
+                node.instance.configuration = NodeConfiguration::JoinFailures;
+                node.definition.kind = BuiltinNode::JoinResults;
+                registry::configure_failure_join(&mut node.definition);
+            }
+        }
+    }
+}
+
+impl NodeInstance {
+    pub(super) fn validate_authored(&self) -> Result<()> {
+        ensure!(
+            self.kind.is_supported(),
+            "Node {} uses a retired node type",
+            self.id
+        );
+        ensure!(
+            !self.configuration.is_generated(),
+            "The engine generates the internal execution settings for {}",
+            self.id
+        );
+        Ok(())
+    }
+}
+
 fn digest(payload: &[u8]) -> String {
     format!("{:x}", Sha256::digest(payload))
 }
@@ -189,23 +244,13 @@ fn compile_resolved<'definition>(
     graph: WorkflowGraph,
     definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
 ) -> Result<WorkflowDefinition> {
-    ensure!(
-        graph.nodes.iter().all(|node| !matches!(
-            node.kind,
-            BuiltinNode::Subflow
-                | BuiltinNode::RepeatUntil
-                | BuiltinNode::ForEach
-                | BuiltinNode::Loop
-        )),
-        "Select a pinned subflow in an authoring package for reusable calls, repeats and iteration"
-    );
-    ensure!(
-        graph
-            .nodes
-            .iter()
-            .all(|node| !node.kind.generated_iteration()),
-        "For each generates its internal stages during publication"
-    );
+    for node in &graph.nodes {
+        node.validate_authored()?;
+        ensure!(
+            !matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::Loop),
+            "Select a pinned Function or AI Node Agent through an authoring package"
+        );
+    }
     compile_resolved_graph(id, graph, definition_for, true)
 }
 
@@ -223,6 +268,11 @@ fn compile_resolved_graph<'definition>(
         .nodes
         .iter()
         .map(|instance| {
+            ensure!(
+                instance.kind.is_supported(),
+                "Node {} uses a retired node type",
+                instance.id
+            );
             let definition = definition_for(instance)
                 .filter(|definition| definition.kind == instance.kind)
                 .context("unregistered built-in node")?;
@@ -242,37 +292,17 @@ fn compile_resolved_graph<'definition>(
             "invalid configuration for node {}",
             instance.id
         );
-        if let NodeConfiguration::PromptOutcome(config) = &instance.configuration {
-            ensure!(
-                registry::prompt_outcome_matches(config, definition),
-                "invalid Prompt output ports on node {}",
-                instance.id
-            );
-        }
         let revision = digest(&serde_json::to_vec(&(&instance, definition))?);
         let pinned = PinnedNode {
             instance,
             revision,
             definition: definition.clone(),
         };
-        if let NodeConfiguration::AgentRole { requirements, .. } = &pinned.instance.configuration
-            && requirements.prompt_delegate
-        {
+        if let NodeConfiguration::AgentRole { requirements, .. } = &pinned.instance.configuration {
             ensure!(
-                automation::prompt_delegate(&pinned),
-                "Prompt delegates must use a read-only native agent stage"
-            );
-        }
-        if matches!(&pinned.instance.configuration, NodeConfiguration::CandidateAcceptance(config)
-            if config.review_mode == candidate_acceptance::CandidateReviewMode::Selected)
-        {
-            ensure!(
-                pinned
-                    .definition
-                    .inputs
-                    .iter()
-                    .any(|port| port.name == "selected_reviews"),
-                "Use the current candidate acceptance node for selected Prompt reviews"
+                !requirements.review_reuse && !requirements.prompt_delegate,
+                "Node {} requires retired Prompt or evidence nodes",
+                pinned.instance.id
             );
         }
         stage_goal::StageGoalPin::for_stage(&pinned)?;
@@ -345,24 +375,6 @@ fn compile_resolved_graph<'definition>(
                 )
             })?;
         }
-        if wire.to.port == "value"
-            && matches!(
-                nodes[to].instance.configuration,
-                NodeConfiguration::Condition {
-                    predicate: ConditionPredicate::CandidateChecksPassed
-                }
-            )
-        {
-            ensure!(
-                output.value == PortType::Data(ArtifactKind::Checks),
-                "A candidate checks condition needs a checks output"
-            );
-        }
-        ensure!(
-            !matches!(&nodes[from].instance.configuration, NodeConfiguration::FindWork { query }
-                if query.result == agile_nodes::FindWorkResultMode::List && matches!(wire.from.port.as_str(), "task" | "target")),
-            "Find work needs Single mode to connect a work target"
-        );
         if wire.from.port == "event"
             && let NodeConfiguration::TypedStart(start) = &nodes[from].instance.configuration
         {
@@ -383,12 +395,10 @@ fn compile_resolved_graph<'definition>(
             connections.insert((&wire.from, &wire.to)),
             "workflow wire already exists"
         );
-        let accepts_multiple = match nodes[to].instance.kind {
-            BuiltinNode::Join => input.name == "branches",
-            BuiltinNode::SummarizeResult | BuiltinNode::CollectEvidence => input.name == "evidence",
-            BuiltinNode::ForEachCollect => matches!(input.name.as_str(), "finished" | "result"),
-            _ => false,
-        };
+        let accepts_multiple = matches!(
+            nodes[to].instance.configuration,
+            NodeConfiguration::JoinFailures
+        ) && input.name == "branches";
         ensure!(
             incoming.insert((wire.to.node.as_str(), wire.to.port.as_str())) || accepts_multiple,
             "an input port accepts one wire"
@@ -397,147 +407,19 @@ fn compile_resolved_graph<'definition>(
         inputs_remaining[to] += 1;
     }
     for node in &nodes {
-        if let NodeConfiguration::StagedChecks {
-            strategy_checks, ..
-        } = &node.instance.configuration
-        {
-            ensure!(
-                strategy_checks.is_empty()
-                    || node
-                        .definition
-                        .inputs
-                        .iter()
-                        .any(|port| port.name == "strategy"),
-                "Update the verification node to a version that accepts approved test strategy"
-            );
-        }
-        if let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration
-            && requirements.review_reuse
-        {
-            let source = |port| {
-                graph
-                    .wires
-                    .iter()
-                    .find(|wire| wire.to.node == node.instance.id && wire.to.port == port)
-                    .map(|wire| &wire.from)
-            };
-            let verified_subject =
-                source("prompt")
-                    .zip(source("review_subject"))
-                    .is_some_and(|(prompt, subject)| {
-                        prompt.node == subject.node
-                            && prompt.port == "text"
-                            && subject.port == "evidence"
-                            && indexes.get(prompt.node.as_str()).is_some_and(|&index| {
-                                nodes[index].instance.kind == BuiltinNode::CollectEvidence
-                            })
-                    });
-            ensure!(
-                node.instance.kind == BuiltinNode::Agent
-                    && requirements.goal.is_none()
-                    && requirements.plan.is_none()
-                    && source("comparison").is_none()
-                    && verified_subject,
-                "Review reuse on {} requires prompt and review subject from the same Collect Evidence node",
-                node.instance.id
-            );
-        }
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
-            if orchestration::optional_input(node, &port.name)
+            let optional = orchestration::optional_input(node, &port.name)
                 || (node.instance.kind == BuiltinNode::End
                     && port.name == "result"
                     && !node.definition.input_schemas.contains_key("result"))
                 || (node.instance.kind == BuiltinNode::Wait && port.name == "input")
                 || (matches!(&node.instance.configuration, NodeConfiguration::Human(config) if !config.requires_input())
                     && port.name == "input")
-            {
-                continue;
-            }
-            if matches!(
-                (node.instance.kind, port.name.as_str()),
-                (
-                    BuiltinNode::Approval | BuiltinNode::SummarizeResult,
-                    "evidence"
-                ) | (BuiltinNode::Agent, "comparison")
-                    | (
-                        BuiltinNode::Implement
-                            | BuiltinNode::ReviewCandidate
-                            | BuiltinNode::ReviewDiffCandidate
-                            | BuiltinNode::ReviewPlan,
-                        "brief"
-                    )
-                    | (BuiltinNode::PromptOutcome, "evidence")
-                    | (BuiltinNode::OpenOrUpdatePullRequest, "risk")
-                    | (BuiltinNode::MergePullRequest, "approval")
-                    | (BuiltinNode::MaterializeBacklog, "design" | "strategy")
-            ) {
-                continue;
-            }
-            use agile_nodes::ManageWorkConfiguration as Work;
-            let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
-                (NodeConfiguration::AgentRole { requirements, .. }, "review_subject") => {
-                    Some(requirements.review_reuse)
-                }
-                (NodeConfiguration::ManageWork { action }, "task") => {
-                    Some(matches!(action, Work::Link | Work::CreateSubtask))
-                }
-                (NodeConfiguration::ManageWork { action }, "title") => {
-                    Some(matches!(action, Work::CreateTask | Work::CreateSubtask))
-                }
-                (NodeConfiguration::LoadWorkContext { mode }, "task") => Some(mode.needs_task()),
-                (NodeConfiguration::LoadWorkContext { mode }, "document") => {
-                    Some(mode.needs_document())
-                }
-                (NodeConfiguration::SetFields(configuration), "source") => {
-                    Some(configuration.requires_source())
-                }
-                (NodeConfiguration::BuildText(configuration), "values") => {
-                    Some(configuration.requires_values())
-                }
-                (NodeConfiguration::McpTool(configuration), "arguments") => {
-                    Some(!configuration.argument_mappings.is_empty())
-                }
-                (NodeConfiguration::BuildList(configuration), "value") => {
-                    Some(configuration.requires_evidence())
-                }
-                (NodeConfiguration::VerifyTestPhase(configuration), name) => {
-                    configuration.required_input(name)
-                }
-                (
-                    NodeConfiguration::StagedChecks {
-                        strategy_checks, ..
-                    },
-                    "strategy",
-                ) => Some(!strategy_checks.is_empty()),
-                (_, "strategy") if node.instance.kind == BuiltinNode::VerifyCandidate => {
-                    Some(false)
-                }
-                (_, "quality" | "build") if node.instance.kind == BuiltinNode::AcceptCandidate => {
-                    Some(matches!(
-                        node.instance.configuration,
-                        NodeConfiguration::CandidateAcceptance(_)
-                    ))
-                }
-                (_, "selected_reviews") if node.instance.kind == BuiltinNode::AcceptCandidate => {
-                    Some(
-                        matches!(&node.instance.configuration, NodeConfiguration::CandidateAcceptance(config)
-                        if config.review_mode == candidate_acceptance::CandidateReviewMode::Selected),
-                    )
-                }
-                _ => None,
-            };
-            if let Some(required) = conditionally_required {
-                ensure!(
-                    connected == required,
-                    "Node {} requires input {} exactly when configured to use upstream evidence",
-                    node.instance.id,
-                    port.name
-                );
-                continue;
-            }
+                || (node.instance.kind == BuiltinNode::Agent
+                    && generic_agent::optional_input(&port.name));
             ensure!(
-                connected,
+                connected || optional,
                 "input {} on {} needs a connection",
                 port.name,
                 node.instance.id
@@ -561,21 +443,8 @@ fn compile_resolved_graph<'definition>(
     }
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
     orchestration::validate_graph(&nodes, &graph.wires)?;
-    let mut attempt_limits = nodes
-        .iter()
-        .filter_map(|node| match node.instance.configuration {
-            NodeConfiguration::DeliveryAttempt { limit, .. } => Some(limit),
-            _ => None,
-        });
-    if let Some(limit) = attempt_limits.next() {
-        ensure!(
-            attempt_limits.all(|other| other == limit),
-            "Workflow delivery gates must share the same attempt budget"
-        );
-    }
     if enforce_release {
         control::validate_release_wires(&nodes, &graph.wires)?;
-        maintenance::validate_activation_wires(&nodes, &graph.wires)?;
     }
     let revision = digest(&serde_json::to_vec(&(&graph.name, &nodes, &graph.wires))?);
     let definition = WorkflowDefinition {
@@ -592,17 +461,6 @@ fn compile_resolved_graph<'definition>(
     }) {
         conversation_turns::validate_conversation_template(&definition)?;
     }
-    let unit_nodes = control::unit_nodes(&definition);
-    ensure!(
-        definition.nodes.iter().all(|node| !matches!(
-            node.instance.kind,
-            BuiltinNode::BuildList
-                | BuiltinNode::ForEachBegin
-                | BuiltinNode::ForEachGate
-                | BuiltinNode::ForEachCollect
-        ) || !unit_nodes.contains(node.instance.id.as_str())),
-        "List execution currently requires a workflow outside a logical delivery unit"
-    );
     Ok(definition)
 }
 

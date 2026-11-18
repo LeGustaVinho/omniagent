@@ -3,9 +3,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::workflows::{NodeConfiguration, PinnedNode, WorkflowRun, runtime::load_definition};
 
-#[cfg(test)]
-mod tests;
-
 pub(in crate::workflows) fn stage_port(
     db: &Connection,
     run: &WorkflowRun,

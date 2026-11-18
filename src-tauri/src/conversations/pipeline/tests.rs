@@ -2,8 +2,12 @@ use std::{fs, path::PathBuf, process::Command};
 
 use crate::{
     repository::{ProjectCheckout, register},
-    workflows::{DeliveryRoles, builtin_delivery_graph},
+    workflows::{
+        authoring::package::{PackageArtifactKind, WorkflowPackagePublishOutcome},
+        tests::simple_graph,
+    },
 };
+use serde_json::json;
 
 use super::*;
 
@@ -26,25 +30,57 @@ pub(in crate::conversations) async fn save_workflow(
     name: &str,
     publish: bool,
 ) -> Result<WorkflowRevision> {
-    let mut graph = builtin_delivery_graph(DeliveryRoles::default());
-    graph.name = name.into();
-    let workflow = store
-        .save_workflow_revision(project.clone(), "test-pipeline".into(), graph)
-        .await?;
-    if publish {
-        let revision = workflow.clone();
-        store
-            .execute(move |db| {
-                db.execute(
-                    "INSERT INTO workflow_published_heads VALUES (?1, ?2, ?3)
-                 ON CONFLICT(project_id, workflow_id) DO UPDATE SET revision = excluded.revision",
-                    params![project, revision.id, revision.revision],
-                )?;
-                Ok(())
-            })
-            .await?;
+    if !publish {
+        return store
+            .save_workflow_revision(project, "private-pipeline".into(), simple_graph(name))
+            .await;
     }
-    Ok(workflow)
+    let base = store
+        .workflow_package_catalog(project.clone())
+        .await?
+        .into_iter()
+        .find(|item| item.version.kind == PackageArtifactKind::Pipeline)
+        .map(|item| item.version);
+    let package = serde_json::from_value(json!({
+        "name": name, "members": [
+            { "key": "exchange", "name": "Conversation exchange", "body": {
+                "kind": "schema", "fields": [
+                    { "name": "message", "type": "string", "required": true },
+                    { "name": "reply", "type": "string", "required": true }
+                ]
+            }},
+            { "key": "pipeline", "name": name, "base": base, "references": {
+                "start:schema": { "source": "draft", "key": "exchange" },
+                "end:schema": { "source": "draft", "key": "exchange" }
+            }, "body": { "kind": "pipeline", "graph": { "name": name, "nodes": [
+                { "id": "start", "kind": "typed_start", "configuration": { "kind": "typed_start", "conversation": true }},
+                { "id": "end", "kind": "end", "configuration": { "kind": "end" } }
+            ], "wires": [
+                { "from": { "node": "start", "port": "start" }, "to": { "node": "end", "port": "ready" } },
+                { "from": { "node": "start", "port": "inputs" }, "to": { "node": "end", "port": "result" } }
+            ]}}}
+        ]
+    }))?;
+    let draft = store
+        .create_workflow_package(project.clone(), None, package)
+        .await?;
+    let WorkflowPackagePublishOutcome::Published { publication } = store
+        .publish_reviewed_workflow_package(project, draft.id, draft.revision)
+        .await?
+    else {
+        anyhow::bail!("Expected the conversation pipeline to be published");
+    };
+    let version = &publication
+        .members
+        .iter()
+        .find(|member| member.key == "pipeline")
+        .context("Missing published pipeline")?
+        .artifact
+        .version;
+    Ok(WorkflowRevision {
+        id: version.id.clone(),
+        revision: version.revision.clone(),
+    })
 }
 
 #[tokio::test]
@@ -106,7 +142,7 @@ async fn published_pipeline_selection_is_project_scoped_and_forks_pin_the_origin
             .iter()
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
-        ["Direct conversation"]
+        ["Direct conversation", "Published pipeline"]
     );
     assert_eq!(
         store

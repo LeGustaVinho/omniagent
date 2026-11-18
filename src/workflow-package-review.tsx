@@ -7,17 +7,16 @@ import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
 import { Button } from "@/components/ui/button";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
-import { PromptInspector, PromptRevisionView } from "@/workflow-prompt";
-import { PromptContractSuggestion } from "@/workflow-prompt-suggestion";
+import { PromptRevisionView } from "@/workflow-prompt";
 import { WorkflowSchemaEditor } from "@/workflow-schema-editor";
 import { objectSchema, type JsonSchema, type SchemaField } from "@/workflow-schema-model";
 import type { InputField } from "@/workflow-decision-editor";
 import { builderNodeKinds, WorkflowNodePicker, type WorkflowCatalogItem } from "@/workflow-node-picker";
 import { TypedPromptInspector, WorkflowReferenceField, type PromptSlot, type RoleSnapshot } from "@/workflow-typed-prompt";
-import { PROMPT_EXECUTORS, promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename,
+import { promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename,
   type PromptRoleChoice } from "@/workflow-prompt-model";
 import type { PackageDraft } from "@/workflow-authoring-package";
-import { configuredBranches, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowNodeConfiguration,
+import { configuredBranches, graphProblems, isSupportedWorkflowNode, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowNodeConfiguration,
   type WorkflowEndpoint, type WorkflowGraph, type WorkflowGraphNode, type WorkflowLayout, type WorkflowReuseSelection } from "@/workflow-graph-model";
 import { PublishedSubflow, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
   type ReusableBody, type ReusableReference } from "@/workflow-reusable";
@@ -111,9 +110,9 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
   const preview = usePackagePreview(projectId, draftId, savedRevision, show);
   const nodeKinds = graphs.flatMap(({ graph }) => graph.nodes.map(({ kind }) => kind));
   if (promptMembers.length || nodeKinds.includes("subflow")) {
-    nodeKinds.push("subflow", ...Object.keys(PROMPT_EXECUTORS));
+    nodeKinds.push("subflow", "agent");
   }
-  if (graph?.graph.nodes.some(({ kind }) => kind === "end")) nodeKinds.push(...builderNodeKinds);
+  if (graph && newPrompt) nodeKinds.push("end", ...builderNodeKinds);
   const registry = useQuery(workflowNodeDefinitionsQuery(nodeKinds));
   const roleCatalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId], enabled: Boolean(prompt),
@@ -155,11 +154,7 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
           onPrompt={(text) => editPrompt({ ...prompt, body: { ...prompt.body, prompt: { ...prompt.body.prompt, text: text ?? "" } } })}
           onReference={(slot, reference) => editPrompt(updatePromptReference(prompt, slot, reference))}
           onRoleOverrides={(roleOverrides) => editPrompt({ ...prompt, body: { ...prompt.body, prompt: { ...prompt.body.prompt, roleOverrides } } })} />
-          : <PromptInspector key={prompt.key} member={prompt} choices={promptRoles(draftRoles, roleCatalog.data)}
-          catalog={registry.data} disabled={disabled} onChange={editPrompt}
-          technical={preview.data.members.find(({ key }) => key === prompt.key)?.graphDefinitions}
-          suggestion={(onApply) => <PromptContractSuggestion projectId={projectId} checkoutId={checkoutId}
-            prompt={prompt.body.prompt} cardFingerprint={JSON.stringify(prompt)} disabled={disabled} onApply={onApply} />} />}
+          : <p role="alert">This Prompt uses a retired executor contract. Create a typed AI Node Agent to replace it.</p>}
       </PromptRevisionView>}
       {!schema && !prompt && graph && registry.data && preview.isSuccess && <PackageMemberGraph key={graph.key} projectId={projectId} checkoutId={checkoutId}
         graph={graph.graph} references={graph.references ?? {}} draftPresets={draftPresets}
@@ -245,7 +240,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   const bindings = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<WorkflowCatalogItem[]>("workflow_package_catalog", { projectId }),
-    enabled: graph.nodes.some(({ kind, configuration }) => ["end", "subflow", "repeat_until", "for_each", "run_backlog", "loop"].includes(kind)
+    enabled: graph.nodes.some(({ kind, configuration }) => ["end", "subflow", "loop"].includes(kind)
       || configuration.kind === "agent_role"),
   });
   const error = queries.find((query) => query.error)?.error;
@@ -354,13 +349,12 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
       definitions[node.id] = schema ? { ...terminal, inputSchemas: { result: schema }, outputSchemas: { result: schema } }
         : { ...terminal, inputSchemas: undefined, outputSchemas: undefined };
     }
-    if (schema && node.kind === "validate_output") definitions[node.id] = { ...definition, outputSchemas: { object: schema } };
   }
   for (const [id, member] of promptsByNode) {
     const base = definitions[id];
-    if (!base) continue;
-    const typed = member.body.prompt.schemaContract ? typedPrompt(id, member) : undefined;
-    definitions[id] = promptNodeDefinition(member.name, member.body.prompt, base,
+    if (!base || !member.body.prompt.schemaContract) continue;
+    const typed = typedPrompt(id, member);
+    definitions[id] = promptNodeDefinition(member.name, base,
       typed ? { input: typed.input, output: typed.output } : undefined, typed?.write);
   }
   propagateSchemas(graph, definitions);
@@ -369,22 +363,21 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     return [id, choices.find(({ reference }) => promptReferenceValue(reference) === promptReferenceValue(role))?.name
       ?? (role ? "Pinned Role" : "Choose a Role")];
   }));
-  const backlogBound = (id: string) => graph.nodes.some((node) => node.id === id && node.kind === "run_backlog") && Boolean(references[id]);
   function referencePicker(id: string) {
     const node = graph.nodes.find((candidate) => candidate.id === id);
-    if (!node) return null;
+    if (!node || !isSupportedWorkflowNode(node.kind)) return null;
     const startSchema = acceptsStartSchema(node, definitions[id]);
-    if ((startSchema || ["end", "validate_output"].includes(node.kind)) && graph.nodes.some(({ kind }) => kind === "end")) {
+    if ((startSchema || node.kind === "end") && graph.nodes.some(({ kind }) => kind === "end")) {
       const slot = id + ":schema";
       return <WorkflowReferenceField label={startSchema ? "Input Schema" : "Output Schema"} selected={references[slot]}
         choices={schemas} disabled={disabled} onChange={(reference) => edit(graph, replaceReference(references, slot, reference))} />;
     }
-    const kind = ["subflow", "repeat_until", "for_each", "loop"].includes(node.kind) ? "subflow"
-      : node.kind === "run_backlog" ? "pipeline" : node.configuration.kind === "agent_role" ? "role" : null;
+    const kind = node.kind === "subflow" || node.kind === "loop" ? "subflow"
+      : node.configuration.kind === "agent_role" ? "role" : null;
     if (!kind) return null;
     const reference = references[id];
     const choices: { label: string; reference: ReusableReference }[] = (bindings.data ?? [])
-      .filter(({ version, prompt }) => version.kind === kind && (kind !== "pipeline" || version.destination === "project")
+      .filter(({ version, prompt, blockers }) => version.kind === kind && !blockers.length
         && (node.kind !== "loop" || !prompt))
       .map(({ version, name }) => ({ label: `${name} · ${version.destination} · ${version.revision.slice(0, 10)}`,
         reference: { source: "published", version } }));
@@ -393,7 +386,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     if (reference && !choices.some((option) => JSON.stringify(option.reference) === JSON.stringify(reference))) {
       choices.unshift({ label: "Current pinned reference", reference });
     }
-    return <label>{kind === "subflow" ? "Subflow revision" : kind === "pipeline" ? "Backlog child revision" : "Role revision"}
+    return <label>{kind === "subflow" ? "Function revision" : "Role revision"}
       <select disabled={disabled} value={reference ? JSON.stringify(reference) : ""} onChange={(event) => {
         const match = choices.find((choice) => JSON.stringify(choice.reference) === event.currentTarget.value);
         const next = { ...references };
@@ -432,8 +425,9 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
       fullHeight toolbarStart={toolbarStart} initialViewport={initialViewport} onViewportChange={onViewportChange}
       nameLabel={isFunction ? "Function name" : undefined}
-      insertTools={newPrompt && graph.nodes.some(({ kind }) => kind === "end") ? (insert, options) =>
-        <WorkflowNodePicker {...options} projectId={projectId} disabled={disabled} onAdd={(kind) => {
+      insertTools={newPrompt ? (insert, options) =>
+        <WorkflowNodePicker {...options} projectId={projectId} disabled={disabled}
+          terminal={graph.nodes.some(({ kind }) => kind === "end") ? undefined : isFunction ? "Return" : "End"} onAdd={(kind) => {
           if (kind === "subflow") insert(kind, { reference: newPrompt() });
           else insert(kind);
         }} onReuse={({ artifact }) => insert("subflow", { reference: { source: "published", version: artifact.version } })} /> : undefined}
@@ -483,14 +477,9 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
             onRoleOverrides={(roleOverrides) => replaceConfiguration({ roleOverrides })}
             onSavePrefab={savePrefab && persistPrefab} />;
         }
-        const editable = references[id]?.source === "draft" && !!editPrompt;
-        return <PromptInspector key={id} member={member} choices={choices} catalog={catalog} disabled={disabled || !editable}
-          onChange={(next, rename) => editPrompt?.(next, rename)}
-          technical={editable ? previewMembers.find(({ key }) => key === member.key)?.graphDefinitions : reusable.get(id)?.graphDefinitions}
-          suggestion={(onApply) => <PromptContractSuggestion projectId={projectId} checkoutId={checkoutId}
-            prompt={member.body.prompt} cardFingerprint={JSON.stringify(member)} disabled={disabled} onApply={onApply} />} />;
+        return <p role="alert">This Prompt uses a retired executor contract. Replace it with a typed AI Node Agent.</p>;
       }}
-      problems={graphProblems(presented, definitions, backlogBound)} disabled={disabled} backlogBound={backlogBound}
+      problems={graphProblems(presented, definitions)} disabled={disabled}
       onDerive={onDerive} deriveDisabled={deriveDisabled}
       allowDefinitionUpdates={(id) => !promptsByNode.has(id) &&
         (!references[id] || graph.nodes.find((node) => node.id === id)?.configuration.kind === "agent_role")}

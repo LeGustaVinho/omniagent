@@ -19,7 +19,7 @@ use crate::{
 use super::{Turn, load_turn, stage_label};
 use crate::workflows::{
     ArtifactValue, BuiltinNode, Executor, NodeConfiguration, NodeInputs, PinnedNode,
-    WorkflowAgentSubmission, WorkflowHostRequest, WorkflowHostSubmission, WorkflowRun,
+    WorkflowAgentSubmission, WorkflowRun,
     authoring::package::roles,
     control::{
         ControlStageState, StageAvailability, conversation_stage_availability, recorded_control,
@@ -97,7 +97,6 @@ impl RunningTurn {
         let unit_nodes = unit_nodes(&definition);
         let jobs = load_jobs(db, run)?;
         let outputs = load_outputs(db, run, &jobs, &units)?;
-        let control = recorded_control(db, run)?;
         let current = outputs
             .iter()
             .filter(|output| output.current)
@@ -122,6 +121,27 @@ impl RunningTurn {
                 kind: artifact.value.kind().key().to_owned(),
             })
             .collect();
+        if let Err(error) = definition.ensure_supported_nodes() {
+            return Ok(Self {
+                state: TurnState::Failed(crate::diagnostics::preview(&error.to_string())),
+                has_unfinished: jobs.iter().any(|job| {
+                    job.job
+                        .latest_attempt
+                        .as_ref()
+                        .is_some_and(|attempt| !attempt.status.is_terminal())
+                }),
+                waiting: None,
+                artifacts,
+                action_outcome: turn.request.request.action.as_ref().and_then(|action| {
+                    let already_started = jobs
+                        .iter()
+                        .any(|job| job.node_id == action.node_id && !job.attempts.is_empty());
+                    (!already_started).then(|| ActionOutcome::not_executed(&action.node_id))
+                }),
+                ready: Vec::new(),
+            });
+        }
+        let control = recorded_control(db, run)?;
         let graph_terminal = |node_id: &str| {
             !definition
                 .wires
@@ -252,16 +272,7 @@ impl RunningTurn {
                     }
                     StageAvailability::Ready(inputs) => match node.definition.executor {
                         _ if super::super::structured_agent::configuration(node).is_some() => {}
-                        Executor::ReadContext if unit.is_none() => {
-                            ready.push(ReadyStage {
-                                node: node.clone(),
-                                unit_id: None,
-                                inputs,
-                                model: None,
-                                effort: None,
-                            });
-                        }
-                        Executor::ReadOnlyAgent | Executor::PlanAgent => {
+                        Executor::ReadOnlyAgent => {
                             let (model, effort) = effective_model(db, turn, node)?;
                             if let Some(model) = model {
                                 if let Some(reason) = &turn.error {
@@ -628,21 +639,6 @@ impl StageClaim {
     async fn submit(&self, store: &Store, runner: String, gate: &LaunchGate) -> Result<bool> {
         let project = &self.project;
         let node = &self.stage.node.instance.id;
-        if self.stage.node.definition.executor == Executor::ReadContext {
-            let Some(_boundary) = gate.enter_admission().await else {
-                return Ok(false);
-            };
-            store
-                .execute_workflow_host(WorkflowHostSubmission {
-                    project_id: project.clone(),
-                    run_id: self.run.clone(),
-                    node_id: node.clone(),
-                    inputs: self.stage.inputs.clone(),
-                    request: WorkflowHostRequest::LoadContext,
-                })
-                .await?;
-            return Ok(true);
-        }
         let target = store
             .workflow_operator_agent_target(
                 project,

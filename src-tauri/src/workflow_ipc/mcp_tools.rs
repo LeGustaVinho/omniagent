@@ -1,10 +1,7 @@
 use super::report;
 use omniagent::{
-    jobs::Job,
     store::Store,
-    workflows::mcp_tools::{
-        McpAttemptEvidence, McpJobReview, McpServer, McpServerRequest, WorkflowMcpToolSubmission,
-    },
+    workflows::mcp_tools::{McpAttemptEvidence, McpJobReview, McpServer, McpServerRequest},
 };
 use tauri::State;
 
@@ -24,17 +21,6 @@ pub async fn register_workflow_mcp_server(
 ) -> Result<McpServer, String> {
     store
         .register_workflow_mcp_server(project_id, request)
-        .await
-        .map_err(report)
-}
-
-#[tauri::command]
-pub async fn submit_workflow_mcp_tool(
-    store: State<'_, Store>,
-    submission: WorkflowMcpToolSubmission,
-) -> Result<Job, String> {
-    store
-        .submit_workflow_mcp_tool(submission)
         .await
         .map_err(report)
 }

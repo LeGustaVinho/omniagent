@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ArtifactKind, ConditionPredicate, NodeConfiguration, NodeDefinition, NodeInstance, PinnedNode,
-    Port, PortType, Wire, WorkflowRun,
+    ArtifactKind, BuiltinNode, ConditionPredicate, NodeConfiguration, NodeDefinition, NodeInstance,
+    PinnedNode, Port, PortType, Wire, WorkflowRun,
 };
 
 mod loop_body;
@@ -222,7 +222,22 @@ fn ports(values: &[(&str, PortType)]) -> Vec<Port> {
 }
 
 pub(super) fn define(node: &NodeInstance, definition: &mut NodeDefinition) -> Result<()> {
+    use super::ConfigurationKind;
     use NodeConfiguration as Config;
+    let phase = match &node.configuration {
+        Config::LoopGate(_) => Some(ConfigurationKind::LoopGate),
+        Config::LoopStep(_) => Some(ConfigurationKind::LoopStep),
+        Config::LoopResult(_) => Some(ConfigurationKind::LoopResult),
+        _ => None,
+    };
+    if node.kind == BuiltinNode::Loop
+        && let Some(kind) = phase
+        && let Some((executor, title)) = super::registry::loop_phase_definition(kind)
+    {
+        definition.configuration = kind;
+        definition.executor = executor;
+        definition.title = title.into();
+    }
     let (inputs, outputs) = match &node.configuration {
         Config::Fork(config) => {
             ensure!(

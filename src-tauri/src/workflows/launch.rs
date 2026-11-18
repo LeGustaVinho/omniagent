@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -17,11 +15,11 @@ use crate::{
 
 use super::{
     ArtifactValue, BuiltinNode, NodeConfiguration, TaskReference, WorkflowArtifact,
-    WorkflowHostRequest, WorkflowRevision, WorkflowRun,
+    WorkflowRevision, WorkflowRun,
     artifacts::insert_artifact,
     builtin::BUILTIN_DELIVERY_ID,
     digest,
-    execution::{host_request_revision, record_host_completion},
+    execution::record_host_completion,
     registry::supports_pinned_execution,
     runtime::{insert_workflow_run, load_definition, load_workflow_run},
 };
@@ -314,29 +312,6 @@ pub(crate) fn launch_workflow_in_tx(
     )
 }
 
-pub(super) fn launch_backlog_child(
-    db: &Connection,
-    launch: super::backlog::execution::BacklogChildLaunch<'_>,
-) -> Result<WorkflowRun> {
-    launch_entry_in_tx(
-        db,
-        launch.project,
-        launch.workflow,
-        LaunchEntry {
-            checkout_id: launch.checkout.into(),
-            document_revision_id: None,
-            inputs: launch.inputs,
-            automatic: true,
-            backlog_plan: Some(launch.plan),
-        },
-        &WorkflowLaunchOrigin::Backlog {
-            parent_run_id: launch.parent.into(),
-            node_id: launch.node.into(),
-            work_id: launch.work.into(),
-        },
-    )
-}
-
 pub(super) fn launch_entry_in_tx(
     db: &Connection,
     project: &str,
@@ -422,6 +397,7 @@ pub(super) fn prepare_entry(
         .transpose()?;
     let workflow = load_definition(db, project, revision)?
         .context("The published workflow revision is unavailable in this project")?;
+    workflow.ensure_supported_nodes()?;
     ensure!(
         workflow
             .nodes
@@ -642,48 +618,17 @@ fn persist_entry(
             .source
             .clone()
             .context("The saved Markdown revision is missing")?;
-        let request = WorkflowHostRequest::Start { document };
         record_host_completion(
             db,
             artifact,
             "",
-            &host_request_revision(&BTreeMap::new(), &request)?,
+            &digest(&serde_json::to_vec(&(
+                serde_json::json!({}),
+                serde_json::json!({"action":"start","document":document}),
+            ))?),
         )?;
     }
 
-    // A legacy Load context directly connected to Start can bind its Markdown
-    // revision before returning the run to the scheduler.
-    if let Some(document) = &document_output {
-        for node in workflow
-            .nodes
-            .iter()
-            .filter(|node| node.definition.kind == BuiltinNode::LoadContext)
-        {
-            let direct_source = workflow
-                .wires
-                .iter()
-                .filter(|wire| wire.to.node == node.instance.id)
-                .all(|wire| wire.from.node == start.instance.id);
-            if direct_source {
-                let artifact = insert_artifact(
-                    db,
-                    project,
-                    run.id.clone(),
-                    node.instance.id.clone(),
-                    "context".into(),
-                    document.value.clone(),
-                )?;
-                let inputs = BTreeMap::from([("document".into(), document.clone())]);
-                record_host_completion(
-                    db,
-                    &artifact,
-                    "",
-                    &host_request_revision(&inputs, &WorkflowHostRequest::LoadContext)?,
-                )?;
-                super::inspection::record_workflow_completion_inputs(db, &artifact, "", &inputs)?;
-            }
-        }
-    }
     db.execute(
         "INSERT INTO workflow_launches VALUES (?1, ?2, ?3, ?4)",
         params![

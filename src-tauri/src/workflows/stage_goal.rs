@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -128,7 +130,7 @@ impl StageGoalPin {
             "Select Goal Mode on an agent stage"
         );
         ensure!(
-            stage.definition.kind != BuiltinNode::ReviewCandidate,
+            stage.definition.kind != BuiltinNode::Archived(ArchivedNode::ReviewCandidate),
             "This isolated candidate reviewer cannot start a Goal with a run-scoped bridge"
         );
         ensure!(
@@ -372,7 +374,7 @@ impl Store {
                     .filter(|wire| wire.from.node == node && wire.from.port == "candidate" && wire.to.port == "candidate")
                     .filter_map(|wire| definition.nodes.iter().find(|target| target.instance.id == wire.to.node))
                     .filter_map(|target| match &target.instance.configuration {
-                        NodeConfiguration::RequiredChecks { names, parallel_groups } if target.definition.kind == BuiltinNode::VerifyCandidate =>
+                        NodeConfiguration::RequiredChecks { names, parallel_groups } if target.definition.kind == BuiltinNode::Archived(ArchivedNode::VerifyCandidate) =>
                             Some((names, parallel_groups)),
                         _ => None,
                     }).collect::<Vec<_>>();
@@ -572,7 +574,5 @@ pub(super) fn assess_route(
     StageGoalRoute::Managed { reason }
 }
 
-#[cfg(test)]
-mod requalification_tests;
 #[cfg(test)]
 mod tests;

@@ -5,14 +5,6 @@ type ChoiceOption = { id: string; label: string };
 type FieldInput = { kind: "text" } | { kind: "boolean" } | { kind: "number"; integer: boolean }
   | { kind: "choice"; multiple: boolean; options: ChoiceOption[] };
 export type InputField = { id: string; label: string; required: boolean; input: FieldInput };
-export type WorkflowDecisionConfiguration = { kind: "request_input"; message: string; fields: InputField[] }
-  | { kind: "approval"; message: string };
-
-export function defaultDecisionConfiguration(kind: WorkflowDecisionConfiguration["kind"]): WorkflowDecisionConfiguration {
-  return kind === "approval" ? { kind, message: "Does this stage have your approval?" }
-    : { kind, message: "Input requested", fields: [{ id: "answer", label: "Answer", required: true, input: { kind: "text" } }] };
-}
-
 function defaultInput(kind: FieldInput["kind"]): FieldInput {
   switch (kind) {
     case "number": return { kind, integer: false };
@@ -48,19 +40,6 @@ function ChoiceFields({ input, update }: { input: Extract<FieldInput, { kind: "c
       })}><Plus size={15} /> Add option</Button>
     </fieldset>
   </div>;
-}
-
-export function DecisionNodeFields({ configuration, onChange, disabled }: {
-  configuration: WorkflowDecisionConfiguration;
-  onChange: (value: WorkflowDecisionConfiguration) => void;
-  disabled?: boolean;
-}) {
-  const approval = configuration.kind === "approval";
-  return <fieldset className="pipeline-stack" disabled={disabled}>
-    <label>{approval ? "Approval message" : "Question message"}<textarea rows={3} value={configuration.message}
-      onChange={(event) => onChange({ ...configuration, message: event.currentTarget.value })} /></label>
-    {!approval && <DecisionAnswerFields fields={configuration.fields} onChange={(fields) => onChange({ ...configuration, fields })} />}
-  </fieldset>;
 }
 
 export function DecisionAnswerFields({ fields, minimum = 1, onChange }: {

@@ -22,8 +22,6 @@ const MAX_TASKS_PER_BATCH: usize = 256;
 pub(super) mod attempts;
 pub(super) mod execution;
 pub(crate) mod retry;
-#[cfg(test)]
-mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

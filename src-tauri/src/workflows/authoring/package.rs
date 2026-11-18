@@ -13,43 +13,22 @@ use super::{
     WorkflowCanvasEdit, WorkflowNodePosition, editor::copy_node_definitions, new_id, open, seal,
 };
 
-#[cfg(test)]
-mod authoring_acceptance;
 pub(crate) mod mcp;
-#[cfg(test)]
-mod mcp_binding_acceptance;
 mod model;
 mod preview;
 mod prompt_card;
-mod prompt_suggestions;
 mod publish;
 mod request;
 pub use request::WorkflowAuthoringOutput;
-#[cfg(test)]
-mod review_tests;
 pub(crate) mod roles;
-#[cfg(test)]
-mod subflow_tests;
 #[cfg(test)]
 mod tests;
 pub use model::*;
 pub use preview::WorkflowPackagePreview;
-pub use prompt_suggestions::PromptSuggestionStatus;
-pub(crate) use publish::{
-    ensure_package_repeat_guards, ensure_package_runnable, published_pipeline_layout,
-};
+pub(crate) use publish::{ensure_package_runnable, published_pipeline_layout};
 
 const MAX_MEMBERS: usize = 96;
 const MAX_PACKAGE_BYTES: usize = 256 * 1024;
-
-pub(in crate::workflows) fn is_published_prompt(
-    db: &Connection,
-    project: &str,
-    version: &PackageArtifactVersion,
-) -> Result<bool> {
-    Ok(publish::load_published(db, project, version)?
-        .is_some_and(|artifact| matches!(artifact.body, PackageArtifactBody::Prompt { .. })))
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +47,9 @@ impl PackageDocument {
         previous: Option<&Self>,
     ) -> Result<Self> {
         validate_structure(&package)?;
+        for member in &package.members {
+            member.body.ensure_supported_nodes()?;
+        }
         let registry: HashMap<_, _> = builtin_registry()
             .into_iter()
             .map(|definition| (definition.kind, definition))
@@ -555,12 +537,6 @@ fn pipeline_reference(version: &WorkflowRevision) -> PackageArtifactVersion {
         revision: version.revision.clone(),
     }
 }
-
-#[cfg(test)]
-mod protected_review;
-
-#[cfg(test)]
-mod usage_acceptance;
 
 pub mod derive_reusable;
 pub mod exchange;

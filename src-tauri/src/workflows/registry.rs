@@ -10,13 +10,32 @@ use super::{ConditionPredicate, command::CommandConfiguration, mcp_tools::McpToo
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinNode {
+    #[serde(alias = "conversation_agent")]
     Agent,
+    TypedStart,
+    Human,
+    Wait,
+    End,
+    Start,
+    Fork,
+    JoinResults,
+    #[serde(alias = "loop_gate", alias = "loop_step", alias = "loop_result")]
+    Loop,
+    Subflow,
+
+    #[serde(untagged)]
+    Archived(ArchivedNode),
+}
+
+/// Wire names from earlier workflow formats. These carry no registry definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchivedNode {
     PromptDecision,
     PromptOutcome,
     ValidateOutput,
     CollectEvidence,
     QualityGate,
-    TypedStart,
     SummarizeResult,
     LoadWorkContext,
     ManageWork,
@@ -27,14 +46,9 @@ pub enum BuiltinNode {
     BuildText,
     RequestInput,
     Approval,
-    Human,
-    Wait,
-    End,
-    ConversationAgent,
     CompareModels,
     FindWork,
     UpdateProgress,
-    Start,
     LoadContext,
     Plan,
     ReviewPlan,
@@ -63,13 +77,6 @@ pub enum BuiltinNode {
     Condition,
     Parallel,
     Join,
-    Fork,
-    JoinResults,
-    Loop,
-    LoopGate,
-    LoopStep,
-    LoopResult,
-    Subflow,
     RepeatUntil,
     RepeatOutput,
     IterationLimit,
@@ -83,36 +90,37 @@ pub enum BuiltinNode {
 }
 
 impl BuiltinNode {
+    pub fn is_supported(self) -> bool {
+        !matches!(self, Self::Archived(_))
+    }
+
     pub(super) fn generated_iteration(self) -> bool {
         matches!(
             self,
-            Self::ForEachBegin
-                | Self::ForEachGate
-                | Self::ForEachCollect
-                | Self::RepeatOutput
-                | Self::DeliveryAttempt
-                | Self::LoopGate
-                | Self::LoopStep
-                | Self::LoopResult
+            Self::Archived(ArchivedNode::ForEachBegin)
+                | Self::Archived(ArchivedNode::ForEachGate)
+                | Self::Archived(ArchivedNode::ForEachCollect)
+                | Self::Archived(ArchivedNode::RepeatOutput)
+                | Self::Archived(ArchivedNode::DeliveryAttempt)
         )
     }
 
     pub(super) fn per_unit(self) -> bool {
         matches!(
             self,
-            Self::Implement
-                | Self::DeliveryAttempt
-                | Self::ReviewCandidate
-                | Self::VerifyCandidate
-                | Self::VerifyTestPhase
-                | Self::OpenOrUpdatePullRequest
-                | Self::WaitForCi
-                | Self::MergePullRequest
-                | Self::AcceptCandidate
-                | Self::VerifyCommit
-                | Self::VerifyMerge
-                | Self::ActivateMaintenance
-                | Self::Result
+            Self::Archived(ArchivedNode::Implement)
+                | Self::Archived(ArchivedNode::DeliveryAttempt)
+                | Self::Archived(ArchivedNode::ReviewCandidate)
+                | Self::Archived(ArchivedNode::VerifyCandidate)
+                | Self::Archived(ArchivedNode::VerifyTestPhase)
+                | Self::Archived(ArchivedNode::OpenOrUpdatePullRequest)
+                | Self::Archived(ArchivedNode::WaitForCi)
+                | Self::Archived(ArchivedNode::MergePullRequest)
+                | Self::Archived(ArchivedNode::AcceptCandidate)
+                | Self::Archived(ArchivedNode::VerifyCommit)
+                | Self::Archived(ArchivedNode::VerifyMerge)
+                | Self::Archived(ArchivedNode::ActivateMaintenance)
+                | Self::Archived(ArchivedNode::Result)
         )
     }
 }
@@ -187,6 +195,7 @@ pub enum ConfigurationKind {
     Wait,
     Fork,
     JoinResults,
+    JoinFailures,
     Loop,
     LoopGate,
     LoopStep,
@@ -229,6 +238,12 @@ pub enum ConfigurationKind {
     ForEachCollect,
 }
 
+impl ConfigurationKind {
+    pub(super) fn is_loop_phase(self) -> bool {
+        matches!(self, Self::LoopGate | Self::LoopStep | Self::LoopResult)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
@@ -237,6 +252,7 @@ pub enum NodeConfiguration {
     Wait(super::timed::WaitConfiguration),
     Fork(super::orchestration::ForkConfiguration),
     JoinResults(super::orchestration::JoinResultsConfiguration),
+    JoinFailures,
     Loop(super::orchestration::LoopConfiguration),
     LoopGate(super::orchestration::LoopGateConfiguration),
     LoopStep(super::orchestration::LoopStepConfiguration),
@@ -445,143 +461,98 @@ pub struct NodeDefinition {
 }
 
 pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
-    let mut pinned = pinned.clone();
-    pinned.input_schemas.clear();
-    pinned.output_schemas.clear();
-    let pinned = &pinned;
-    let mut registry = builtin_registry();
-    let Some(current) = registry.iter_mut().find(|entry| entry.kind == pinned.kind) else {
+    let Some(mut current) = builtin_registry()
+        .into_iter()
+        .find(|entry| entry.kind == pinned.kind)
+    else {
         return false;
     };
-    // A published Git graph used these two display titles in its persisted definitions.
-    match (pinned.kind, pinned.title.as_str()) {
-        (BuiltinNode::VerifyCommit, "Commit") => current.title = "Commit".into(),
-        (BuiltinNode::VerifyMerge, "Merge") => current.title = "Merge".into(),
-        (BuiltinNode::End, "Return") => current.title = "Return".into(),
+    match pinned.kind {
+        BuiltinNode::End if pinned.title == "Return" => current.title = "Return".into(),
+        BuiltinNode::TypedStart if pinned.revision == 1 => {
+            current.revision = 1;
+            current.outputs.retain(|port| port.name != "plan");
+        }
+        BuiltinNode::Agent if pinned.executor == Executor::ConversationAgent => {
+            configure_conversation_agent(&mut current);
+            if pinned.title == "Conversation Agent" {
+                current.title = pinned.title.clone();
+            }
+        }
+        BuiltinNode::Agent if pinned.revision == 3 => {
+            configure_structured_agent(&mut current, pinned.executor == Executor::WriteAgent);
+        }
+        BuiltinNode::Agent => {
+            if pinned.title == "Agent" {
+                current.title = pinned.title.clone();
+            }
+            if pinned.revision == 1 {
+                current.revision = 1;
+                current.inputs.retain(|port| port.name != "review_subject");
+            }
+        }
+        BuiltinNode::JoinResults if pinned.configuration == ConfigurationKind::JoinFailures => {
+            configure_failure_join(&mut current);
+        }
+        BuiltinNode::Loop if pinned.configuration.is_loop_phase() => {
+            let Some((executor, title)) = loop_phase_definition(pinned.configuration) else {
+                return false;
+            };
+            current.configuration = pinned.configuration;
+            current.executor = executor;
+            current.title = title.into();
+        }
         _ => {}
     }
-    if pinned.kind == BuiltinNode::Command && pinned.revision == 1 {
-        current.revision = 1;
-        current.outputs.retain(|port| port.name != "failed");
-    }
-    if pinned.kind == BuiltinNode::TypedStart && pinned.revision == 1 {
-        current.revision = 1;
-        current.outputs.retain(|port| port.name != "plan");
-    }
-    if pinned.kind == BuiltinNode::Agent && pinned.revision == 1 {
-        current.revision = 1;
-        current.inputs.retain(|port| port.name != "review_subject");
-    }
-    if pinned.kind == BuiltinNode::Agent && pinned.revision == 3 {
-        configure_structured_agent(current, pinned.executor == Executor::WriteAgent);
-    }
     if matches!(
-        pinned.kind,
-        BuiltinNode::Fork
-            | BuiltinNode::JoinResults
-            | BuiltinNode::LoopGate
-            | BuiltinNode::LoopStep
-            | BuiltinNode::LoopResult
-    ) {
+        pinned.configuration,
+        ConfigurationKind::Fork | ConfigurationKind::JoinResults
+    ) || pinned.configuration.is_loop_phase()
+    {
         current.inputs.clone_from(&pinned.inputs);
         current.outputs.clone_from(&pinned.outputs);
     }
-    if pinned.kind == BuiltinNode::PromptOutcome {
-        let outputs = pinned
-            .outputs
-            .iter()
-            .filter_map(|port| {
-                let name = port.name.strip_prefix("value-")?;
-                match port.value {
-                    PortType::Data(kind) => Some((name.to_owned(), kind)),
-                    _ => None,
-                }
-            })
-            .collect();
-        return super::prompt::PromptOutcomeConfiguration { outputs }
-            .definition(current)
-            .is_ok_and(|definition| definition == *pinned);
-    }
-    if pinned.kind == BuiltinNode::ReviewDiffCandidate && pinned.revision == 1 {
-        current.revision = 1;
-        current.inputs.retain(|port| port.name != "brief");
-        current
-            .outputs
-            .retain(|port| !matches!(port.name.as_str(), "failed" | "report"));
-    }
-    if matches!(pinned.kind, BuiltinNode::Plan | BuiltinNode::ReviewPlan) && pinned.revision == 1 {
-        current.revision = 1;
-        current.inputs.retain(|port| port.name != "brief");
-        current.outputs.retain(|port| port.name != "failed");
-    }
-    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision <= 3 {
-        current.revision = pinned.revision;
-        current
-            .inputs
-            .retain(|port| port.name != "selected_reviews");
-    }
-    if matches!(
-        pinned.kind,
-        BuiltinNode::Implement | BuiltinNode::ReviewCandidate
-    ) && pinned.revision == 1
-    {
-        current.revision = 1;
-        current
-            .outputs
-            .retain(|port| !matches!(port.name.as_str(), "failed" | "report"));
-        current.inputs.retain(|port| port.name != "brief");
-    }
-    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision == 1 {
-        current.revision = 1;
-        current.configuration = ConfigurationKind::None;
-        current
-            .inputs
-            .retain(|port| !matches!(port.name.as_str(), "quality" | "build"));
-    }
-    if matches!(
-        pinned.kind,
-        BuiltinNode::VerifyCandidate | BuiltinNode::VerifyCommit
-    ) && pinned.revision == 1
-    {
-        current.revision = 1;
-        current.outputs.retain(|port| port.name != "failed");
-    }
-    if pinned.kind == BuiltinNode::VerifyCandidate && pinned.revision == 1 {
-        current.configuration = ConfigurationKind::RequiredChecks;
-    }
-    if pinned.kind == BuiltinNode::VerifyCandidate && pinned.revision <= 2 {
-        current.revision = pinned.revision;
-        current.inputs.retain(|port| port.name != "strategy");
-    }
-    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision <= 2 {
-        current.revision = pinned.revision;
-        current.outputs.retain(|port| port.name != "failed");
-    }
-    if pinned.kind == BuiltinNode::RunBacklog && pinned.revision == 1 {
-        current.revision = 1;
-        current.outputs.retain(|port| port.name != "integrated");
-    }
-    if pinned.kind == BuiltinNode::MaterializeBacklog && pinned.revision == 1 {
-        current.revision = 1;
-        current
-            .inputs
-            .retain(|port| !matches!(port.name.as_str(), "design" | "strategy"));
-    }
-    if pinned.kind == BuiltinNode::RepeatOutput {
-        return super::repetition::matches_output_definition(current, pinned);
-    }
-    *current == *pinned
+    current.input_schemas.clone_from(&pinned.input_schemas);
+    current.output_schemas.clone_from(&pinned.output_schemas);
+    current == *pinned
 }
 
-pub(super) fn prompt_outcome_matches(
-    config: &super::prompt::PromptOutcomeConfiguration,
-    pinned: &NodeDefinition,
-) -> bool {
-    builtin_registry()
-        .into_iter()
-        .find(|definition| definition.kind == BuiltinNode::PromptOutcome)
-        .and_then(|base| config.definition(&base).ok())
-        .is_some_and(|definition| definition == *pinned)
+pub(super) fn loop_phase_definition(kind: ConfigurationKind) -> Option<(Executor, &'static str)> {
+    match kind {
+        ConfigurationKind::LoopGate => Some((Executor::GateLoop, "Start loop iteration")),
+        ConfigurationKind::LoopStep => Some((Executor::StepLoop, "Record loop iteration")),
+        ConfigurationKind::LoopResult => Some((Executor::AggregateLoop, "Collect loop outputs")),
+        _ => None,
+    }
+}
+
+pub(super) fn configure_conversation_agent(definition: &mut NodeDefinition) {
+    definition.revision = 1;
+    definition.executor = Executor::ConversationAgent;
+    definition.configuration = ConfigurationKind::None;
+    definition.inputs = vec![control("ready"), object("input")];
+    definition.outputs = vec![control("completed"), control("failed"), object("result")];
+}
+
+pub(super) fn configure_failure_join(definition: &mut NodeDefinition) {
+    definition.executor = Executor::JoinBranches;
+    definition.configuration = ConfigurationKind::JoinFailures;
+    definition.inputs = vec![control("branches")];
+    definition.outputs = vec![control("joined")];
+}
+
+fn control(name: &str) -> Port {
+    Port {
+        name: name.into(),
+        value: PortType::Control,
+    }
+}
+
+fn object(name: &str) -> Port {
+    Port {
+        name: name.into(),
+        value: PortType::Data(ArtifactKind::JsonObject),
+    }
 }
 
 pub(super) fn configure_structured_agent(definition: &mut NodeDefinition, write: bool) {
@@ -614,251 +585,18 @@ pub(super) fn configure_structured_agent(definition: &mut NodeDefinition, write:
 pub fn builtin_registry() -> Vec<NodeDefinition> {
     use ArtifactKind::*;
     use BuiltinNode::*;
-    use PortType::{Control, Data, Evidence};
+    use PortType::{Control, Data};
 
-    let entries = [
-        (
-            PromptDecision,
-            "Resolve prompt decision",
-            Executor::PromptDecision,
-            ConfigurationKind::PromptDecision,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("response", Evidence)][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("decision", Data(JsonObject)),
-            ][..],
-        ),
-        (
-            PromptOutcome,
-            "Collect prompt outcome",
-            Executor::PromptOutcome,
-            ConfigurationKind::PromptOutcome,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("decision", Data(JsonObject)),
-                ("evidence", Data(EvidenceSet)),
-            ],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("outcome", Data(JsonObject)),
-            ],
-        ),
-        (
-            SearchPublicRepositories,
-            "Search public repositories",
-            Executor::SearchPublicRepositories,
-            ConfigurationKind::SearchPublicRepositories,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("query", Data(RenderedText))][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("research", Data(GithubResearch)),
-            ][..],
-        ),
-        (
-            OpenOrUpdatePullRequest,
-            "Open or update PR",
-            Executor::OpenOrUpdatePullRequest,
-            ConfigurationKind::None,
-            Effect::WriteRepository,
-            &[
-                ("ready", Control),
-                ("git", Data(Git)),
-                ("risk", Data(JsonObject)),
-            ][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("pull", Data(GithubPullRequest)),
-            ][..],
-        ),
-        (
-            WaitForCi,
-            "Wait for CI",
-            Executor::WaitForCi,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("pull", Data(GithubPullRequest))][..],
-            &[
-                ("passed", Control),
-                ("approval_required", Control),
-                ("failed", Control),
-                ("stale", Control),
-                ("ci", Data(GithubCi)),
-            ][..],
-        ),
-        (
-            MergePullRequest,
-            "Merge PR",
-            Executor::MergePullRequest,
-            ConfigurationKind::None,
-            Effect::VerifyRepositoryMerge,
-            &[
-                ("ready", Control),
-                ("ci", Data(GithubCi)),
-                ("approval", Data(JsonObject)),
-            ][..],
-            &[
-                ("merged", Control),
-                ("failed", Control),
-                ("stale", Control),
-                ("integration", Data(Merge)),
-            ][..],
-        ),
-        (
-            VerifyTestPhase,
-            "Verify test phase",
-            Executor::VerifyTestPhase,
-            ConfigurationKind::VerifyTestPhase,
-            Effect::VerifyCandidate,
-            &[
-                ("ready", Control),
-                ("release", Data(Release)),
-                ("worktree", Data(Worktree)),
-                ("candidate", Data(Candidate)),
-                ("prior", Data(TestPhaseEvidence)),
-                ("tests", Data(JsonObject)),
-            ][..],
-            &[
-                ("verified", Control),
-                ("failed", Control),
-                ("blocked", Control),
-                ("evidence", Data(TestPhaseEvidence)),
-            ][..],
-        ),
-        (
-            VerifyIntegratedChecks,
-            "Verify integrated checks",
-            Executor::VerifyIntegratedChecks,
-            ConfigurationKind::IntegratedChecks,
-            Effect::VerifyCandidate,
-            &[("ready", Control), ("integrated", Data(IntegratedRevision))][..],
-            &[
-                ("verified", Control),
-                ("failed", Control),
-                ("blocked", Control),
-                ("evidence", Data(IntegratedChecksEvidence)),
-            ][..],
-        ),
-        (
-            RunBacklog,
-            "Run backlog",
-            Executor::RunBacklog,
-            ConfigurationKind::RunBacklog,
-            Effect::ChangeTaskRecords,
-            &[("ready", Control), ("backlog", Data(Backlog))][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("deliveries", Data(JsonObject)),
-                ("integrated", Data(IntegratedRevision)),
-            ][..],
-        ),
-        (
-            MaterializeBacklog,
-            "Materialize backlog",
-            Executor::MaterializeBacklog,
-            ConfigurationKind::None,
-            Effect::ChangeTaskRecords,
-            &[
-                ("ready", Control),
-                ("plan", Data(JsonObject)),
-                ("sdd", Data(JsonObject)),
-                ("bdd", Data(JsonObject)),
-                ("design", Data(JsonObject)),
-                ("strategy", Data(JsonObject)),
-            ][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("backlog", Data(Backlog)),
-            ][..],
-        ),
-        (
-            QualityGate,
-            "Quality gate",
-            Executor::QualityGate,
-            ConfigurationKind::QualityGate,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("evidence", Data(EvidenceSet))][..],
-            &[
-                ("passed", Control),
-                ("revise", Control),
-                ("blocked", Control),
-                ("decision", Data(JsonObject)),
-            ][..],
-        ),
-        (
-            CollectEvidence,
-            "Collect evidence",
-            Executor::CollectEvidence,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("evidence", Evidence)][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("evidence", Data(EvidenceSet)),
-                ("text", Data(RenderedText)),
-            ][..],
-        ),
-        (
-            BuiltinNode::SetFields,
-            "Set fields",
-            Executor::SetFields,
-            ConfigurationKind::SetFields,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("source", Evidence)][..],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("object", Data(JsonObject)),
-            ][..],
-        ),
-        (
-            ValidateOutput,
-            "Validate output",
-            Executor::ValidateOutput,
-            ConfigurationKind::ValidateOutput,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("source", Evidence)],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("object", Data(JsonObject)),
-            ],
-        ),
-        (
-            BuiltinNode::FilterMapList,
-            "Filter and map list",
-            Executor::FilterMapList,
-            ConfigurationKind::FilterMapList,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("items", Data(JsonList))],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("items", Data(JsonList)),
-            ],
-        ),
-        (
-            BuiltinNode::BuildText,
-            "Build text",
-            Executor::BuildText,
-            ConfigurationKind::BuildText,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("values", Data(JsonObject))],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("text", Data(RenderedText)),
-            ],
-        ),
+    type Ports = &'static [(&'static str, PortType)];
+    let entries: [(
+        BuiltinNode,
+        &str,
+        Executor,
+        ConfigurationKind,
+        Effect,
+        Ports,
+        Ports,
+    ); 10] = [
         (
             BuiltinNode::Wait,
             "Wait",
@@ -893,19 +631,6 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Effect::None,
             &[("ready", Control), ("result", Data(JsonObject))],
             &[("completed", Control), ("result", Data(JsonObject))],
-        ),
-        (
-            BuiltinNode::ConversationAgent,
-            "Conversation Agent",
-            Executor::ConversationAgent,
-            ConfigurationKind::None,
-            Effect::InvokeModel,
-            &[("ready", Control), ("input", Data(JsonObject))],
-            &[
-                ("completed", Control),
-                ("result", Data(JsonObject)),
-                ("failed", Control),
-            ],
         ),
         (
             BuiltinNode::Fork,
@@ -944,101 +669,6 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ],
         ),
         (
-            BuiltinNode::LoopGate,
-            "Start loop iteration",
-            Executor::GateLoop,
-            ConfigurationKind::LoopGate,
-            Effect::None,
-            &[],
-            &[],
-        ),
-        (
-            BuiltinNode::LoopStep,
-            "Record loop iteration",
-            Executor::StepLoop,
-            ConfigurationKind::LoopStep,
-            Effect::None,
-            &[],
-            &[],
-        ),
-        (
-            BuiltinNode::LoopResult,
-            "Collect loop outputs",
-            Executor::AggregateLoop,
-            ConfigurationKind::LoopResult,
-            Effect::None,
-            &[],
-            &[],
-        ),
-        (
-            BuiltinNode::RequestInput,
-            "Request input",
-            Executor::AwaitWorkflowInput,
-            ConfigurationKind::RequestInput,
-            Effect::None,
-            &[("ready", Control)],
-            &[("answered", Control), ("answers", Data(JsonObject))],
-        ),
-        (
-            BuiltinNode::Approval,
-            "Approval",
-            Executor::AwaitWorkflowApproval,
-            ConfigurationKind::Approval,
-            Effect::None,
-            &[("ready", Control), ("evidence", Evidence)],
-            &[
-                ("approved", Control),
-                ("rejected", Control),
-                ("decision", Data(JsonObject)),
-            ],
-        ),
-        (
-            BuiltinNode::CompareModels,
-            "Compare models",
-            Executor::CompareModels,
-            ConfigurationKind::CompareModels,
-            Effect::InvokeModel,
-            &[
-                ("ready", Control),
-                ("request", Data(RenderedText)),
-                ("context", Data(Markdown)),
-            ],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("results", Data(ComparisonResults)),
-            ],
-        ),
-        (
-            BuiltinNode::FindWork,
-            "Find work",
-            Executor::FindWork,
-            ConfigurationKind::FindWork,
-            Effect::ReadEvidence,
-            &[("ready", Control)],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("matches", Data(JsonList)),
-                ("task", Data(Task)),
-                ("target", Data(AgileTarget)),
-            ],
-        ),
-        (
-            BuiltinNode::UpdateProgress,
-            "Update progress",
-            Executor::UpdateProgress,
-            ConfigurationKind::UpdateProgress,
-            Effect::ChangeTaskRecords,
-            &[("ready", Control), ("target", Data(AgileTarget))],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("progress", Data(AgileProgressReceipt)),
-                ("target", Data(AgileTarget)),
-            ],
-        ),
-        (
             Start,
             "Start",
             Executor::BindInput,
@@ -1065,7 +695,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         ),
         (
             Agent,
-            "Agent",
+            "AI Node Agent",
             Executor::ReadOnlyAgent,
             ConfigurationKind::AgentRole,
             Effect::InvokeModel,
@@ -1082,356 +712,6 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ],
         ),
         (
-            SummarizeResult,
-            "Result",
-            Executor::SummarizeResult,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("summary", Data(RenderedText)),
-                ("evidence", Evidence),
-            ],
-            &[("completed", Control), ("summary", Data(ResultSummary))],
-        ),
-        (
-            LoadWorkContext,
-            "Load work context",
-            Executor::ReadWorkContext,
-            ConfigurationKind::LoadWorkContext,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("task", Data(Task)),
-                ("document", Data(Markdown)),
-            ],
-            &[
-                ("loaded", Control),
-                ("failed", Control),
-                ("context", Data(WorkflowContext)),
-            ],
-        ),
-        (
-            ManageWork,
-            "Create or link work",
-            Executor::ManageWork,
-            ConfigurationKind::ManageWork,
-            Effect::ChangeTaskRecords,
-            &[
-                ("ready", Control),
-                ("title", Data(RenderedText)),
-                ("task", Data(Task)),
-            ],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("task", Data(Task)),
-                ("target", Data(AgileTarget)),
-            ],
-        ),
-        (
-            LoadContext,
-            "Load context",
-            Executor::ReadContext,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("document", Data(Markdown))],
-            &[("loaded", Control), ("context", Data(Markdown))],
-        ),
-        (
-            BuiltinNode::Plan,
-            "Plan",
-            Executor::PlanAgent,
-            ConfigurationKind::AgentRole,
-            Effect::InvokeModel,
-            &[("ready", Control), ("context", Data(Markdown))],
-            &[
-                ("planned", Control),
-                ("plan", Data(ArtifactKind::Plan)),
-                ("failed", Control),
-            ],
-        ),
-        (
-            ReviewPlan,
-            "Review plan",
-            Executor::ReadOnlyAgent,
-            ConfigurationKind::AgentRole,
-            Effect::InvokeModel,
-            &[
-                ("ready", Control),
-                ("plan", Data(ArtifactKind::Plan)),
-                ("brief", Data(RenderedText)),
-            ],
-            &[
-                ("reviewed", Control),
-                ("review", Data(Review)),
-                ("failed", Control),
-            ],
-        ),
-        (
-            LinkWork,
-            "Create or link work",
-            Executor::FindOrCreateWork,
-            ConfigurationKind::None,
-            Effect::ChangeTaskRecords,
-            &[
-                ("ready", Control),
-                ("plan", Data(ArtifactKind::Plan)),
-                ("review", Data(Review)),
-            ],
-            &[("linked", Control), ("task", Data(Task))],
-        ),
-        (
-            ApproveImplementation,
-            "Approve implementation",
-            Executor::RecordImplementationRelease,
-            ConfigurationKind::None,
-            Effect::ReleaseImplementation,
-            &[
-                ("ready", Control),
-                ("plan", Data(ArtifactKind::Plan)),
-                ("task", Data(Task)),
-            ],
-            &[
-                ("approved", Control),
-                ("decision", Data(ArtifactKind::Approval)),
-            ],
-        ),
-        (
-            PrepareWorktree,
-            "Prepare worktree",
-            Executor::ProvisionWorktree,
-            ConfigurationKind::None,
-            Effect::ProvisionManagedCheckout,
-            &[
-                ("ready", Control),
-                ("task", Data(Task)),
-                ("decision", Data(ArtifactKind::Approval)),
-            ],
-            &[
-                ("prepared", Control),
-                ("worktree", Data(Worktree)),
-                ("release", Data(Release)),
-            ],
-        ),
-        (
-            Implement,
-            "Implement",
-            Executor::WriteAgent,
-            ConfigurationKind::AgentRole,
-            Effect::WriteRepository,
-            &[
-                ("ready", Control),
-                ("plan", Data(ArtifactKind::Plan)),
-                ("release", Data(Release)),
-                ("worktree", Data(Worktree)),
-                ("brief", Data(RenderedText)),
-            ],
-            &[
-                ("implemented", Control),
-                ("candidate", Data(Candidate)),
-                ("failed", Control),
-            ],
-        ),
-        (
-            ReviewCandidate,
-            "Review candidate",
-            Executor::ReadOnlyAgent,
-            ConfigurationKind::AgentRole,
-            Effect::InvokeModel,
-            &[
-                ("ready", Control),
-                ("candidate", Data(Candidate)),
-                ("brief", Data(RenderedText)),
-            ],
-            &[
-                ("reviewed", Control),
-                ("review", Data(Review)),
-                ("failed", Control),
-                ("report", Data(JsonObject)),
-            ],
-        ),
-        (
-            ReadGit,
-            "Read Git",
-            Executor::ReadSelectedGit,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("document", Data(Markdown))],
-            &[("read", Control), ("git", Data(GitInspection))],
-        ),
-        (
-            ReviewDiffCandidate,
-            "Review diff",
-            Executor::ReadOnlyAgent,
-            ConfigurationKind::AgentRole,
-            Effect::InvokeModel,
-            &[
-                ("ready", Control),
-                ("git", Data(GitInspection)),
-                ("brief", Data(RenderedText)),
-            ],
-            &[
-                ("reviewed", Control),
-                ("review", Data(Review)),
-                ("failed", Control),
-                ("report", Data(JsonObject)),
-            ],
-        ),
-        (
-            VerifyReviewDiff,
-            "Check selected diff",
-            Executor::CheckSelectedGit,
-            ConfigurationKind::RequiredChecks,
-            Effect::VerifyCandidate,
-            &[("ready", Control), ("git", Data(GitInspection))],
-            &[("verified", Control), ("checks", Data(Checks))],
-        ),
-        (
-            PublishDiffReport,
-            "Publish diff report",
-            Executor::ReportSelectedGit,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("git", Data(GitInspection)),
-                ("review", Data(Review)),
-                ("checks", Data(Checks)),
-            ],
-            &[("published", Control), ("report", Data(DiffReport))],
-        ),
-        (
-            VerifyCandidate,
-            "Verify candidate",
-            Executor::CheckCandidate,
-            ConfigurationKind::CandidateChecks,
-            Effect::VerifyCandidate,
-            &[
-                ("ready", Control),
-                ("candidate", Data(Candidate)),
-                ("strategy", Data(JsonObject)),
-            ],
-            &[
-                ("verified", Control),
-                ("failed", Control),
-                ("checks", Data(Checks)),
-            ],
-        ),
-        (
-            AcceptCandidate,
-            "Accept candidate",
-            Executor::RecordCandidateAcceptance,
-            ConfigurationKind::CandidateAcceptance,
-            Effect::RecordAcceptance,
-            &[
-                ("ready", Control),
-                ("candidate", Data(Candidate)),
-                ("review", Data(Review)),
-                ("checks", Data(Checks)),
-                ("quality", Data(JsonObject)),
-                ("build", Data(Checks)),
-                ("selected_reviews", Data(JsonObject)),
-            ],
-            &[
-                ("accepted", Control),
-                ("failed", Control),
-                ("acceptance", Data(Acceptance)),
-            ],
-        ),
-        (
-            VerifyCommit,
-            "Verify commit",
-            Executor::VerifyGitCommit,
-            ConfigurationKind::None,
-            Effect::VerifyRepositoryCommit,
-            &[
-                ("ready", Control),
-                ("candidate", Data(Candidate)),
-                ("acceptance", Data(Acceptance)),
-            ],
-            &[
-                ("verified", Control),
-                ("failed", Control),
-                ("git", Data(Git)),
-            ],
-        ),
-        (
-            VerifyMerge,
-            "Verify merge",
-            Executor::VerifyGitMerge,
-            ConfigurationKind::None,
-            Effect::VerifyRepositoryMerge,
-            &[("ready", Control), ("git", Data(Git))],
-            &[("verified", Control), ("integration", Data(Merge))],
-        ),
-        (
-            ActivateMaintenance,
-            "Activate maintenance candidate",
-            Executor::ActivateMaintenanceFixture,
-            ConfigurationKind::None,
-            Effect::RecordMaintenanceActivation,
-            &[("ready", Control), ("git", Data(Git))],
-            &[("activated", Control), ("source", Data(Git))],
-        ),
-        (
-            Command,
-            "Command",
-            Executor::ExecuteCommand,
-            ConfigurationKind::Command,
-            Effect::WriteRepository,
-            &[
-                ("ready", Control),
-                ("release", Data(Release)),
-                ("worktree", Data(Worktree)),
-            ],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("result", Data(CommandResult)),
-            ],
-        ),
-        (
-            McpTool,
-            "MCP tool",
-            Executor::ExecuteMcpTool,
-            ConfigurationKind::McpTool,
-            Effect::InvokeLocalTool,
-            &[("ready", Control), ("arguments", Evidence)],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("result", Data(McpToolResult)),
-            ],
-        ),
-        (
-            Condition,
-            "Condition",
-            Executor::EvaluateCondition,
-            ConfigurationKind::Condition,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("value", Evidence)],
-            &[("matched", Control), ("unmatched", Control)],
-        ),
-        (
-            Parallel,
-            "Parallel",
-            Executor::FanOut,
-            ConfigurationKind::None,
-            Effect::None,
-            &[("ready", Control)],
-            &[("branches", Control)],
-        ),
-        (
-            Join,
-            "Join",
-            Executor::JoinBranches,
-            ConfigurationKind::None,
-            Effect::None,
-            &[("branches", Control)],
-            &[("joined", Control)],
-        ),
-        (
             Subflow,
             "Subflow",
             Executor::ExpandSubflow,
@@ -1439,117 +719,6 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Effect::None,
             &[][..],
             &[][..],
-        ),
-        (
-            RepeatUntil,
-            "Repeat until",
-            Executor::RepeatSubflow,
-            ConfigurationKind::RepeatUntil,
-            Effect::None,
-            &[][..],
-            &[][..],
-        ),
-        (
-            IterationLimit,
-            "Iteration limit",
-            Executor::StopAtIterationLimit,
-            ConfigurationKind::None,
-            Effect::None,
-            &[("ready", Control)],
-            &[("failed", Control)],
-        ),
-        (
-            DeliveryAttempt,
-            "Reserve delivery attempt",
-            Executor::ReserveDeliveryAttempt,
-            ConfigurationKind::DeliveryAttempt,
-            Effect::ChangeTaskRecords,
-            &[("ready", Control)],
-            &[("admitted", Control), ("exhausted", Control)],
-        ),
-        (
-            RepeatOutput,
-            "Select approved iteration",
-            Executor::SelectRepeatOutput,
-            ConfigurationKind::RepeatOutput,
-            Effect::ReadEvidence,
-            &[][..],
-            &[("completed", Control), ("failed", Control)],
-        ),
-        (
-            BuildList,
-            "Build list",
-            Executor::BuildList,
-            ConfigurationKind::BuildList,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("value", Evidence)],
-            &[
-                ("completed", Control),
-                ("failed", Control),
-                ("items", Data(JsonList)),
-            ],
-        ),
-        (
-            ForEach,
-            "For each",
-            Executor::ExpandForEach,
-            ConfigurationKind::ForEach,
-            Effect::None,
-            &[("ready", Control), ("items", Data(JsonList))],
-            &[
-                ("completed", Control),
-                ("results", Data(IterationResults)),
-                ("failed", Control),
-            ],
-        ),
-        (
-            ForEachBegin,
-            "Pin iteration list",
-            Executor::BindIterationList,
-            ConfigurationKind::ForEachBegin,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("items", Data(JsonList))],
-            &[
-                ("ready", Control),
-                ("failed", Control),
-                ("items", Data(JsonList)),
-            ],
-        ),
-        (
-            ForEachGate,
-            "Select iteration item",
-            Executor::GateIterationItem,
-            ConfigurationKind::ForEachGate,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("items", Data(JsonList)),
-                ("previous", Evidence),
-            ],
-            &[("iterate", Control), ("item", Data(JsonItem))],
-        ),
-        (
-            ForEachCollect,
-            "Collect iteration results",
-            Executor::CollectIterationResults,
-            ConfigurationKind::ForEachCollect,
-            Effect::ReadEvidence,
-            &[
-                ("ready", Control),
-                ("items", Data(JsonList)),
-                ("finished", Control),
-                ("result", Evidence),
-            ],
-            &[("completed", Control), ("results", Data(IterationResults))],
-        ),
-        (
-            Result,
-            "Result",
-            Executor::PublishResult,
-            ConfigurationKind::None,
-            Effect::ReadEvidence,
-            &[("ready", Control), ("task", Data(Task)), ("git", Data(Git))],
-            &[("completed", Control), ("delivery", Data(Git))],
         ),
     ];
     let ports = |entries: &[(&str, PortType)]| {
@@ -1566,21 +735,10 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         .map(
             |(kind, title, executor, configuration, effect, inputs, outputs)| NodeDefinition {
                 kind,
-                revision: match kind {
-                    BuiltinNode::AcceptCandidate => 4,
-                    BuiltinNode::VerifyCandidate => 3,
-                    BuiltinNode::Command
-                    | BuiltinNode::TypedStart
-                    | BuiltinNode::Plan
-                    | BuiltinNode::ReviewPlan
-                    | BuiltinNode::Implement
-                    | BuiltinNode::ReviewCandidate
-                    | BuiltinNode::ReviewDiffCandidate
-                    | BuiltinNode::RunBacklog
-                    | BuiltinNode::MaterializeBacklog
-                    | BuiltinNode::VerifyCommit
-                    | BuiltinNode::Agent => 2,
-                    _ => 1,
+                revision: if matches!(kind, BuiltinNode::TypedStart | BuiltinNode::Agent) {
+                    2
+                } else {
+                    1
                 },
                 title: title.into(),
                 executor,
@@ -1638,10 +796,18 @@ impl ArtifactKind {
 }
 
 impl NodeConfiguration {
+    pub(super) fn is_generated(&self) -> bool {
+        matches!(
+            self,
+            Self::LoopGate(_) | Self::LoopStep(_) | Self::LoopResult(_) | Self::JoinFailures
+        )
+    }
+
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
             (Self::End, ConfigurationKind::End) => true,
+            (Self::JoinFailures, ConfigurationKind::JoinFailures) => true,
             (Self::Human(config), ConfigurationKind::Human) => config.is_valid(),
             (Self::Wait(config), ConfigurationKind::Wait) => config.is_valid(),
             (Self::Fork(_), ConfigurationKind::Fork)
@@ -1650,36 +816,7 @@ impl NodeConfiguration {
             | (Self::LoopGate(_), ConfigurationKind::LoopGate)
             | (Self::LoopStep(_), ConfigurationKind::LoopStep)
             | (Self::LoopResult(_), ConfigurationKind::LoopResult) => true,
-            (Self::PromptDecision(config), ConfigurationKind::PromptDecision) => config.valid(),
-            (Self::PromptOutcome(config), ConfigurationKind::PromptOutcome) => config.valid(),
-            (Self::None, ConfigurationKind::CandidateAcceptance) => true,
-            (Self::CandidateAcceptance(config), ConfigurationKind::CandidateAcceptance) => {
-                config.valid()
-            }
-            (
-                Self::SearchPublicRepositories(config),
-                ConfigurationKind::SearchPublicRepositories,
-            ) => config.valid(),
-            (Self::VerifyTestPhase(config), ConfigurationKind::VerifyTestPhase) => config.valid(),
-            (Self::IntegratedChecks(config), ConfigurationKind::IntegratedChecks) => config.valid(),
-            (Self::RunBacklog(config), ConfigurationKind::RunBacklog) => config.valid(),
             (Self::TypedStart(config), ConfigurationKind::TypedStart) => config.valid(),
-            (Self::QualityGate(config), ConfigurationKind::QualityGate) => config.valid(),
-            (Self::ValidateOutput(config), ConfigurationKind::ValidateOutput) => {
-                config.validate().is_ok()
-            }
-            (Self::LoadWorkContext { .. }, ConfigurationKind::LoadWorkContext)
-            | (Self::ManageWork { .. }, ConfigurationKind::ManageWork) => true,
-            (Self::SetFields(config), ConfigurationKind::SetFields) => config.validate().is_ok(),
-            (Self::FilterMapList(config), ConfigurationKind::FilterMapList) => {
-                config.validate().is_ok()
-            }
-            (Self::BuildText(config), ConfigurationKind::BuildText) => config.validate().is_ok(),
-            (Self::RequestInput(config), ConfigurationKind::RequestInput) => config.is_valid(),
-            (Self::Approval(config), ConfigurationKind::Approval) => config.is_valid(),
-            (Self::CompareModels(config), ConfigurationKind::CompareModels) => config.valid(),
-            (Self::FindWork { query }, ConfigurationKind::FindWork) => query.valid(),
-            (Self::UpdateProgress { .. }, ConfigurationKind::UpdateProgress) => true,
             (
                 Self::AgentRole {
                     role,
@@ -1695,72 +832,8 @@ impl NodeConfiguration {
                             && !selection.model_id.trim().is_empty()
                     })
             }
-            (
-                Self::RequiredChecks {
-                    names,
-                    parallel_groups,
-                },
-                ConfigurationKind::RequiredChecks | ConfigurationKind::CandidateChecks,
-            ) => {
-                names.iter().all(|name| !name.trim().is_empty())
-                    && crate::repository::verification::valid_parallel_check_groups(parallel_groups)
-            }
-            (
-                Self::StagedChecks {
-                    names,
-                    parallel_groups,
-                    deferred_names,
-                    strategy_checks,
-                },
-                ConfigurationKind::CandidateChecks,
-            ) => {
-                !deferred_names.is_empty()
-                    && names.iter().all(|name| !name.trim().is_empty())
-                    && crate::repository::verification::valid_parallel_check_groups(parallel_groups)
-                    && crate::repository::verification::valid_deferred_check_names(
-                        names,
-                        parallel_groups,
-                        deferred_names,
-                    )
-                    && strategy_checks.len() <= 32
-                    && strategy_checks.iter().enumerate().all(|(index, name)| {
-                        !name.trim().is_empty()
-                            && name.len() <= 256
-                            && !name.chars().any(char::is_control)
-                            && !strategy_checks[..index].contains(name)
-                            && !names.contains(name)
-                            && !deferred_names.contains(name)
-                            && !parallel_groups
-                                .iter()
-                                .flatten()
-                                .any(|grouped| grouped == name)
-                    })
-            }
-            (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
-            (Self::McpTool(config), ConfigurationKind::McpTool) => config.is_valid(),
-            (Self::Condition { predicate }, ConfigurationKind::Condition) => predicate.valid(),
             (Self::SubflowEntry { outputs }, ConfigurationKind::SubflowEntry) => {
                 super::subflow::valid_entry_ports(outputs)
-            }
-            (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => {
-                configuration.valid()
-            }
-            (Self::RepeatOutput(configuration), ConfigurationKind::RepeatOutput) => {
-                configuration.valid()
-            }
-            (Self::DeliveryAttempt { ordinal, limit }, ConfigurationKind::DeliveryAttempt) => {
-                (1..=32).contains(ordinal) && (1..=32).contains(limit)
-            }
-            (Self::BuildList(configuration), ConfigurationKind::BuildList) => configuration.valid(),
-            (Self::ForEach(configuration), ConfigurationKind::ForEach) => configuration.valid(),
-            (Self::ForEachBegin(configuration), ConfigurationKind::ForEachBegin) => {
-                configuration.valid()
-            }
-            (Self::ForEachGate(configuration), ConfigurationKind::ForEachGate) => {
-                configuration.valid()
-            }
-            (Self::ForEachCollect(configuration), ConfigurationKind::ForEachCollect) => {
-                configuration.valid()
             }
             _ => false,
         }

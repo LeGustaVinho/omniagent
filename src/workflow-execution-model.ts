@@ -2,9 +2,8 @@ import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { RunStatus } from "@/bindings/RunStatus";
 import type { SessionMode } from "@/bindings/SessionMode";
-import { wireKey, type WorkflowDefinition, type WorkflowGraphNode, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
+import { isSupportedWorkflowNode, wireKey, type WorkflowDefinition, type WorkflowGraphNode, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
 import type { WorkflowPendingDecision } from "@/workflow-stage-decisions";
-import type { ExecutionComparisonStage, RecordedComparison } from "@/workflow-execution-comparison";
 
 export type WorkflowExecutionFocus = { nodeId: string; artifactId?: string };
 
@@ -82,7 +81,6 @@ export type WorkflowExecutionSnapshot = {
   pendingDecisions?: WorkflowPendingDecision[];
   timedWaits?: { nodeId: string; unitId: string | null; deadlineAt: number }[];
   forkBranches?: { forkId: string; branch: string; unitId: string | null; state: Exclude<WorkflowExecutionState, "waiting" | "interrupted">; settledOrder: number | null }[];
-  comparisonStages?: ExecutionComparisonStage[];
   automaticAgentWaits?: UnitExecutionWait[];
   automaticPreparationWaits?: ExecutionWait[];
   testPhaseWaits?: UnitExecutionWait[];
@@ -165,21 +163,28 @@ export function executionCanvasGraph(definition: WorkflowExecutionSnapshot["defi
     const id = node.instance.id;
     if (scoped && !scoped.has(id)) return [];
     const subflow = owners.get(id);
-    if (!subflow) return [node];
+    if (!subflow) {
+      if (["loop_gate", "loop_step", "loop_result", "join_failures"].includes(node.instance.configuration.kind)) return [];
+      return [node];
+    }
     if (emitted.has(subflow.path)) return [];
     emitted.add(subflow.path);
+    const resultSource = subflow.outputs.results && original.get(subflow.outputs.results.node);
+    const kind = resultSource?.instance.configuration.kind === "loop_result" ? "loop" : "subflow";
     return [{
-      instance: { id: subflow.path, kind: "subflow", configuration: { kind: "none" } },
+      instance: { id: subflow.path, kind, configuration: { kind: "none" } },
       revision: subflow.version.revision,
       definition: {
-        title: subflow.name, kind: "subflow", configuration: "none", revision: 1,
+        title: subflow.name, kind, configuration: "none", revision: 1,
         executor: "expand_subflow", effect: "none",
         inputs: [...inputs.get(subflow.path)!.values()],
         outputs: [...outputs.get(subflow.path)!.values()],
       },
     }];
   });
-  return { name: scope?.name ?? definition.name, nodes, wires: [...wires.values()], subflows };
+  const visible = new Set(nodes.map(({ instance }) => instance.id));
+  return { name: scope?.name ?? definition.name, nodes,
+    wires: [...wires.values()].filter(({ from, to }) => visible.has(from.node) && visible.has(to.node)), subflows };
 }
 
 const recordedWaits = [
@@ -191,12 +196,11 @@ const recordedWaits = [
 ] as const;
 
 export function needsExecutionRefresh(snapshot: WorkflowExecutionSnapshot | null | undefined) {
-  if (!snapshot) return false;
+  if (!snapshot || snapshot.definition.nodes.some(({ instance }) => !isSupportedWorkflowNode(instance.kind))) return false;
   return snapshot.conversationTurnActive === true || Boolean(snapshot.timedWaits?.length) ||
     snapshot.forkBranches?.some(({ state }) => state === "queued" || state === "running") ||
     Boolean(snapshot.pendingDecisions?.length) || recordedWaits.some(([field]) => snapshot[field]?.length) ||
     snapshot.backlogExecutions?.some(({ state }) => state === "pending") ||
-    snapshot.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
     snapshot.jobs.some(({ job }) => job.queuedRecovery || job.downstreamWait ||
       ["starting", "running", "waiting_for_input"].includes(job.latestAttempt?.status ?? "") ||
       job.queueState === "queued" && !job.latestAttempt);
@@ -232,14 +236,6 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
       if (node.definition.kind === "agent" && port.name === "comparison") continue;
       if (node.definition.kind === "agent" && port.name === "review_subject" &&
         (node.instance.configuration.requirements as { reviewReuse?: boolean } | undefined)?.reviewReuse !== true) continue;
-      if (["implement", "review_candidate"].includes(node.definition.kind) && port.name === "brief") continue;
-      if (node.definition.kind === "accept_candidate" && node.instance.configuration.kind === "none"
-        && ["quality", "build"].includes(port.name)) continue;
-      if (node.definition.kind === "verify_candidate" && port.name === "strategy") {
-        const checks = node.instance.configuration.strategyChecks;
-        if (node.instance.configuration.kind !== "staged_checks" || !Array.isArray(checks) || checks.length === 0) continue;
-      }
-      if (node.definition.kind === "materialize_backlog" && ["design", "strategy"].includes(port.name)) continue;
       return null;
     }
     const selected = controlForNode(snapshot, wire.from.node, unit);
@@ -253,25 +249,6 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
     if (port.value.kind === "data") inputs[port.name] = output.artifact.id;
   }
   return inputs;
-}
-
-export function comparisonForNode(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit) {
-  const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
-  if (unitScoped && !unit) return undefined;
-  const scopedUnit = unitScoped ? unit : undefined;
-  const stages = snapshot.comparisonStages?.filter(({ nodeId, nodeRevision }) =>
-    nodeId === node.instance.id && nodeRevision === node.revision);
-  if (!stages?.length) return undefined;
-  const inputs = wiredExecutionInputs(snapshot, node, scopedUnit);
-  if (!inputs) return undefined;
-  const stage = stages.findLast((stage) => stage.unitId === (scopedUnit?.unit.id ?? null) &&
-    stage.planRevision === (scopedUnit?.planRevision ?? null) && Object.keys(stage.inputs).length === Object.keys(inputs).length &&
-    Object.entries(stage.inputs).every(([port, artifactId]) => inputs[port] === artifactId));
-  if (!stage) return undefined;
-  const recorded = snapshot.outputs.filter(({ artifact }) => artifact.nodeInstanceId === node.instance.id &&
-    artifact.unitId === stage.unitId && artifact.value.kind === "comparison_results")
-    .map(({ artifact }) => artifact.value.evidence as RecordedComparison).find(({ groupId }) => groupId === stage.groupId);
-  return { stage, recorded };
 }
 
 export function presentation(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit): {

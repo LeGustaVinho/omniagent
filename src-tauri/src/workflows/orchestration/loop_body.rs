@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
 use super::super::{
-    BuiltinNode, Endpoint, NodeConfiguration, NodeInstance, Wire, WorkflowGraph, builtin_registry,
-    compile_resolved_graph, iteration, schema,
+    BuiltinNode, Effect, Endpoint, NodeConfiguration, NodeInstance, Wire, WorkflowGraph,
+    builtin_registry, compile_resolved_graph, schema,
     subflow::{self, BoundSubflow},
 };
 use super::{
@@ -65,7 +65,7 @@ pub(in crate::workflows) fn expand_loop(
             "The Loop body's failure output must be a control port"
         );
     }
-    iteration::validate_loop_body(&body, ready, Some(context), completed, result)?;
+    validate_loop_body(&body, ready, context, completed, result)?;
 
     let output_schema = |endpoint: &Endpoint| {
         body.workflow
@@ -125,7 +125,7 @@ pub(in crate::workflows) fn expand_loop(
             ),
             node(
                 "collect",
-                BuiltinNode::LoopResult,
+                BuiltinNode::Loop,
                 NodeConfiguration::LoopResult(LoopResultConfiguration {
                     rounds: config.max_iterations,
                     limit: config.limit,
@@ -145,7 +145,7 @@ pub(in crate::workflows) fn expand_loop(
         graph.nodes.extend([
             node(
                 &gate,
-                BuiltinNode::LoopGate,
+                BuiltinNode::Loop,
                 NodeConfiguration::LoopGate(LoopGateConfiguration {
                     index,
                     max_iterations: config.max_iterations,
@@ -155,7 +155,7 @@ pub(in crate::workflows) fn expand_loop(
             node(&call, BuiltinNode::Subflow, NodeConfiguration::None),
             node(
                 &step,
-                BuiltinNode::LoopStep,
+                BuiltinNode::Loop,
                 NodeConfiguration::LoopStep(LoopStepConfiguration {
                     index,
                     max_iterations: config.max_iterations,
@@ -207,7 +207,7 @@ pub(in crate::workflows) fn expand_loop(
                         .output_schemas
                         .insert("input".into(), shape.clone());
                 }
-                if node.kind == BuiltinNode::LoopGate {
+                if matches!(node.configuration, NodeConfiguration::LoopGate(_)) {
                     definition
                         .input_schemas
                         .insert("input".into(), shape.clone());
@@ -219,12 +219,12 @@ pub(in crate::workflows) fn expand_loop(
                     .insert("context".into(), shape.clone());
             }
             if let Some(shape) = body_result {
-                if node.kind == BuiltinNode::LoopStep {
+                if matches!(node.configuration, NodeConfiguration::LoopStep(_)) {
                     definition
                         .output_schemas
                         .insert("result".into(), shape.clone());
                 }
-                if node.kind == BuiltinNode::LoopResult {
+                if matches!(node.configuration, NodeConfiguration::LoopResult(_)) {
                     definition.output_schemas.insert("results".into(), json!({
                     "type":"object", "properties": {
                         "iterations":{"type":"array","items":shape}, "reason":{"type":"string"}
@@ -281,4 +281,114 @@ fn wire(source: &str, out: &str, target: &str, input: &str) -> Wire {
         from: endpoint(source, out),
         to: endpoint(target, input),
     }
+}
+
+fn validate_loop_body(
+    body: &BoundSubflow,
+    ready: &Endpoint,
+    context: &Endpoint,
+    completion: &Endpoint,
+    result: &Endpoint,
+) -> Result<()> {
+    let root = ready.node.as_str();
+    let kinds: HashMap<_, _> = body
+        .workflow
+        .nodes
+        .iter()
+        .map(|node| (node.instance.id.as_str(), &node.definition))
+        .collect();
+    let mut incoming: HashMap<&str, Vec<&Wire>> = HashMap::new();
+    let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
+    for wire in &body.workflow.wires {
+        incoming
+            .entry(wire.to.node.as_str())
+            .or_default()
+            .push(wire);
+        outgoing
+            .entry(wire.from.node.as_str())
+            .or_default()
+            .push(wire.to.node.as_str());
+    }
+    let dependencies = |node| incoming.get(node).map(Vec::as_slice).unwrap_or_default();
+    let mut remaining: HashMap<_, _> = kinds
+        .keys()
+        .map(|id| (*id, dependencies(*id).len()))
+        .collect();
+    let mut queue: VecDeque<_> = remaining
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect();
+    let mut gated = HashSet::new();
+    let source_gated = |source: &Endpoint, gated: &HashSet<&str>| {
+        source == ready || source == context || gated.contains(source.node.as_str())
+    };
+    let has_effect = |definition: &crate::workflows::NodeDefinition| {
+        !matches!(definition.effect, Effect::None | Effect::ReadEvidence)
+    };
+    let mut visited = 0;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        if node != root {
+            let mut required = dependencies(node).iter();
+            let dominated =
+                if kinds[node].configuration == crate::workflows::ConfigurationKind::JoinFailures {
+                    required.len() > 0 && required.all(|wire| source_gated(&wire.from, &gated))
+                } else {
+                    required.any(|wire| source_gated(&wire.from, &gated))
+                };
+            if dominated {
+                gated.insert(node);
+            } else {
+                ensure!(
+                    !has_effect(kinds[node]),
+                    "Loop body node {node} can run outside its iteration gate"
+                );
+            }
+        }
+        for dependent in outgoing.get(node).into_iter().flatten() {
+            let count = remaining
+                .get_mut(dependent)
+                .with_context(|| format!("Loop body has an unknown node"))?;
+            *count -= 1;
+            if *count == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+    ensure!(visited == kinds.len(), "Loop body contains a cycle");
+    ensure!(
+        source_gated(completion, &gated) && source_gated(result, &gated),
+        "Loop outputs need to depend on their iteration gate"
+    );
+
+    // A selected ordinary output proves that every input was selected. A Join only
+    // proves its inputs settled, and an ordinary skipped node may still await an input.
+    let mut waiting = vec![
+        (completion.node.as_str(), true),
+        (result.node.as_str(), true),
+    ];
+    let mut visited = HashSet::new();
+    while let Some((node, selected)) = waiting.pop() {
+        if !visited.insert((node, selected)) {
+            continue;
+        }
+        let waits_for_settlement =
+            kinds[node].configuration == crate::workflows::ConfigurationKind::JoinFailures;
+        if selected || waits_for_settlement || dependencies(node).len() == 1 {
+            waiting.extend(
+                dependencies(node)
+                    .iter()
+                    .map(|wire| (wire.from.node.as_str(), selected && !waits_for_settlement)),
+            );
+        }
+    }
+    for (node, definition) in kinds {
+        if has_effect(definition) {
+            ensure!(
+                visited.contains(&(node, true)) || visited.contains(&(node, false)),
+                "Loop outputs can settle before body operation {node}"
+            );
+        }
+    }
+    Ok(())
 }

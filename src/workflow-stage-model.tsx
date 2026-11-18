@@ -22,10 +22,9 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
   const { options, loading, errors } = useLiveModelOptions();
   const model = configuration.model as ModelSelection | undefined;
   const requirements = (configuration.requirements as (RequirementConfiguration & {
-    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision; reviewReuse?: boolean;
+    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision;
   }) | undefined) ?? {};
   const generic = nodeKind === "agent";
-  const reviewReuse = requirements.reviewReuse === true;
   const planModeEnabled = generic && Boolean(requirements.plan);
   const effectiveMode = nodeKind === "plan" || planModeEnabled ? stagePlanMode(requirements.plan) : mode;
   const goal = readStageGoal(requirements.goal);
@@ -44,19 +43,8 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       reset: { label: "Use runtime model defaults", onSelect: () => onChange(inherited) } }} />
     {unavailable && <p className="text-sm text-muted-foreground">Configured stage model · {model.modelId} · Unavailable in current profiles</p>}
     {errors[0] && <p role="alert">{String(errors[0])}</p>}
-    {generic && <label className="workflow-check">
-      <input type="checkbox" checked={reviewReuse}
-        disabled={disabled || fixedModel || (!reviewReuse && Boolean(requirements.goal || requirements.plan))}
-        onChange={(event) => {
-          const { requirements: _previous, ...node } = configuration;
-          const { reviewReuse: _before, ...rest } = requirements;
-          if (event.currentTarget.checked) onChange({ ...node, requirements: { ...rest, reviewReuse: true } });
-          else onChange(Object.keys(rest).length ? { ...node, requirements: rest } : node);
-        }} />
-      Reuse approved reviews when their evidence is unchanged
-    </label>}
     {(nodeKind === "plan" || generic) && <WorkflowStagePlan plan={requirements.plan} optional={generic}
-      goalEnabled={generic && Boolean(requirements.goal)} disabled={disabled || fixedModel || reviewReuse}
+      goalEnabled={generic && Boolean(requirements.goal)} disabled={disabled || fixedModel}
       onChange={(plan) => {
         const { requirements: _previous, ...node } = configuration;
         const { plan: _before, ...rest } = requirements;
@@ -68,7 +56,7 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       onChange={(requirements) => onChange({ ...configuration, requirements })} />
     <WorkflowStageGoal projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       node={{ id: nodeId, kind: nodeKind, configuration: previewConfiguration }} roleRevision={goalRoleVersion}
-      roleReferencePending={goalRole?.pending} disabled={disabled || fixedModel || reviewReuse} goal={goal} planModeEnabled={planModeEnabled}
+      roleReferencePending={goalRole?.pending} disabled={disabled || fixedModel} goal={goal} planModeEnabled={planModeEnabled}
       malformed={requirements.goal !== undefined && !goal}
       onChange={(goal) => {
         const { requirements: _previous, ...node } = configuration;

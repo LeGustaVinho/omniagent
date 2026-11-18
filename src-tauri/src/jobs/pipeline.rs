@@ -13,8 +13,8 @@ use crate::{
     store::Store,
     tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
     workflows::{
-        WorkflowJobInput, bind_job_input, stage_goal::load_stage_goal, stage_job_input_with_repair,
-        stage_plan,
+        WorkflowJobInput, WorkflowRevision, bind_job_input, load_definition,
+        stage_goal::load_stage_goal, stage_job_input_with_repair, stage_plan,
     },
 };
 
@@ -272,21 +272,56 @@ pub(super) fn load_attempt_job(db: &Connection, run: &str) -> Result<Option<Job>
     }
 }
 
+pub(super) const RETIRED_WORKFLOW_REASON: &str =
+    "This workflow uses retired nodes. Replace them in the Builder before running again.";
+
+pub(super) fn workflow_pin_has_retired_nodes(
+    db: &Connection,
+    project: &str,
+    run: &str,
+) -> Result<bool> {
+    let version = db
+        .query_row(
+            "SELECT workflow_id, workflow_revision FROM workflow_run_pins
+             WHERE project_id = ?1 AND pipeline_run_id = ?2",
+            params![project, run],
+            |row| {
+                Ok(WorkflowRevision {
+                    id: row.get(0)?,
+                    revision: row.get(1)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(version) = version else {
+        return Ok(false);
+    };
+    let definition = load_definition(db, project, &version)?
+        .context("The pinned workflow definition is unavailable")?;
+    Ok(definition.unsupported_node().is_some())
+}
+
 pub(super) fn resolve_node_checkout(
     db: &Connection,
     binding: &PipelineDispatch,
     checkout: &str,
 ) -> Result<(String, String)> {
-    db.query_row(
-        "SELECT p.project_id, c.root FROM job_pipeline_runs p
+    let (project, root): (String, String) = db
+        .query_row(
+            "SELECT p.project_id, c.root FROM job_pipeline_runs p
          JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
          JOIN checkouts c ON c.project_id = p.project_id AND c.id = ?3
          WHERE p.id = ?1 AND n.instance_id = ?2 AND n.kind = 'execution'",
-        params![binding.pipeline_run_id, binding.node_instance_id, checkout],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()?
-    .context("The node or checkout is unavailable in the pipeline")
+            params![binding.pipeline_run_id, binding.node_instance_id, checkout],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .context("The node or checkout is unavailable in the pipeline")?;
+    ensure!(
+        !workflow_pin_has_retired_nodes(db, &project, &binding.pipeline_run_id)?,
+        RETIRED_WORKFLOW_REASON
+    );
+    Ok((project, root))
 }
 
 impl Store {

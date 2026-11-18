@@ -111,6 +111,7 @@ fn published_workflow_name(
     );
     let definition = load_definition(db, project, workflow)?
         .context("The selected pipeline revision is unavailable")?;
+    definition.ensure_supported_nodes()?;
     if definition.nodes.iter().any(|node| {
         node.instance.kind == crate::workflows::BuiltinNode::End && !node.instance.id.contains("::")
     }) {

@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConversationTemplateEditor } from "@/conversation-template-editor";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -7,8 +6,7 @@ import { WorkflowMaintenanceCandidates, WorkflowMaintenancePlugins } from "@/wor
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
 import { WorkflowLibrary } from "@/workflow-library";
-import { workflowRunTarget, type WorkflowExecutionFocus } from "@/workflow-execution-model";
-import type { ComparisonHandoff } from "@/workflow-comparison-handoff";
+import { type WorkflowExecutionFocus } from "@/workflow-execution-model";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
 import { PipelineMaintenanceLayout, PipelineTabs, PipelineWorkspaceFrame } from "@/pipeline-layout";
@@ -62,21 +60,13 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
 }
 
 function ProjectPipelinesWorkspace(props: WorkspaceProps) {
-  const [handoff, setHandoff] = useState<ComparisonHandoff>();
-  useEffect(() => {
-    setHandoff((current) => current && workflowRunTarget(current.runId) === props.target ? current : undefined);
-  }, [props.target]);
   const { view, libraryView = "library", draftId, runId, runFocus } = pipelineRoute(props.target);
   return <PipelineWorkspaceFrame>
     <PipelineTabs views={pipelineTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
-      {view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} onUseInPipeline={(destination) => {
-        setHandoff(destination);
-        props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
-      }} />
+      {view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} />
         : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
-        : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus}
-          comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
+        : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus} />
         : view === "library" ? <>
           <LibraryNavigation active={libraryView} onSelect={(target) => props.openWorkspace("pipelines", target)} />
           {libraryView === "library:roles"

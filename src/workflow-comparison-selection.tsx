@@ -1,6 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ModelRating } from "@/bindings/ModelRating";
 import { Button } from "@/components/ui/button";
@@ -19,7 +16,6 @@ export type ComparisonCandidate = {
 };
 export type ComparisonGroup = { id: string; sourceCheckoutId: string; commit: string; tree: string; prompt: string;
   sourceDocument?: NoteRevision | null; candidates: ComparisonCandidate[] };
-export type ComparisonSelection = { groupId: string; runIds: string[] };
 export type ComparisonInput = { groupId: string; jobId: string; runId: string; dispatchId: string; responseRevisionId: string };
 
 export function selectableComparisonRun(candidate: ComparisonCandidate, outcomes?: CandidateOutcome[]) {
@@ -58,46 +54,4 @@ export function ComparisonInputsList({ inputs, openActivity }: { inputs: Compari
       <Button type="button" variant="outline" onClick={() => openActivity(runId)}>Open source execution</Button>
     </li>)}
   </ol>;
-}
-
-export function ReviewComparisonInputs({ projectId, selection, onChange }: {
-  projectId: string;
-  selection: ComparisonSelection | undefined;
-  onChange: (selection: ComparisonSelection | undefined) => void;
-}) {
-  const [open, setOpen] = useState(Boolean(selection));
-  const [groupId, setGroup] = useState(selection?.groupId ?? "");
-  const groups = useQuery({ queryKey: ["model-comparisons", projectId], enabled: open,
-    queryFn: () => invoke<ComparisonGroup[]>("model_comparisons", { projectId }) });
-  const group = groups.data?.find(({ id }) => id === groupId);
-  const outcomes = useQuery({ queryKey: ["comparison-outcomes", projectId, groupId,
-    group?.candidates.map(({ runId, state }) => [runId, state])], enabled: Boolean(open && group),
-    queryFn: () => invoke<CandidateOutcome[]>("model_comparison_outcomes", { projectId, groupId }) });
-  return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="pipeline-evidence">
-    <summary>Use model comparison responses</summary>
-    {open && <div className="pipeline-stack">
-      <label className="pipeline-form">Source comparison
-        <select value={groupId} onChange={(event) => { setGroup(event.currentTarget.value); onChange(undefined); }}>
-          <option value="">Choose a comparison</option>
-          {groups.data?.map((item) => <option value={item.id} key={item.id}>{item.prompt} · {item.commit.slice(0, 12)}</option>)}
-        </select>
-      </label>
-      {(groups.error || outcomes.error) && <p role="alert">{String(groups.error || outcomes.error)}</p>}
-      {group && <ComparisonOutputChoices group={group} outcomes={outcomes.data} selected={selection?.runIds ?? []}
-        onChange={(runIds) => onChange(runIds.length ? { groupId, runIds } : undefined)} />}
-    </div>}
-  </details>;
-}
-
-export function SavedComparisonInputs({ projectId, jobId, openActivity }: {
-  projectId: string; jobId: string; openActivity: WorkspaceProps["openActivity"];
-}) {
-  const [open, setOpen] = useState(false);
-  const sources = useQuery({ queryKey: ["comparison-job-inputs", projectId, jobId], enabled: open,
-    queryFn: () => invoke<ComparisonInput[]>("model_comparison_job_inputs", { projectId, jobId }) });
-  return <details onToggle={(event) => setOpen(event.currentTarget.open)} className="pipeline-evidence">
-    <summary>Comparison inputs for this attempt</summary>
-    {sources.error && <p role="alert">{String(sources.error)}</p>}
-    {sources.data && (sources.data.length ? <ComparisonInputsList inputs={sources.data} openActivity={openActivity} /> : <p>No comparison responses were used.</p>)}
-  </details>;
 }

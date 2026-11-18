@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
@@ -14,7 +16,7 @@ use crate::{
 
 use super::{
     NodeConfiguration, NodeInputs, PinnedNode, WorkflowAgentSubmission, WorkflowArtifact,
-    WorkflowRun, digest, generic_agent::stage_job,
+    WorkflowRevision, WorkflowRun, digest, generic_agent::stage_job, runtime::load_definition,
 };
 
 pub(crate) mod agents_delivery;
@@ -43,10 +45,11 @@ pub(super) fn prompt_native_stage(node: &PinnedNode) -> bool {
     };
     requirements.bound_role.is_some()
         && match node.instance.kind {
-            super::BuiltinNode::Plan | super::BuiltinNode::ReviewPlan => {
+            super::BuiltinNode::Archived(ArchivedNode::Plan)
+            | super::BuiltinNode::Archived(ArchivedNode::ReviewPlan) => {
                 requirements.prompt_text.is_some() || prompt_delegate(node)
             }
-            super::BuiltinNode::ReviewDiffCandidate => true,
+            super::BuiltinNode::Archived(ArchivedNode::ReviewDiffCandidate) => true,
             _ => false,
         }
 }
@@ -66,9 +69,9 @@ pub(super) fn prompt_delegate(node: &PinnedNode) -> bool {
         && matches!(
             node.instance.kind,
             super::BuiltinNode::Agent
-                | super::BuiltinNode::ReviewPlan
-                | super::BuiltinNode::ReviewCandidate
-                | super::BuiltinNode::ReviewDiffCandidate
+                | super::BuiltinNode::Archived(ArchivedNode::ReviewPlan)
+                | super::BuiltinNode::Archived(ArchivedNode::ReviewCandidate)
+                | super::BuiltinNode::Archived(ArchivedNode::ReviewDiffCandidate)
         )
         && requirements.plan.is_none()
         && requirements.goal.is_none()
@@ -135,7 +138,7 @@ pub(super) fn note_ready_agent(
         && !prompt_delegate
         && matches!(
             node.definition.kind,
-            super::BuiltinNode::Agent | super::BuiltinNode::ReviewCandidate
+            super::BuiltinNode::Agent | super::BuiltinNode::Archived(ArchivedNode::ReviewCandidate)
         )
         && matches!(
             super::launch::load_workflow_launch(db, &run.project_id, &run.id)?
@@ -208,23 +211,36 @@ pub(super) fn cancel_branch_request(
 impl Store {
     pub(crate) async fn next_workflow_agent(&self) -> Result<Option<PendingWorkflowAgent>> {
         self.execute(|db| {
-            let row = db.query_row(
-                "SELECT r.project_id, a.pipeline_run_id, a.node_instance_id, a.request_key, a.payload
-                 FROM workflow_automatic_agents a JOIN job_pipeline_runs r ON r.id = a.pipeline_run_id
+            let mut pending = db.prepare(
+                "SELECT r.project_id, a.pipeline_run_id, a.node_instance_id, a.request_key, a.payload,
+                        p.workflow_id, p.workflow_revision
+                 FROM workflow_automatic_agents a
+                 JOIN job_pipeline_runs r ON r.id = a.pipeline_run_id
+                 JOIN workflow_run_pins p ON p.pipeline_run_id = r.id AND p.project_id = r.project_id
                  WHERE a.job_id IS NULL AND a.retry_after <= unixepoch()
                    AND a.plan_key = coalesce(r.plan_revision, '')
                    AND NOT (SELECT paused FROM job_queue_settings WHERE id = 1)
-                 ORDER BY a.retry_after, a.pipeline_run_id, a.node_instance_id LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get::<_, Vec<u8>>(4)?)),
-            ).optional()?;
-            row.map(|(project, run, node, key, payload)| Ok(PendingWorkflowAgent {
-                project,
-                run,
-                node,
-                key,
-                request: serde_json::from_slice(&protection::unprotect(&payload)?)?,
-            })).transpose()
+                 ORDER BY a.retry_after, a.pipeline_run_id, a.node_instance_id",
+            )?;
+            let mut rows = pending.query([])?;
+            while let Some(row) = rows.next()? {
+                let project: String = row.get(0)?;
+                let version = WorkflowRevision { id: row.get(5)?, revision: row.get(6)? };
+                let definition = load_definition(db, &project, &version)?
+                    .context("The pinned automatic workflow definition is unavailable")?;
+                if definition.unsupported_node().is_some() {
+                    continue;
+                }
+                let payload: Vec<u8> = row.get(4)?;
+                return Ok(Some(PendingWorkflowAgent {
+                    project,
+                    run: row.get(1)?,
+                    node: row.get(2)?,
+                    key: row.get(3)?,
+                    request: serde_json::from_slice(&protection::unprotect(&payload)?)?,
+                }));
+            }
+            Ok(None)
         }).await
     }
 }

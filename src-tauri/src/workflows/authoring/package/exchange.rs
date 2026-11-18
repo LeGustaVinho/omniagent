@@ -537,7 +537,7 @@ fn permissions(document: &PackageDocument) -> BTreeSet<ExchangePermission> {
     for member in &document.package.members {
         if let PackageArtifactBody::Prompt { prompt } = &member.body {
             permissions.insert(ExchangePermission::ModelRequiresLocalAuthentication);
-            if prompt.executor == BuiltinNode::Implement {
+            if prompt.executor == BuiltinNode::Archived(crate::workflows::ArchivedNode::Implement) {
                 permissions.insert(ExchangePermission::RepositoryWritesRequireRelease);
             }
         }

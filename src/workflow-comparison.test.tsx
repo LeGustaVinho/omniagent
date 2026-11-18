@@ -7,8 +7,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { comparisonOutcome } from "@/workflow-comparison-outcomes";
-import { DeliveryAgent } from "@/repository-delivery-agent";
-import type { Job } from "@/bindings/Job";
 import { testCheckout } from "@/test-fixtures/checkout";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { workflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
@@ -235,45 +233,4 @@ it("queues a separate synthesis from only selected successful run IDs and restor
   expect(synthesis.getByText("first-run")).toBeTruthy();
   expect(synthesis.getByText("first-dispatch")).toBeTruthy();
   expect(synthesis.getByRole("button", { name: "Open synthesis execution" })).toBeTruthy();
-});
-
-it("passes exact comparison inputs through the normal plan-review action", async () => {
-  const scope = { projectId: testCheckout.projectId, runId: "workflow-run" };
-  const group = { id: "comparison", commit, tree: "tree", prompt: "Check requirements", candidates: [
-    { selection: profiles[0], jobId: "source-job", runId: "source-run", dispatchId: "source-dispatch", state: "succeeded" },
-  ] };
-  const review = { id: "review-job", queueState: "queued", latestAttempt: null } as Job;
-  vi.mocked(invoke).mockImplementation(async (name, args) => {
-    if (name === "conversation_models") return args && "provider" in args && args.provider === "codex" ? options : [];
-    if (name === "model_comparisons") return [group];
-    if (name === "model_comparison_outcomes") return [{ jobId: "source-job", runId: "source-run", response: "Checked" }];
-    if (name === "submit_repository_delivery_agent") return review;
-    if (name === "model_comparison_job_inputs") return [{ groupId: "comparison", jobId: "source-job", runId: "source-run",
-      dispatchId: "source-dispatch", responseRevisionId: "source-response" }];
-    throw Error(`Unexpected IPC ${name}`);
-  });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const renderStage = (job?: Job) => <QueryClientProvider client={client}>
-    <DeliveryAgent scope={scope} nodeId="review-plan" inputs={{ plan: "pinned-plan" }} label="Plan review" job={job}
-      actions={{ busy: false, execute: (operation) => { void operation(); } }} openActivity={vi.fn()} />
-  </QueryClientProvider>;
-  const view = render(renderStage());
-  const user = userEvent.setup();
-  await user.click(await screen.findByText("Use model comparison responses"));
-  const source = await screen.findByRole("combobox", { name: "Source comparison" });
-  await within(source).findByRole("option", { name: /Check requirements/ });
-  await user.selectOptions(source, "comparison");
-  await user.click(await screen.findByRole("checkbox", { name: /source-run/ }));
-  await user.click(screen.getByRole("button", { name: /Plan review model/ }));
-  await user.click(await screen.findByRole("menuitemradio", { name: /Second Codex model/ }));
-  await user.click(screen.getByRole("button", { name: "Queue plan review" }));
-  expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", { input: {
-    ...scope, nodeId: "review-plan", unitId: null, inputs: { plan: "pinned-plan" }, selection: profiles[1], effort: null,
-    comparison: { groupId: "comparison", runIds: ["source-run"] },
-  } });
-  view.rerender(renderStage(review));
-  await user.click(screen.getByText("Comparison inputs for this attempt"));
-  const linked = within(await screen.findByRole("list", { name: "Source comparison runs" }));
-  expect(linked.getByText("source-run")).toBeTruthy();
-  expect(linked.getByText("source-dispatch")).toBeTruthy();
 });

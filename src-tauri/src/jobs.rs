@@ -44,10 +44,7 @@ pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
 pub(crate) use command::recover_commands;
-pub(crate) use command::{
-    CommandExchange, PinnedCommandScript, PreparedCommand, queue_pipeline_command,
-    queue_pipeline_mcp,
-};
+pub(crate) use command::{CommandExchange, PinnedCommandScript, PreparedCommand};
 pub use command::{CommandJobOutput, PipelineCommand};
 pub use downstream::{DownstreamInput, DownstreamWait, DownstreamWaitState};
 pub(crate) use downstream::{observe_child_run, recover_waiting_parent, settle_parent_wait};
@@ -96,7 +93,7 @@ pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,
 };
-pub(crate) use pipeline::{PipelineReleaseScope, WorkflowJobLaunch, issue_pipeline_release};
+pub(crate) use pipeline::WorkflowJobLaunch;
 pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,

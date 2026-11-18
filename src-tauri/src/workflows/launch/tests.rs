@@ -3,11 +3,7 @@ use std::path::Path;
 use super::*;
 use crate::{
     tasks::TaskPlacement,
-    workflows::{
-        ArtifactKind, Endpoint, NodeConfiguration, NodeInputs, NodeInstance, Wire, WorkflowGraph,
-        WorkflowHostSubmission,
-        tests::approved_delivery_repository,
-    },
+    workflows::{ArtifactKind, tests::approved_delivery_repository},
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -40,33 +36,7 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
             },
         )
         .await?;
-    let graph = |name: &str| WorkflowGraph {
-        name: name.into(),
-        nodes: [
-            ("entry-from-editor", BuiltinNode::Start),
-            ("frozen-destination", BuiltinNode::LoadContext),
-        ]
-        .into_iter()
-        .map(|(id, kind)| NodeInstance {
-            id: id.into(),
-            kind,
-            configuration: NodeConfiguration::None,
-        })
-        .collect(),
-        wires: [("start", "ready"), ("document", "document")]
-            .into_iter()
-            .map(|(from, to)| Wire {
-                from: Endpoint {
-                    node: "entry-from-editor".into(),
-                    port: from.into(),
-                },
-                to: Endpoint {
-                    node: "frozen-destination".into(),
-                    port: to.into(),
-                },
-            })
-            .collect(),
-    };
+    let graph = crate::workflows::tests::simple_graph;
     let first = store
         .save_workflow_revision(
             project.clone(),
@@ -120,31 +90,18 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
     let outputs = store
         .current_workflow_host_outputs(project.clone(), run.id.clone())
         .await?;
-    let input_artifact = outputs["entry-from-editor"].clone();
     let initial_context = store
         .resolve_workflow_artifact(
             project.clone(),
             run.id.clone(),
-            outputs["frozen-destination"].clone(),
+            outputs["start"].clone(),
             ArtifactKind::Markdown,
         )
         .await?
-        .context("The start context was not materialized")?;
+        .context("The Start document was not recorded")?;
     assert_eq!(
         initial_context.value,
         ArtifactValue::Markdown(original.revision.clone())
-    );
-    assert_eq!(
-        store
-            .execute_workflow_host(WorkflowHostSubmission {
-                project_id: project.clone(),
-                run_id: run.id.clone(),
-                node_id: "frozen-destination".into(),
-                inputs: NodeInputs::from([("document".into(), input_artifact)]),
-                request: WorkflowHostRequest::LoadContext,
-            })
-            .await?,
-        initial_context
     );
     let (project_check, run_check, exact, wrong) = (
         project.clone(),
@@ -261,11 +218,11 @@ async fn typed_start_records_exact_inputs_without_markdown_and_deduplicates_laun
                     {"name":"count", "valueType":"number", "required":true},
                     {"name":"empty", "valueType":"null", "required":false}
                 ]}},
-                {"id":"render", "kind":"build_text", "configuration":{"kind":"build_text","template":"{{title}} {{count}}"}}
+                {"id":"end", "kind":"end", "configuration":{"kind":"end"}}
             ],
             "wires": [
-                {"from":{"node":"entry","port":"start"},"to":{"node":"render","port":"ready"}},
-                {"from":{"node":"entry","port":"inputs"},"to":{"node":"render","port":"values"}}
+                {"from":{"node":"entry","port":"start"},"to":{"node":"end","port":"ready"}},
+                {"from":{"node":"entry","port":"inputs"},"to":{"node":"end","port":"result"}}
             ]
         }))?,
     ).await?;
@@ -392,42 +349,25 @@ async fn typed_start_normalizes_one_request_and_pins_its_checkout_head() -> Resu
         .capture_repository_markdown(repo.checkout_id.clone(), note.clone())
         .await?;
     std::fs::write(&note, "# New draft")?;
-    let workflow = store.save_workflow_revision(
-        repo.project_id.clone(),
-        "request-intake".into(),
-        serde_json::from_value(json!({
-            "name": "Request intake",
-            "nodes": [
-                {"id":"entry","kind":"typed_start","configuration":{
-                    "kind":"typed_start","fields":[],"promptOrMarkdown":true
-                }},
-                {"id":"validate","kind":"validate_output","configuration":{"kind":"validate_output",
-                    "schema":{"type":"object","required":["request"],"properties":{"request":{"type":"string"}}}
-                }},
-                {"id":"size","kind":"validate_output","configuration":{"kind":"validate_output",
-                    "schema":{"type":"object","properties":{"request":{"type":"string","maxLength":20}}}
-                }},
-                {"id":"render","kind":"build_text","configuration":{"kind":"build_text","template":"{{request}}"}},
-                {"id":"collect","kind":"collect_evidence","configuration":{"kind":"none"}},
-                {"id":"gate","kind":"quality_gate","configuration":{"kind":"quality_gate","rules":{
-                    "The exact typed request is approved":{"op":"equals","pointer":"/0/value/evidence/request","value":"Exact typed request"}
-                }}}
-            ],
-            "wires": [
-                {"from":{"node":"entry","port":"start"},"to":{"node":"validate","port":"ready"}},
-                {"from":{"node":"entry","port":"inputs"},"to":{"node":"validate","port":"source"}},
-                {"from":{"node":"entry","port":"start"},"to":{"node":"size","port":"ready"}},
-                {"from":{"node":"entry","port":"inputs"},"to":{"node":"size","port":"source"}},
-                {"from":{"node":"validate","port":"completed"},"to":{"node":"render","port":"ready"}},
-                {"from":{"node":"validate","port":"object"},"to":{"node":"render","port":"values"}},
-                {"from":{"node":"entry","port":"start"},"to":{"node":"collect","port":"ready"}},
-                {"from":{"node":"validate","port":"object"},"to":{"node":"collect","port":"evidence"}},
-                {"from":{"node":"size","port":"object"},"to":{"node":"collect","port":"evidence"}},
-                {"from":{"node":"collect","port":"completed"},"to":{"node":"gate","port":"ready"}},
-                {"from":{"node":"collect","port":"evidence"},"to":{"node":"gate","port":"evidence"}}
-            ]
-        }))?,
-    ).await?;
+    let workflow = store
+        .save_workflow_revision(
+            repo.project_id.clone(),
+            "request-intake".into(),
+            serde_json::from_value(json!({
+                "name": "Request intake",
+                "nodes": [
+                    {"id":"entry","kind":"typed_start","configuration":{
+                        "kind":"typed_start","fields":[],"promptOrMarkdown":true
+                    }},
+                    {"id":"end","kind":"end","configuration":{"kind":"end"}}
+                ],
+                "wires": [
+                    {"from":{"node":"entry","port":"start"},"to":{"node":"end","port":"ready"}},
+                    {"from":{"node":"entry","port":"inputs"},"to":{"node":"end","port":"result"}}
+                ]
+            }))?,
+        )
+        .await?;
     let request = TypedWorkflowLaunch {
         project_id: repo.project_id.clone(),
         workflow,
@@ -456,19 +396,13 @@ async fn typed_start_normalizes_one_request_and_pins_its_checkout_head() -> Resu
                 .is_err()
         );
     }
-    for (inputs, document_revision_id, expected, gate) in [
-        (prompt, None, "Exact typed request", "passed"),
-        (
-            Map::new(),
-            Some(saved.revision.id),
-            "# Exact saved request",
-            "blocked",
-        ),
+    for (inputs, document_revision_id, expected) in [
+        (prompt, None, "Exact typed request"),
+        (Map::new(), Some(saved.revision.id), "# Exact saved request"),
         (
             serde_json::from_value(json!({"prompt":"Needs revision"}))?,
             None,
             "Needs revision",
-            "revise",
         ),
     ] {
         let request = WorkflowLaunchRequest::Typed(TypedWorkflowLaunch {
@@ -487,83 +421,9 @@ async fn typed_start_normalizes_one_request_and_pins_its_checkout_head() -> Resu
         let outputs = store
             .workflow_run_artifacts(repo.project_id.clone(), run.id)
             .await?;
-        assert!(outputs.iter().any(|artifact| artifact.port == "text"
-            && artifact.node_instance_id == "render"
-            && artifact.value == ArtifactValue::RenderedText(expected.into())));
-        let decision = outputs
-            .iter()
-            .find(|artifact| artifact.node_instance_id == "gate")
-            .context("Missing quality decision")?;
-        let ArtifactValue::JsonObject(decision) = &decision.value else {
-            anyhow::bail!("Expected a structured quality decision");
-        };
-        assert_eq!(decision["decision"], gate);
+        assert!(outputs.iter().any(|artifact| artifact.port == "result"
+            && artifact.node_instance_id == "end"
+            && matches!(&artifact.value, ArtifactValue::JsonObject(value) if value["request"] == expected)));
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn typed_start_requires_a_pinned_markdown_revision_when_document_is_wired() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let store = Store::open(directory.path().join("store.sqlite"))?;
-    let repo = approved_delivery_repository(&store, directory.path()).await?;
-    let project = repo.project_id.clone();
-    let note = Path::new(&repo.checkout_root).join("brief.md");
-    let original = store
-        .capture_repository_markdown(repo.checkout_id.clone(), note.clone())
-        .await?;
-    let workflow = store.save_workflow_revision(project.clone(), "typed-document".into(), serde_json::from_value(json!({
-        "name":"With a document",
-        "nodes":[
-            {"id":"entry","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
-            {"id":"context","kind":"load_context","configuration":{"kind":"none"}}
-        ],
-        "wires":[
-            {"from":{"node":"entry","port":"start"},"to":{"node":"context","port":"ready"}},
-            {"from":{"node":"entry","port":"document"},"to":{"node":"context","port":"document"}}
-        ]
-    }))?).await?;
-    let mut request = TypedWorkflowLaunch {
-        project_id: project.clone(),
-        workflow,
-        checkout_id: repo.checkout_id,
-        document_revision_id: None,
-        request_id: Uuid::new_v4().to_string(),
-        work_id: None,
-        inputs: Map::new(),
-        automatic: false,
-    };
-    assert!(
-        store
-            .launch_workflow_request(WorkflowLaunchRequest::Typed(request.clone()))
-            .await
-            .is_err()
-    );
-    std::fs::write(note, "New revision")?;
-    request.document_revision_id = Some(original.revision.id.clone());
-    let run = store
-        .launch_workflow_request(WorkflowLaunchRequest::Typed(request))
-        .await?;
-    let receipt = store
-        .workflow_launch(project.clone(), run.id.clone())
-        .await?
-        .context("The launch receipt is missing")?;
-    let outputs = store
-        .current_workflow_host_outputs(project.clone(), run.id.clone())
-        .await?;
-    let context = store
-        .resolve_workflow_artifact(
-            project,
-            run.id,
-            outputs["context"].clone(),
-            ArtifactKind::Markdown,
-        )
-        .await?
-        .context("The Start document did not reach Load context")?;
-    assert_eq!(
-        context.value,
-        ArtifactValue::Markdown(original.revision.clone())
-    );
-    assert_eq!(receipt.source, Some(original.revision));
     Ok(())
 }

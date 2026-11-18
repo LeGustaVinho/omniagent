@@ -300,12 +300,10 @@ async fn loop_preserves_results_and_exits_using_previous_context() -> Result<()>
                     {"name":"ready", "value":{"kind":"control"}},
                     {"name":"context", "value":{"kind":"data", "artifact":"json_object"}},
                 ]}},
-                {"id":"copy", "kind":"set_fields", "configuration":{"kind":"set_fields", "mode":"build", "operations":[
-                    {"op":"set", "path":"/index", "value":{"source":"input", "pointer":"/index"}},
-                ]}},
-            ], "wires":[wire("start", "ready", "copy", "ready"), wire("start", "context", "copy", "source")],
+                {"id":"return", "kind":"end", "configuration":{"kind":"end"}},
+            ], "wires":[wire("start", "ready", "return", "ready"), wire("start", "context", "return", "result")],
         }, "inputs":{"ready": endpoint("start", "ready"), "context": endpoint("start", "context")},
-           "outputs":{"completed":endpoint("copy", "completed"), "failed":endpoint("copy", "failed"), "result":endpoint("copy", "object")}},
+           "outputs":{"completed":endpoint("return", "completed"), "result":endpoint("return", "result")}},
     });
     let pipeline = json!({
         "key":"pipeline", "name":"Loop fixture", "body":{"kind":"pipeline", "graph":{
@@ -349,7 +347,9 @@ async fn loop_preserves_results_and_exits_using_previous_context() -> Result<()>
         .find(|entry| entry.artifact.node_instance_id == "loop::collect" && entry.current)
         .context("missing Loop results")?;
     assert!(
-        matches!(&result.artifact.value, ArtifactValue::JsonObject(value) if value["reason"] == "exit" && value["iterations"] == json!([{"index":1},{"index":2}]))
+        matches!(&result.artifact.value, ArtifactValue::JsonObject(value) if value["reason"] == "exit"
+            && value["iterations"].as_array().is_some_and(|iterations| iterations.len() == 2)
+            && value["iterations"][0]["index"] == 1 && value["iterations"][1]["index"] == 2)
     );
     assert!(snapshot.control.iter().any(
         |record| record.node_id == "loop::gate-3" && record.state == ControlStageState::Skipped

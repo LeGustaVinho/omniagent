@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -61,7 +63,8 @@ pub(crate) fn stage_job_input_with_repair(
             input.unit_id.as_deref(),
         )?;
     }
-    let isolated_comparison = pinned.definition.kind == BuiltinNode::CompareModels;
+    let isolated_comparison =
+        pinned.definition.kind == BuiltinNode::Archived(ArchivedNode::CompareModels);
     let unit_scoped = if isolated_comparison || pinned.definition.kind == BuiltinNode::Agent {
         let run = super::runtime::load_workflow_run(db, project, &binding.pipeline_run_id)?
             .context("The agent workflow is unavailable")?;
@@ -112,7 +115,7 @@ pub(crate) fn stage_job_input_with_repair(
     super::generic_agent::require_admission(db, project, binding, &pinned, request, input)?;
     if let Some(revision) = &input.plan_revision_request {
         ensure!(
-            pinned.definition.kind == BuiltinNode::Plan,
+            pinned.definition.kind == BuiltinNode::Archived(ArchivedNode::Plan),
             "only a planner can revise a plan"
         );
         super::plan_revision::check_revision_admission(db, project, binding, revision)?;
@@ -135,7 +138,7 @@ pub(crate) fn stage_job_input_with_repair(
             unit.commit_evidence_id.is_none(),
             "logical unit already has a verified commit"
         );
-        if pinned.definition.kind == super::BuiltinNode::Implement {
+        if pinned.definition.kind == super::BuiltinNode::Archived(ArchivedNode::Implement) {
             let units = load_delivery_units(db, project, task, &binding.pipeline_run_id)?;
             ensure!(
                 units
@@ -235,7 +238,7 @@ impl Store {
             )?;
             let (project, workflow, node, checkout) = origin;
             let pinned = load_pinned_node(db, &project, &workflow, &node)?.context("workflow review node is unavailable")?;
-            if pinned.definition.kind == BuiltinNode::ReviewDiffCandidate {
+            if pinned.definition.kind == BuiltinNode::Archived(ArchivedNode::ReviewDiffCandidate) {
                 let id = input.artifacts.get("git").context("Diff review needs a pinned Git inspection")?;
                 let artifact = load_artifact(db, &project, &workflow, id, ArtifactKind::GitInspection)?
                     .context("The pinned Git inspection is unavailable")?;
@@ -247,7 +250,7 @@ impl Store {
                     "The diff review's candidate or checkout changed");
                 return Ok(Some(candidate.clone()));
             }
-            if pinned.definition.kind != BuiltinNode::ReviewCandidate { return Ok(None); }
+            if pinned.definition.kind != BuiltinNode::Archived(ArchivedNode::ReviewCandidate) { return Ok(None); }
             let id = input.artifacts.get("candidate").context("the candidate review was scheduled without a candidate")?;
             let artifact = load_artifact(db, &project, &workflow, id, ArtifactKind::Candidate)?.context("the review's selected candidate is unavailable")?;
             let ArtifactValue::Candidate(candidate) = artifact.value else { anyhow::bail!("the review needs a selected candidate"); };

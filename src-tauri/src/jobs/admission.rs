@@ -34,6 +34,7 @@ use super::{
     instruction_delivery::{self, InstructionClaim},
     instructions::{self, QueuedRevision},
     load_job,
+    pipeline::{RETIRED_WORKFLOW_REASON, workflow_pin_has_retired_nodes},
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     question_answers::{self, QuestionContinuation, load_continuation},
     question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
@@ -1265,6 +1266,14 @@ fn evaluate(
         QueueState::Paused => blockers.push(JobPaused),
         QueueState::Cancelled => return Ok((vec![JobCancelled], SubagentAllocation::default())),
     }
+    if let Some(origin) = &job.pipeline
+        && workflow_pin_has_retired_nodes(db, &job.project_id, &origin.pipeline_run_id)?
+    {
+        blockers.push(Policy {
+            reason: RETIRED_WORKFLOW_REASON,
+        });
+        return Ok((blockers, SubagentAllocation::default()));
+    }
     if let Some(reason) = goals::limit_blocker(db, &job.id, inputs.native_seed.is_some())? {
         blockers.push(Policy { reason });
     }
@@ -1611,4 +1620,149 @@ fn saved_question_run(
             |row| row.get(0),
         )
         .optional()?)
+}
+
+#[tokio::test]
+async fn archived_pipeline_job_stays_in_history_without_blocking_another_job() -> Result<()> {
+    use crate::{
+        jobs::{PipelineDispatch, PipelineNodeKind},
+        providers::Provider,
+        repository::register,
+        workflows::{ArchivedNode, BuiltinNode, tests::simple_graph},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let checkout = directory.path().join("checkout");
+    ensure!(
+        std::process::Command::new("git.exe")
+            .args(["init", "--quiet"])
+            .arg(&checkout)
+            .status()?
+            .success()
+    );
+    let store = Store::open(directory.path().join("retired-job.sqlite"))?;
+    let repo = register(&store, checkout).await?;
+    let project = repo.project_id;
+    let version = store
+        .save_workflow_revision(project.clone(), "fixture".into(), simple_graph("Fixture"))
+        .await?;
+    let archived_run = "retired-pipeline";
+    store
+        .register_job_pipeline(project.clone(), archived_run.into())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            archived_run.into(),
+            "end".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "fixture".into(),
+        account_binding: None,
+        checkout: repo.checkout_root.into(),
+        executable: std::env::current_exe()?,
+        cli_version: "fixture".into(),
+        runner: "fixture".into(),
+        permission_revision: "fixture".into(),
+        mode: SessionMode::ReadOnly,
+        model: None,
+        effort: None,
+    };
+    let request = JobRequest {
+        checkout_id: Some(repo.checkout_id),
+        task_id: None,
+        mode: scope.mode,
+        instructions: "Inspect the test checkout".into(),
+        dependencies: Vec::new(),
+        requires_bridge: false,
+    };
+    let archived = store
+        .submit_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: archived_run.into(),
+                node_instance_id: "end".into(),
+                plan_revision: None,
+                release_id: None,
+            },
+            scope.clone(),
+            request.clone(),
+        )
+        .await?;
+    // Load an archived pin beside an already queued job, as on upgrade.
+    let mut definition = store
+        .workflow_definition(project.clone(), version.clone())
+        .await?
+        .context("Missing fixture definition")?;
+    let retired = BuiltinNode::Archived(ArchivedNode::ValidateOutput);
+    definition.nodes[0].instance.kind = retired;
+    definition.nodes[0].definition.kind = retired;
+    let owner = project.clone();
+    store
+        .execute(move |db| {
+            db.execute(
+                "INSERT INTO workflow_run_pins VALUES (?1, ?2, ?3, ?4)",
+                params![archived_run, owner, version.id, version.revision],
+            )?;
+            db.execute(
+                "UPDATE workflow_revisions SET definition = ?4
+             WHERE project_id = ?1 AND workflow_id = ?2 AND revision = ?3",
+                params![
+                    owner,
+                    version.id,
+                    version.revision,
+                    protection::protect(&serde_json::to_vec(&definition)?)?
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    let run = "unbound-pipeline";
+    store
+        .register_job_pipeline(project.clone(), run.into())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            run.into(),
+            "agent".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    let pending = store
+        .submit_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: run.into(),
+                node_instance_id: "agent".into(),
+                plan_revision: None,
+                release_id: None,
+            },
+            scope,
+            request,
+        )
+        .await?;
+    let env = AdmissionEnvironment {
+        runner: "fixture".into(),
+        bridge_available: false,
+    };
+    let attempt = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Unpinned job was not admitted")?;
+    let ready = store
+        .inspect_job(project.clone(), pending.id, env.clone())
+        .await?
+        .context("Claimed job was not recorded")?;
+    assert_eq!(ready.job.latest_attempt.unwrap().run_id, attempt.run.id);
+    let blocked = store
+        .inspect_job(project, archived.id, env)
+        .await?
+        .context("Archived job was removed from history")?;
+    assert!(blocked.job.latest_attempt.is_none());
+    assert!(blocked.blockers.contains(&AdmissionBlocker::Policy {
+        reason: RETIRED_WORKFLOW_REASON
+    }));
+    Ok(())
 }

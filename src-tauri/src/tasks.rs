@@ -24,15 +24,12 @@ pub(crate) use agile_events::{
     WorkStateChanges, bind_workflow_child_origin, bind_workflow_trigger_origin,
     pipeline_work_origin,
 };
-pub(crate) use agile_transition::{current_work_state, transition_work_in_transaction};
+pub(crate) use agile_transition::current_work_state;
 pub(crate) use checklists::bind_checklist_job_mode;
-pub(crate) use checklists::load_checklist_items;
+pub(crate) use checklists::progress::ChecklistProgressRequest;
 pub use checklists::progress::{
     ChecklistProgressAccess, ChecklistProgressActor, ChecklistProgressAvailability,
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
-};
-pub(crate) use checklists::progress::{
-    ChecklistProgressRequest, set_pipeline_checklist_item_checked_in_transaction,
 };
 pub use checklists::{
     ChecklistDispatchTarget, ChecklistExecutionMode, ChecklistItem, ChecklistOrderAnchor,
@@ -45,7 +42,6 @@ pub(crate) use delivery::milestone::{
     delivery_merge_candidate, load_delivery_milestone_policy, load_workflow_milestone_policy,
     record_verified_task_delivery, record_verified_task_merge,
 };
-pub(crate) use delivery::validate_repository_delivery_open;
 pub use delivery::{
     TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState, TaskPrerequisiteBlocker,
 };

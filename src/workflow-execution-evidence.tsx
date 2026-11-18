@@ -8,15 +8,12 @@ import { ConversationMarkdown } from "@/conversation-markdown";
 import { deliveryMergeReceiptQuery } from "@/delivery-merge-model";
 import { downloadArtifact } from "@/download-artifact";
 import { JobFailurePanel } from "@/job-failure";
-import { WorkflowStructuredEvidence } from "@/workflow-structured-evidence";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
 import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
-import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
-import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
-import { executionOutputForWire, type ExecutionArtifact, type ExecutionControl, type ExecutionJob, type ExecutionOutput, type ExecutionPinnedNode,
+import { type ExecutionArtifact, type ExecutionControl, type ExecutionJob, type ExecutionOutput, type ExecutionPinnedNode,
   type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "checkout" | "openWorkspace" | "openActivity" | "openQueueJob">;
@@ -328,29 +325,11 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, focusedArtifactId
     return () => cancelAnimationFrame(frame);
   }, [focusedOutput]);
   const pastControl = snapshot.control.filter((receipt) => receipt !== control && belongs(receipt.nodeId, receipt.unitId ?? null));
-  const argumentsWire = node.definition.kind === "mcp_tool" ? snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === "arguments") : undefined;
-  const argumentsArtifact = argumentsWire && executionOutputForWire(snapshot, argumentsWire.from)?.artifact.id;
-  const latestMcpJob = jobs.at(-1);
-  const currentMcpJob = latestMcpJob && (latestMcpJob.job.latestAttempt || latestMcpJob.inputs?.arguments === argumentsArtifact) ? latestMcpJob.job : undefined;
-  const maintenanceWire = node.definition.kind === "activate_maintenance" && snapshot.definition.wires.find(({ to }) =>
-    to.node === node.instance.id && to.port === "git");
-  const maintenanceUnit = maintenanceWire && snapshot.units.filter((unit) => unit.planRevision === snapshot.run.planRevision)
-    .reduce<(typeof snapshot.units)[number] | undefined>((latest, unit) =>
-      !latest || unit.unit.ordinal > latest.unit.ordinal ? unit : latest, undefined);
-  const maintenanceGit = maintenanceWire && maintenanceUnit && maintenanceUnit.unit.id === unitId &&
-    executionOutputForWire(snapshot, maintenanceWire.from, maintenanceUnit)?.artifact;
-  const maintenanceCommit = maintenanceGit && maintenanceGit.value.kind === "git" ? maintenanceGit.value.evidence as Git : undefined;
   return <div className="pipeline-stack">
     <details><summary>Pinned node configuration</summary>
       <p>Definition version {node.definition.revision} · <code className="break-all">{node.revision}</code></p>
       <pre className="workflow-evidence-json">{JSON.stringify(node.instance.configuration, null, 2)}</pre>
     </details>
-    {node.definition.kind === "mcp_tool" && navigation.checkout.projectId === projectId && <WorkflowMcpToolRun
-      {...scope} checkoutId={navigation.checkout.checkoutId} nodeId={node.instance.id} argumentsArtifact={argumentsArtifact}
-      waitsForArguments={Boolean(argumentsWire && !argumentsArtifact)} job={currentMcpJob} />}
-    {maintenanceGit && maintenanceCommit?.task.projectId === projectId && <WorkflowMaintenanceDelivery
-      projectId={projectId} workflowRunId={id} workflowId={snapshot.run.version.id} nodeId={node.instance.id}
-      gitArtifactId={maintenanceGit.id} taskId={maintenanceCommit.task.taskId} commitEvidenceId={maintenanceCommit.id} />}
     {control && <ControlEvidence control={control} snapshot={snapshot} jobs={jobs} navigation={navigation} />}
     {pastControl.map((receipt) => <details key={`${receipt.planRevision ?? ""}:${receipt.unitId ?? ""}`}>
       <summary>Earlier control decision · {text(receipt.state)}{receipt.planRevision && ` · Plan ${receipt.planRevision.slice(0, 12)}`}</summary>
@@ -373,7 +352,6 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, focusedArtifactId
           })}>
             <p><strong>{artifact.port}</strong> · {text(artifact.value.kind)}{!current && <> · Earlier execution</>}</p>
             <p><code>{artifact.id}</code></p>
-            <WorkflowStructuredEvidence artifact={artifact} producer={node.instance.kind} projectId={projectId} openWorkspace={navigation.openWorkspace} />
             <ArtifactLinks artifact={artifact} scope={scope} navigation={navigation} />
             <details><summary>Open output evidence</summary><pre className="workflow-evidence-json">{JSON.stringify(artifact.value.evidence, null, 2)}</pre></details>
           </EvidenceActions>

@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -298,16 +300,18 @@ impl WorkflowDecisionRequest {
         original: Option<Map<String, Value>>,
     ) -> Result<Self> {
         match (&node.instance.kind, &node.instance.configuration) {
-            (BuiltinNode::RequestInput, NodeConfiguration::RequestInput(config)) => {
-                Ok(Self::RequestInput {
-                    form: config.form()?,
-                })
-            }
-            (BuiltinNode::Approval, NodeConfiguration::Approval(config)) if config.is_valid() => {
-                Ok(Self::Approval {
-                    message: config.message.clone(),
-                })
-            }
+            (
+                BuiltinNode::Archived(ArchivedNode::RequestInput),
+                NodeConfiguration::RequestInput(config),
+            ) => Ok(Self::RequestInput {
+                form: config.form()?,
+            }),
+            (
+                BuiltinNode::Archived(ArchivedNode::Approval),
+                NodeConfiguration::Approval(config),
+            ) if config.is_valid() => Ok(Self::Approval {
+                message: config.message.clone(),
+            }),
             (BuiltinNode::Human, NodeConfiguration::Human(config)) if config.is_valid() => {
                 ensure!(
                     !config.requires_input() || original.is_some(),
@@ -640,6 +644,7 @@ impl Store {
                     .context("The saved workflow response is unavailable")
                     .map(Some);
                 }
+                definition.ensure_supported_nodes()?;
 
                 if let NodeConfiguration::Human(config) = &node.instance.configuration
                     && timed::read(&tx, &run, &request.node_id, request.unit_id.as_deref())?

@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -83,18 +85,17 @@ fn is_repeat_round(
         parent.path == root
             && parent.nodes.iter().any(|node| node == &condition)
             && scope.nodes.iter().all(|node| parent.nodes.contains(node))
-    }) && definition
-        .nodes
-        .iter()
-        .any(|node| node.instance.id == condition && node.instance.kind == BuiltinNode::Condition)
-        && definition.nodes.iter().any(|node| {
-            node.instance.id == limit && node.instance.kind == BuiltinNode::IterationLimit
-        })
-        && definition.wires.iter().any(|wire| {
-            wire.to.node == condition
-                && wire.to.port == "ready"
-                && scope.nodes.contains(&wire.from.node)
-        })
+    }) && definition.nodes.iter().any(|node| {
+        node.instance.id == condition
+            && node.instance.kind == BuiltinNode::Archived(ArchivedNode::Condition)
+    }) && definition.nodes.iter().any(|node| {
+        node.instance.id == limit
+            && node.instance.kind == BuiltinNode::Archived(ArchivedNode::IterationLimit)
+    }) && definition.wires.iter().any(|wire| {
+        wire.to.node == condition
+            && wire.to.port == "ready"
+            && scope.nodes.contains(&wire.from.node)
+    })
 }
 
 pub(super) fn input_key(inputs: &NodeInputs) -> Result<String> {
@@ -251,7 +252,7 @@ impl Subject<'_, '_> {
             ArtifactValue::EvidenceSet(entries) => {
                 ensure!(
                     self.node(&artifact.node_instance_id)?.instance.kind
-                        == BuiltinNode::CollectEvidence
+                        == BuiltinNode::Archived(ArchivedNode::CollectEvidence)
                         && artifact.port == "evidence"
                         && self
                             .receipt(&artifact.node_instance_id, artifact.unit_id.as_deref())
@@ -312,7 +313,8 @@ impl Subject<'_, '_> {
                                         .contains(entry.source.node.as_str())
                                 });
                                 ensure!(
-                                    source.instance.kind == BuiltinNode::RepeatOutput
+                                    source.instance.kind
+                                        == BuiltinNode::Archived(ArchivedNode::RepeatOutput)
                                         && self
                                             .receipt(&entry.source.node, unit)
                                             .and_then(|receipt| receipt

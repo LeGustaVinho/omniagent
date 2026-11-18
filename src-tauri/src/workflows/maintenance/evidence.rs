@@ -292,7 +292,8 @@ pub(super) fn resolve(
     let review_input = load_attempt_input(db, &review_run_id)?
         .context("Candidate review inputs are unavailable")?;
     ensure!(
-        review_node.instance.kind == BuiltinNode::ReviewCandidate
+        review_node.instance.kind
+            == BuiltinNode::Archived(crate::workflows::ArchivedNode::ReviewCandidate)
             && review.unit_id.as_deref() == Some(unit.unit.id.as_str())
             && review_input.unit_id.as_deref() == Some(unit.unit.id.as_str()),
         "Review does not belong to the accepted candidate's logical unit"

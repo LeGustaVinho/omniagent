@@ -1,3 +1,5 @@
+use crate::workflows::ArchivedNode;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -92,7 +94,7 @@ pub(in crate::workflows) fn repair_instruction(
         })
         .filter_map(|wire| lookup(&definition, &wire.to.node))
         .filter(|node| {
-            node.instance.kind == BuiltinNode::VerifyCandidate
+            node.instance.kind == BuiltinNode::Archived(ArchivedNode::VerifyCandidate)
                 && verifies_repair(&definition, &node.instance.id)
         })
     {
@@ -131,16 +133,18 @@ pub(in crate::workflows) fn repair_instruction(
     };
     let Some(checks) = source(&ready.node, "value").filter(|checks| {
         checks.port == "checks"
-            && lookup(&definition, &checks.node)
-                .is_some_and(|node| node.instance.kind == BuiltinNode::VerifyCandidate)
+            && lookup(&definition, &checks.node).is_some_and(|node| {
+                node.instance.kind == BuiltinNode::Archived(ArchivedNode::VerifyCandidate)
+            })
     }) else {
         return Ok(None);
     };
     let previous_writer = source(&checks.node, "candidate")
         .filter(|writer| {
             writer.port == "candidate"
-                && lookup(&definition, &writer.node)
-                    .is_some_and(|node| node.instance.kind == BuiltinNode::Implement)
+                && lookup(&definition, &writer.node).is_some_and(|node| {
+                    node.instance.kind == BuiltinNode::Archived(ArchivedNode::Implement)
+                })
         })
         .context("Repair feedback has no pinned prior writer")?;
     let receipt = recorded_control(db, &run)?

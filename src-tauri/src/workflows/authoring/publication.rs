@@ -3,8 +3,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 
 use crate::workflows::{
-    NodeConfiguration, WorkflowDefinition, WorkflowRevision, command::validate_command_binding,
-    compile_resolved, digest, registry::supports_pinned_execution, runtime::load_definition,
+    WorkflowDefinition, WorkflowRevision, compile_resolved, digest,
+    registry::supports_pinned_execution, runtime::load_definition,
 };
 
 use super::{
@@ -81,14 +81,6 @@ impl Store {
                 ensure!(supports_pinned_execution(&node.definition),
                     "The pinned definition for {} is no longer supported. Review its available update before publishing.",
                     node.instance.id);
-                if let NodeConfiguration::Command(command) = &node.instance.configuration {
-                    validate_command_binding(&tx, &project, command)
-                        .with_context(|| format!("Could not resolve the Command binding for {}", node.instance.id))?;
-                }
-                if let NodeConfiguration::RunBacklog(config) = &node.instance.configuration {
-                    crate::workflows::backlog::execution::validate_child_binding(&tx, &project, config)
-                        .with_context(|| format!("Could not resolve the child workflow for {}", node.instance.id))?;
-                }
             }
             if !reviewed.layout.is_empty() {
                 // Include reviewed canvas content in identity without changing

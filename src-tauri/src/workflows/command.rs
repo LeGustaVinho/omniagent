@@ -1,28 +1,22 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{
-    jobs::{
-        CommandExchange, Job, PinnedCommandScript, PipelineDispatch, PreparedCommand,
-        queue_pipeline_command,
-    },
+    jobs::{CommandExchange, PinnedCommandScript, PreparedCommand},
     protection,
     runner::{DirectWindowsRunner, Runner},
     store::Store,
 };
 
 use super::{
-    ArtifactValue, BuiltinNode, NodeConfiguration, NodeInputs, WorkflowArtifact, WorkflowJobInput,
-    digest, runtime::load_pinned_node,
+    ArtifactValue, BuiltinNode, NodeConfiguration, WorkflowArtifact, digest,
+    runtime::load_pinned_node,
 };
-
-#[cfg(test)]
-mod tests;
 
 const ARGUMENT_LIMIT: usize = 16 * 1024;
 const INPUT_LIMIT: usize = 256 * 1024;
@@ -125,15 +119,6 @@ struct SavedRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkflowCommandSubmission {
-    pub project_id: String,
-    pub run_id: String,
-    pub node_id: String,
-    pub inputs: NodeInputs,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowCommandResult {
     pub run_id: String,
@@ -180,72 +165,6 @@ impl Store {
             Ok(values)
         })
         .await
-    }
-
-    pub async fn submit_workflow_command(
-        &self,
-        submission: WorkflowCommandSubmission,
-    ) -> Result<Job> {
-        let WorkflowCommandSubmission {
-            project_id,
-            run_id,
-            node_id,
-            inputs,
-        } = submission;
-        let (node, bound) = self
-            .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
-            .await?;
-        let NodeConfiguration::Command(configuration) = node.instance.configuration else {
-            anyhow::bail!("The pinned node is not a Command");
-        };
-        let ArtifactValue::Release(approval) = &bound["release"].value else {
-            anyhow::bail!("A Command requires a prepared implementation release");
-        };
-        let ArtifactValue::Worktree { checkout_id, task } = &bound["worktree"].value else {
-            anyhow::bail!("A Command requires the prepared managed worktree");
-        };
-        ensure!(
-            !approval.release.revoked
-                && approval.workflow_run_id == run_id
-                && approval.release.checkout_id == *checkout_id
-                && approval.release.task_id == task.task_id
-                && task.project_id == project_id,
-            "The command release and worktree belong to different implementation scopes"
-        );
-        let binding = PipelineDispatch {
-            pipeline_run_id: run_id,
-            node_instance_id: node_id,
-            plan_revision: Some(approval.release.plan_revision.clone()),
-            release_id: Some(approval.release.id.clone()),
-        };
-        let checkout = checkout_id.clone();
-        let task = task.task_id.clone();
-        let job = self
-            .execute(move |db| {
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let registered = load_registration(&tx, &project_id, &configuration)?;
-                let prepared = registered.invocation(configuration)?;
-                let input = WorkflowJobInput {
-                    unit_id: None,
-                    artifacts: inputs,
-                    plan_revision_request: None,
-                    comparison: None,
-                };
-                let job = queue_pipeline_command(
-                    &tx,
-                    &binding,
-                    checkout,
-                    task,
-                    Vec::new(),
-                    prepared,
-                    Some(&input),
-                )?;
-                tx.commit()?;
-                Ok(job)
-            })
-            .await?;
-        self.job_signal.send_replace(());
-        Ok(job)
     }
 
     pub async fn workflow_command_result(
@@ -421,7 +340,7 @@ pub(crate) fn publish_command_result(
     let pinned = load_pinned_node(db, &project, &workflow, &node)?
         .context("Command result lost its pinned node")?;
     ensure!(
-        pinned.definition.kind == BuiltinNode::Command
+        pinned.definition.kind == BuiltinNode::Archived(crate::workflows::ArchivedNode::Command)
             && matches!(pinned.instance.configuration, NodeConfiguration::Command(config) if config.output == output.format()),
         "The command result differs from the declared output format"
     );

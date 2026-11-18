@@ -21,7 +21,7 @@ pub async fn preview_workflow_goal_requalification(
     input: DeliveryAgentInput,
 ) -> Result<WorkflowGoalRequalification, String> {
     async {
-        let submission = delivery_agent_submission(&store, input, false).await?;
+        let submission = delivery_agent_submission(&store, input).await?;
         store
             .preview_workflow_goal_requalification(submission)
             .await
@@ -37,7 +37,7 @@ pub async fn submit_workflow_goal_requalification(
     review_token: String,
 ) -> Result<Job, String> {
     async {
-        let submission = delivery_agent_submission(&store, input, false).await?;
+        let submission = delivery_agent_submission(&store, input).await?;
         store
             .submit_workflow_goal_requalification(submission, review_token)
             .await

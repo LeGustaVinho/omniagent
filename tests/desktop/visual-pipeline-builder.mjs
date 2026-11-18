@@ -13,14 +13,14 @@ const timeout = 20_000;
 const builder = '[aria-label="Pipeline graph editor"]';
 const canvas = '[aria-label="Pipeline graph canvas"]';
 const start = "start";
-const load = "load-context";
-const condition = "condition";
-const loadNode = `.react-flow__node[data-id="${load}"]`;
-const control = { from: { node: start, port: "start" }, to: { node: load, port: "ready" } };
-const documentWire = { from: { node: start, port: "document" }, to: { node: load, port: "document" } };
-const conditionControl = { from: { node: load, port: "loaded" }, to: { node: condition, port: "ready" } };
-const conditionValue = { from: { node: load, port: "context" }, to: { node: condition, port: "value" } };
-const wires = [control, documentWire, conditionControl, conditionValue];
+const wait = "wait";
+const end = "end";
+const waitNode = `.react-flow__node[data-id="${wait}"]`;
+const waitReady = makeWire(start, "start", wait, "ready");
+const waitInput = makeWire(start, "inputs", wait, "input");
+const endReady = makeWire(wait, "completed", end, "ready");
+const endResult = makeWire(wait, "result", end, "result");
+const wires = [waitReady, waitInput, endReady, endResult];
 const wireLabel = ({ from, to }) => `${from.node}.${from.port} to ${to.node}.${to.port}`;
 const viewports = [[1440, 900], [1120, 760], [640, 440]];
 
@@ -114,11 +114,11 @@ async function nodePosition(browser, surface = canvas) {
     if (!element) return null;
     const transform = new DOMMatrixReadOnly(getComputedStyle(element).transform);
     return { x: transform.m41, y: transform.m42 };
-  }, `${surface} ${loadNode}`);
+  }, `${surface} ${waitNode}`);
 }
 
 function closePosition(actual, expected) {
-  assert.ok(actual && expected, "The Load context node must have a saved position");
+  assert.ok(actual && expected, "The Wait node must have a saved position");
   assert.ok(Math.abs(actual.x - expected.x) < 1 && Math.abs(actual.y - expected.y) < 1,
     `The restored canvas position differs from the saved position: ${JSON.stringify({ actual, expected })}`);
 }
@@ -176,7 +176,7 @@ async function fitGraph(browser, surface) {
           return { id, visible: header.contains(hit), x, y, graphTop: graphRect.top, graphHeight: graphRect.height,
             topElement: hit?.className?.toString() };
         });
-      }, surface, [start, load, condition]);
+      }, surface, [start, wait, end]);
       return cards.every(({ visible }) => visible);
     }, { timeout });
   } catch (error) {
@@ -196,8 +196,8 @@ async function verifyResponsiveView(browser, invoke, capture, emulateDisplay, { 
         await textIsVisible(browser, browser.$(compactToggle), "Show inspector");
         await pressEnter(browser, compactToggle);
       }
-      await select(panel, nodeLabel, load);
-      await textIsVisible(browser, panel.$(".pipeline-inspector-scroll > header:first-child h2"), "Load context");
+      await select(panel, nodeLabel, wait);
+      await textIsVisible(browser, panel.$(".pipeline-inspector-scroll > header:first-child h2"), "Wait");
       if (width === 640) await capture?.(browser, `${name}-${theme}-${width}x${height}-inspector`);
 
       const geometry = await browser.execute((graphSelector, inspectorSelector) => {
@@ -279,6 +279,7 @@ async function launchFromTask({ browser, invoke, capture, checkout, title, versi
   const inputs = launch.$('[aria-label="Start inputs"]');
   await select(inputs, "Checkout", checkoutId);
   await textIsVisible(browser, inputs.$(".pipeline-meta"), title);
+  await click(inputs.$(".//label[contains(normalize-space(.),'Include a Markdown revision')]/input"));
   const source = inputs.$('[aria-label="Repository Markdown source"]');
   await select(source, "Saved source revision", sourceRevision.id);
   await click(source.$("button=Start workflow"));
@@ -384,31 +385,32 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await browser.keys([Key.Shift, Key.F10]);
   const insertNode = browser.$('[role="dialog"]');
   await insertNode.$("button=AI Node Agent").waitForDisplayed({ timeout });
-  await insertNode.$("button=Parallel / Fork").waitForDisplayed({ timeout });
+  const choices = await insertNode.$$(".workflow-node-picker-list button");
+  assert.deepEqual(await Promise.all(choices.map((choice) => choice.getText())), [
+    "AI Node Agent", "Parallel / Fork", "Join", "Wait", "Loop", "Human in the Loop",
+  ]);
   await browser.keys("Escape");
   assert.equal(await editor.$('[aria-label="Add a reusable node"]').isExisting(), false);
   const seeded = await invoke(browser, "inspect_workflow_package", draftScope);
   const seedGraph = seeded.package.members[0].body.graph;
   assert.deepEqual(seedGraph.nodes.map(({ kind }) => kind), ["typed_start", "end"]);
   assert.deepEqual(seedGraph.wires, [{ from: { node: "start", port: "start" }, to: { node: "end", port: "ready" } }]);
-  seedGraph.nodes = seedGraph.nodes.filter(({ kind }) => kind !== "end");
+  seedGraph.nodes.splice(1, 0, { id: wait, kind: "wait", configuration: {
+    kind: "wait", until: { kind: "delay", seconds: 60 },
+  } });
   seedGraph.wires = [];
-  seedGraph.nodes.push(
-    { id: load, kind: "load_context", configuration: { kind: "none" } },
-    { id: condition, kind: "condition", configuration: { kind: "condition", predicate: { op: "exists", pointer: "" } } },
-  );
   const initial = await invoke(browser, "save_workflow_package", {
     ...draftScope, expectedRevision: seeded.revision, package: seeded.package,
   });
   await browser.refresh();
   await openBuilder(browser);
   await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
-  await browser.$(`${canvas} ${loadNode}`).waitForDisplayed({ timeout });
+  await browser.$(`${canvas} ${waitNode}`).waitForDisplayed({ timeout });
   await browser.$(canvas).scrollIntoView({ block: "end" });
   await click(browser.$(`${canvas} .react-flow__controls-fitview`));
 
   const initialPosition = await nodePosition(browser);
-  const position = await locate(browser, `${canvas} ${loadNode} header`);
+  const position = await locate(browser, `${canvas} ${waitNode} header`);
   const destination = await browser.execute((selector, origin) => {
     const graph = window.document.querySelector(selector);
     const rect = graph.getBoundingClientRect();
@@ -422,30 +424,30 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await browser.waitUntil(async () => {
     const current = await nodePosition(browser);
     return current && Math.abs(current.x - initialPosition.x) + Math.abs(current.y - initialPosition.y) > 8;
-  }, { timeout, timeoutMsg: "Dragging Load context did not move its canvas position" });
+  }, { timeout, timeoutMsg: "Dragging Wait did not move its canvas position" });
   const positioned = await nodePosition(browser);
   await click(browser.$(`${canvas} .react-flow__controls-fitview`));
   // Leave room for the pointer outside the canvas's edge-panning zones during the connection.
   await click(browser.$(`${canvas} .react-flow__controls-zoomout`));
 
-  await drag(browser, await locate(browser, handle(start, "start")), await locate(browser, handle(load, "ready")));
-  await browser.$(edge(control)).waitForDisplayed({ timeout });
-  await connectByKeyboard(browser, documentWire);
-  await browser.$(edge(documentWire)).waitForDisplayed({ timeout });
+  await drag(browser, await locate(browser, handle(start, "start")), await locate(browser, handle(wait, "ready")));
+  await browser.$(edge(waitReady)).waitForDisplayed({ timeout });
+  await connectByKeyboard(browser, waitInput);
+  await browser.$(edge(waitInput)).waitForDisplayed({ timeout });
 
-  await select(editor.$('[aria-label="Node configuration"]'), "Inspect node", condition);
-  const incompatible = { from: { node: start, port: "document" }, to: { node: condition, port: "ready" } };
+  const incompatible = makeWire(start, "document", end, "ready");
   await connectByKeyboard(browser, incompatible);
   const connectionError = editor.$('[role="alert"]');
-  await textIsVisible(browser, connectionError, "start.document (markdown) cannot connect to condition.ready (Control)");
+  await textIsVisible(browser, connectionError, "start.document (markdown) cannot connect to end.ready (Control)");
   assert.equal(await browser.$(edge(incompatible)).isExisting(), false);
   await connectionError.scrollIntoView({ block: "center" });
   await capture?.(browser, "visual-pipeline-incompatible-ports");
-  await connectByKeyboard(browser, conditionControl);
-  await browser.$(edge(conditionControl)).waitForDisplayed({ timeout });
-  await connectByKeyboard(browser, conditionValue);
-  await browser.$(edge(conditionValue)).waitForDisplayed({ timeout });
-  await replaceText(browser, editor.$(".//label[normalize-space(.)='Field path']/input"), "/evidence/relativePath");
+  await connectByKeyboard(browser, endReady);
+  await browser.$(edge(endReady)).waitForDisplayed({ timeout });
+  await connectByKeyboard(browser, endResult);
+  await browser.$(edge(endResult)).waitForDisplayed({ timeout });
+  await select(editor.$('[aria-label="Node configuration"]'), "Inspect node", wait);
+  await replaceText(browser, editor.$(".//label[normalize-space(.)='Delay (seconds)']/input"), "1");
 
   await fitGraph(browser, canvas);
   await capture?.(browser, "visual-pipeline-edited");
@@ -459,19 +461,18 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const graph = saved.package.members.find(({ key }) => key === "pipeline").body.graph;
   assert.equal(graph.name, title);
   assert.deepEqual(graph.nodes.map(({ id, kind }) => ({ id, kind })), [
-    { id: start, kind: "typed_start" }, { id: load, kind: "load_context" }, { id: condition, kind: "condition" },
+    { id: start, kind: "typed_start" }, { id: wait, kind: "wait" }, { id: end, kind: "end" },
   ]);
-  assert.deepEqual(graph.nodes.find(({ id }) => id === condition).configuration.predicate,
-    { op: "exists", pointer: "/evidence/relativePath" });
+  assert.deepEqual(graph.nodes.find(({ id }) => id === wait).configuration.until, { kind: "delay", seconds: 1 });
   assertWires(graph.wires);
-  closePosition(saved.layouts.pipeline[load], positioned);
+  closePosition(saved.layouts.pipeline[wait], positioned);
 
   browser = await restart(browser);
   await openBuilder(browser);
   await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
   await browser.$(builder).waitForDisplayed({ timeout });
   for (const wire of wires) await browser.$(edge(wire)).waitForDisplayed({ timeout });
-  closePosition(await nodePosition(browser), saved.layouts.pipeline[load]);
+  closePosition(await nodePosition(browser), saved.layouts.pipeline[wait]);
   assert.equal((await invoke(browser, "inspect_workflow_package", draftScope)).revision, saved.revision);
   await capture?.(browser, "visual-pipeline-restored");
   await verifyResponsiveView(browser, invoke, capture, emulateDisplay, {
@@ -504,6 +505,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await select(published, "Published workflow revision", JSON.stringify([id, revision]));
   const startInputs = published.$('[aria-label="Start inputs"]');
   await select(startInputs, "Checkout", checkoutId);
+  await click(startInputs.$(".//label[contains(normalize-space(.),'Include a Markdown revision')]/input"));
   const source = startInputs.$('[aria-label="Repository Markdown source"]');
   await chooseMarkdown(application, source.$("button=Select Markdown file"), file);
   let sourceRevision;
@@ -525,13 +527,13 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const execution = browser.$('[aria-label="Pinned workflow execution"]');
   await textIsVisible(browser, execution, revision);
   const nodeEvidence = execution.$('[aria-label="Execution node evidence"]');
-  await select(nodeEvidence, "Inspect execution node", load);
-  await textIsVisible(browser, nodeEvidence, "Completed");
+  await select(nodeEvidence, "Inspect execution node", end);
+  await textIsVisible(browser, nodeEvidence, "Selected ports · completed");
   const snapshot = await invoke(browser, "inspect_workflow_execution", { projectId, runId: run.id });
   assert.deepEqual(snapshot.run.version, version);
-  closePosition(snapshot.layout[load], saved.layouts.pipeline[load]);
+  closePosition(snapshot.layout[wait], saved.layouts.pipeline[wait]);
   const executionCanvas = '[aria-label="Workflow execution graph"]';
-  closePosition(await nodePosition(browser, executionCanvas), saved.layouts.pipeline[load]);
+  closePosition(await nodePosition(browser, executionCanvas), saved.layouts.pipeline[wait]);
   assert.equal(snapshot.launch.checkoutId, checkoutId);
   assert.equal(snapshot.launch.source.id, sourceRevision.id);
   assert.equal(snapshot.launch.source.sha256, sourceRevision.sha256);
@@ -541,16 +543,19 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   assertWires(snapshot.definition.wires);
   const startOutput = snapshot.outputs.find(({ current, artifact }) =>
     current && artifact.nodeInstanceId === start && artifact.port === "document");
-  const context = snapshot.outputs.find(({ current, artifact }) =>
-    current && artifact.nodeInstanceId === load && artifact.port === "context");
   assert.equal(startOutput.artifact.value.evidence.id, sourceRevision.id);
-  assert.deepEqual(context.artifact.value, startOutput.artifact.value);
-  assert.equal(context.inputReceipts[0].inputs.document, startOutput.artifact.id);
-  const branch = snapshot.control.find(({ nodeId }) => nodeId === condition);
-  assert.equal(branch.state, "completed");
-  assert.deepEqual(branch.selectedPorts, ["matched"]);
-  await select(nodeEvidence, "Inspect execution node", condition);
-  await textIsVisible(browser, nodeEvidence, "Selected ports · matched");
+  const inputsOutput = snapshot.outputs.find(({ current, artifact }) =>
+    current && artifact.nodeInstanceId === start && artifact.port === "inputs");
+  const waitOutput = snapshot.outputs.find(({ current, artifact }) =>
+    current && artifact.nodeInstanceId === wait && artifact.port === "result");
+  const endOutput = snapshot.outputs.find(({ current, artifact }) =>
+    current && artifact.nodeInstanceId === end && artifact.port === "result");
+  assert.deepEqual(waitOutput.artifact.value, inputsOutput.artifact.value);
+  assert.deepEqual(endOutput.artifact.value, waitOutput.artifact.value);
+  assert.equal(waitOutput.inputReceipts[0].inputs.input, inputsOutput.artifact.id);
+  assert.equal(endOutput.inputReceipts[0].inputs.result, waitOutput.artifact.id);
+  await select(nodeEvidence, "Inspect execution node", wait);
+  await textIsVisible(browser, nodeEvidence, "Selected ports · completed");
   assert.equal(snapshot.jobs.length, 0);
   await fitGraph(browser, executionCanvas);
   await capture?.(browser, "visual-pipeline-real-run");
@@ -562,33 +567,23 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const chatTitle = `Conversation template for ${title}`;
   const chatDraft = await invoke(browser, "create_workflow_package", {
     projectId, package: { name: chatTitle, members: [
-      { key: "chat-input", name: "Conversation message", body: { kind: "schema", fields: [
+      { key: "chat-turn", name: "Conversation turn", body: { kind: "schema", fields: [
         { name: "message", type: "string", required: true },
-      ] } },
-      { key: "chat-output", name: "Conversation reply", body: { kind: "schema", fields: [
         { name: "reply", type: "string", required: true },
       ] } },
       { key: "pipeline", name: chatTitle, references: {
-        "start:schema": { source: "draft", key: "chat-input" },
-        "checked:schema": { source: "draft", key: "chat-output" },
-        "end:schema": { source: "draft", key: "chat-output" },
+        "start:schema": { source: "draft", key: "chat-turn" },
+        "end:schema": { source: "draft", key: "chat-turn" },
       }, body: { kind: "pipeline", graph: { name: chatTitle, nodes: [
         { id: "start", kind: "typed_start", configuration: { kind: "typed_start", conversation: true, fields: [] } },
-        { id: "context", kind: "load_context", configuration: { kind: "none" } },
         { id: "feedback", kind: "human", configuration: { kind: "human", interaction: "feedback", message: "Add a note about this revision", fields: [
           { id: "note", label: "Review note", required: true, input: { kind: "text" } },
         ] } },
-        { id: "answer", kind: "set_fields", configuration: { kind: "set_fields", mode: "build", operations: [
-          { op: "set", path: "/reply", value: { source: "literal", value: "Loaded the chosen Markdown revision." } },
-        ] } },
-        { id: "checked", kind: "validate_output", configuration: { kind: "validate_output", schema: { type: "object" } } },
         { id: "end", kind: "end", configuration: { kind: "end" } },
       ], wires: [
-        makeWire("start", "start", "context", "ready"), makeWire("start", "document", "context", "document"),
-        makeWire("context", "loaded", "feedback", "ready"), makeWire("feedback", "answered", "answer", "ready"),
-        makeWire("answer", "completed", "checked", "ready"),
-        makeWire("answer", "object", "checked", "source"), makeWire("checked", "completed", "end", "ready"),
-        makeWire("checked", "object", "end", "result"),
+        makeWire(start, "start", "feedback", "ready"),
+        makeWire("feedback", "answered", end, "ready"),
+        makeWire(start, "inputs", end, "result"),
       ] } } },
     ] },
   });
@@ -612,7 +607,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const chat = browser.$(`section[aria-label=${JSON.stringify(conversation.title)}]`);
   const composer = chat.$('textarea[id^="draft-"]');
   const turns = () => invoke(browser, "conversation_pipeline_turns", { conversationId: conversation.id });
-  const reply = "Loaded the chosen Markdown revision.";
+  const reply = "Recorded the requested feedback.";
   async function finishWaitingTurn(index) {
     await click(chat.$("button=Open waiting step"));
     const execution = browser.$('[aria-label="Pinned workflow execution"]');
@@ -620,7 +615,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     const feedback = graph.$('.react-flow__node[data-id="feedback"]');
     const end = graph.$('.react-flow__node[data-id="end"]');
     await feedback.$('[data-status="waiting"]').waitForDisplayed({ timeout });
-    const form = execution.$('[aria-label="Workflow input request"]');
+    const form = execution.$('[aria-label="Workflow feedback"]');
     const note = `Note for turn ${index + 1}`;
     await replaceText(browser, form.$('input[type="text"]'), note);
     await click(form.$("button=Send feedback"));
@@ -642,6 +637,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await click(chat.$("button=Choose inputs"));
   const chatInputs = browser.$('.conversation-pipeline-dialog[role="dialog"]');
   await select(chatInputs, "Saved Markdown revision", sourceRevision.id);
+  await replaceText(browser, chatInputs.$(".//label[normalize-space(.)='reply']/input"), reply);
   await click(chatInputs.$("button=Send with these inputs"));
   await finishWaitingTurn(0);
   await replaceText(browser, composer, "Use the same revision again.");
@@ -649,6 +645,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await finishWaitingTurn(1);
   const attempts = await turns();
   assert.deepEqual(attempts.map(({ inputs }) => inputs.documentRevisionId), [sourceRevision.id, sourceRevision.id]);
+  assert.deepEqual(attempts.map(({ inputs }) => inputs.values.reply), [reply, reply]);
   assert.notEqual(attempts[0].runId, attempts[1].runId);
   for (const { runId } of attempts) {
     const attempt = await invoke(browser, "inspect_workflow_execution", { projectId, runId });
@@ -676,7 +673,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
       return directTurn?.state === "succeeded";
     }, { timeout, timeoutMsg: "The direct conversation did not reach End" });
     const directRun = await invoke(browser, "inspect_workflow_execution", { projectId, runId: directTurn.runId });
-    assert.deepEqual(directRun.definition.nodes.map(({ instance }) => instance.kind), ["typed_start", "conversation_agent", "end"]);
+    assert.deepEqual(directRun.definition.nodes.map(({ instance }) => instance.kind), ["typed_start", "agent", "end"]);
     assert.ok(directRun.control.some(({ nodeId, state }) => nodeId === "end" && state === "completed"));
     await browser.refresh();
     await click(browser.$('button[aria-label="Conversations"]'));
@@ -702,52 +699,6 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     assert.deepEqual(target?.pipeline.workflow, chatVersion);
     assert.equal(await invoke(browser, "conversation_draft", directScope), "");
     assert.deepEqual(await invoke(browser, "conversation_pipeline_turns", { conversationId: target.id }), []);
-
-    const agentTitle = "Pinned agent chat";
-    const agentDraft = await invoke(browser, "create_workflow_package", {
-      projectId, package: { name: agentTitle, members: [{ key: "pipeline", name: agentTitle, body: {
-        kind: "pipeline", graph: { name: agentTitle, nodes: [
-          { id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
-          { id: "prompt", kind: "build_text", configuration: { kind: "build_text", template: "Run the revised queued instruction" } },
-          { id: "reader", kind: "agent", configuration: { kind: "agent_role", role: "Reader", model: model.option.selection } },
-        ], wires: [
-          makeWire("start", "start", "prompt", "ready"),
-          makeWire("prompt", "completed", "reader", "ready"),
-          makeWire("prompt", "text", "reader", "prompt"),
-        ] },
-      } }] },
-    });
-    const publishedAgent = await invoke(browser, "publish_reviewed_workflow_package", {
-      projectId, draftId: agentDraft.id, reviewedRevision: agentDraft.revision,
-    });
-    const pin = publishedAgent.publication.members[0].artifact.version;
-    const agentChat = await invoke(browser, "create_conversation", {
-      checkoutId, title: agentTitle, pipeline: { kind: "published", workflow: { id: pin.id, revision: pin.revision } },
-    });
-    await click(browser.$(`section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(agentTitle)}]`));
-    const agentPanel = browser.$(`section[aria-label=${JSON.stringify(agentTitle)}]`);
-    const agentMessage = "Use this exact additional conversation context.";
-    await replaceText(browser, agentPanel.$('textarea[id^="draft-"]'), agentMessage);
-    await click(agentPanel.$("button=Run pipeline"));
-    let agentTurn;
-    await browser.waitUntil(async () => {
-      [agentTurn] = await invoke(browser, "conversation_pipeline_turns", { conversationId: agentChat.id });
-      return agentTurn?.state === "succeeded";
-    }, { timeout, timeoutMsg: "The pinned workflow Agent did not complete the conversation turn" });
-    await textIsVisible(browser, agentPanel, "The revised instruction ran.");
-    const agentRun = await invoke(browser, "inspect_workflow_execution", { projectId, runId: agentTurn.runId });
-    assert.deepEqual(agentRun.run.version, { id: pin.id, revision: pin.revision });
-    const readerJobs = agentRun.jobs.filter(({ nodeId }) => nodeId === "reader");
-    assert.equal(readerJobs.length, 1);
-    const attempt = readerJobs[0].attempts[0];
-    const input = await invoke(browser, "conversation_input", { conversationId: attempt.conversationId, runId: attempt.runId });
-    assert.ok(input.frames.some((frame) => frame.includes(agentMessage)));
-    const response = agentTurn.artifacts.find(({ kind }) => kind === "agent_response");
-    assert.equal(response.nodeId, "reader");
-    await click(agentPanel.$(`.//button[contains(normalize-space(.),'${response.port} · agent response')]`));
-    const agentEvidence = browser.$('[aria-label="Execution node evidence"]');
-    await textIsVisible(browser, agentEvidence, "Read recorded agent response");
-    await capture?.(browser, "real-pipeline-agent-chat-evidence");
   } finally {
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: configured.executable });
   }
@@ -756,103 +707,107 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
 
 export async function verifyVisualPromptBuilder({ browser, checkout, invoke, capture }) {
   const { projectId, checkoutId } = checkout;
-  const title = "Prompt delivery " + randomUUID().slice(0, 8);
-  const roles = (await invoke(browser, "conversation_models", { provider: "codex" }))
+  const title = "Typed AI pipeline " + randomUUID().slice(0, 8);
+  const models = (await invoke(browser, "conversation_models", { provider: "codex" }))
     .filter(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
-  assert.equal(roles.length, 1, "The test needs the fixture Role model");
-  const fixture = roles[0].option;
+  assert.equal(models.length, 1, "The test needs the fixture Role model");
+  const reference = (key) => ({ source: "draft", key });
+  const schema = (key, name, fields) => ({ key, name, body: { kind: "schema", fields } });
+  const agent = (key, name, inputSchema, outputSchema) => ({
+    key, name,
+    body: { kind: "prompt", prompt: { text: "Draft instructions.", executor: "agent", schemaContract: true } },
+    references: {
+      role: reference("fixture-role"), input_schema: reference(inputSchema), output_schema: reference(outputSchema),
+    },
+  });
   const packageDocument = {
     name: title,
     members: [
-      { key: "pipeline", name: title, body: { kind: "pipeline", graph: {
-        name: title, nodes: [{ id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } }], wires: [],
+      { key: "pipeline", name: title, references: {
+        "start:schema": reference("request"), "end:schema": reference("reply"),
+        prompt: reference("first-agent"), "prompt-2": reference("second-agent"),
+      }, body: { kind: "pipeline", graph: { name: title, nodes: [
+        { id: start, kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+        { id: "prompt", kind: "subflow", configuration: { kind: "none" } },
+        { id: "prompt-2", kind: "subflow", configuration: { kind: "none" } },
+        { id: end, kind: "end", configuration: { kind: "end" } },
+      ], wires: [] } } },
+      schema("request", "Desktop request", []),
+      schema("summary", "Review summary", [{ name: "summary", type: "string", required: true }]),
+      schema("reply", "Final reply", [{ name: "reply", type: "string", required: true }]),
+      { key: "fixture-role", name: "Desktop analyst", body: { kind: "role", template: {
+        name: "Desktop analyst", role: "pipeline", model: models[0].option.selection, effort: null,
+        instructions: "Read the supplied test inputs.", toolScope: "read_only",
+        completionContract: "Return the requested result.", reviewPolicy: "independent",
       } } },
+      agent("first-agent", "First agent", "request", "summary"),
+      agent("second-agent", "Second agent", "summary", "reply"),
     ],
   };
   const created = await invoke(browser, "create_workflow_package", {
     projectId, conversationId: null, package: packageDocument,
   });
-  const draftId = created.id;
-  packageDocument.members.push({ key: "fixture-role", name: "Desktop analyst", body: { kind: "role", template: {
-    name: "Desktop analyst", role: "pipeline", model: fixture.selection, effort: null,
-    instructions: "Read the supplied test inputs.", toolScope: "read_only",
-    completionContract: "Return the requested result.", reviewPolicy: "independent",
-  } } });
-  const initialPipeline = packageDocument.members[0];
-  initialPipeline.references = {};
-  for (const id of ["prompt", "prompt-2"]) {
-    const key = id + "-card";
-    initialPipeline.body.graph.nodes.push({ id, kind: "subflow", configuration: { kind: "none" } });
-    initialPipeline.references[id] = { source: "draft", key };
-    packageDocument.members.push({
-      key, name: id, destination: "project",
-      body: { kind: "prompt", prompt: { text: "Review the candidate.", executor: "agent", inputs: {}, outputs: {}, routes: ["concluido"], delegates: [] } },
-      references: { role: { source: "draft", key: "fixture-role" } },
-    });
-  }
-  const { revision: initialRevision } = await invoke(browser, "save_workflow_package", {
-    projectId, draftId, expectedRevision: created.revision, package: packageDocument,
-  });
-  const draftScope = { projectId, draftId };
+  const draftScope = { projectId, draftId: created.id };
   await setWindow(browser, invoke, 1440, 900);
   await openBuilder(browser);
   await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
   const editor = browser.$(builder);
   const inspector = editor.$('[aria-label="Node configuration"]');
-  const promptSettings = inspector.$('[aria-label="Prompt settings"]');
+  const promptSettings = inspector.$('[aria-label="AI Node Agent settings"]');
+  const promptText = promptSettings.$(".//label[starts-with(normalize-space(.), 'Prompt')]/textarea");
+  const evaluator = "Evaluate the desktop workflow input.";
+  const summarizer = "Summarize the desktop workflow result: {{input.summary}}";
   await select(inspector, "Inspect node", "prompt");
   await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Evaluate changes");
-  const promptText = promptSettings.$('textarea[placeholder="Describe the work and expected result."]');
-  await replaceText(browser, promptText, "Evaluate the desktop prompt fixture.");
-  await click(promptSettings.$("summary*=Inputs and outputs"));
-  await click(promptSettings.$("button=Suggest with AI"));
-  const suggestion = browser.$('[role="dialog"].workflow-builder-dialog');
-  await click(suggestion.$('button[aria-label="Suggestion model · Choose model"]'));
-  await click(browser.$(`.model-picker-menu [role="menuitemradio"][aria-label=${JSON.stringify(fixture.name)}]`));
-  await click(suggestion.$("button=Request suggestions"));
-  await textIsVisible(browser, suggestion.$('[aria-label="Proposed Prompt contract"]'), "review, deliver");
-  await click(suggestion.$("button=Apply proposed contract"));
-  await suggestion.waitForDisplayed({ timeout, reverse: true });
-
+  await replaceText(browser, promptText, evaluator);
   await select(inspector, "Inspect node", "prompt-2");
   await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Read summary");
-  await replaceText(browser, promptText, "Read the desktop prompt fixture summary.");
-  await click(promptSettings.$("summary*=Inputs and outputs"));
-  await click(promptSettings.$("button=Add input"));
-  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Input 1 name']/input"), "summary");
-  await browser.keys("Enter");
-  await select(promptSettings, "Type for summary", "rendered_text");
-  await click(promptSettings.$("summary*=Inputs and outputs"));
+  await replaceText(browser, promptText, summarizer);
 
-  const first = makeWire("start", "start", "prompt", "ready");
-  const reviewed = makeWire("prompt", "review", "prompt-2", "ready");
-  const data = makeWire("prompt", "summary", "prompt-2", "summary");
+  const first = makeWire(start, "start", "prompt", "ready");
+  const input = makeWire(start, "inputs", "prompt", "input");
+  const next = makeWire("prompt", "completed", "prompt-2", "ready");
+  const data = makeWire("prompt", "result", "prompt-2", "input");
+  const finish = makeWire("prompt-2", "completed", end, "ready");
+  const result = makeWire("prompt-2", "result", end, "result");
   await connectByKeyboard(browser, first);
-  await connectByKeyboard(browser, reviewed);
+  await connectByKeyboard(browser, input);
+  await connectByKeyboard(browser, next);
   const hints = editor.$('[aria-label="Suggested data connections"]');
   await hints.waitForDisplayed({ timeout });
   assert.equal(await browser.$(edge(data)).isExisting(), false, "A suggested data wire needs confirmation");
-  await click(hints.$("button*=summary"));
-  for (const wire of [first, reviewed, data]) await browser.$(edge(wire)).waitForDisplayed({ timeout });
+  await click(hints.$("button*=result"));
+  await connectByKeyboard(browser, finish);
+  await connectByKeyboard(browser, result);
+  const expectedWires = [first, input, next, data, finish, result].map(wireLabel).sort();
+  for (const wire of [first, input, next, data, finish, result]) await browser.$(edge(wire)).waitForDisplayed({ timeout });
   await capture?.(browser, "visual-prompt-contract");
 
+  const prefabName = "Reusable desktop evaluator";
+  await select(inspector, "Inspect node", "prompt");
+  await click(promptSettings.$("button=Save as Node Prefab"));
+  const prefabDialog = browser.$('[role="dialog"]');
+  await replaceText(browser, prefabDialog.$(".//label[normalize-space(.)='Prefab name']/input"), prefabName);
+  await click(prefabDialog.$("button=Add to draft artifacts"));
   await click(browser.$("button=Save draft revision"));
   let saved;
   await browser.waitUntil(async () => {
     saved = await invoke(browser, "inspect_workflow_package", draftScope);
-    return saved.revision !== initialRevision;
+    return saved.revision !== created.revision;
   }, { timeout });
   const authored = saved.package.members.filter(({ body }) => body.kind === "prompt");
-  assert.deepEqual(authored.map(({ name }) => name), ["Evaluate changes", "Read summary"]);
-  assert.deepEqual(authored[0].body.prompt.routes, ["review", "deliver"]);
-  assert.deepEqual(authored[1].body.prompt.inputs, { summary: { kind: "rendered_text" } });
-  assert.deepEqual(saved.package.members[0].body.graph.wires.map(wireLabel).sort(), [first, reviewed, data].map(wireLabel).sort());
+  assert.deepEqual(authored.map(({ name }) => name).sort(), ["Evaluate changes", "Read summary", prefabName].sort());
+  const firstAgent = authored.find(({ key }) => key === "first-agent");
+  const secondAgent = authored.find(({ key }) => key === "second-agent");
+  assert.equal(firstAgent.body.prompt.text, evaluator);
+  assert.equal(secondAgent.body.prompt.text, summarizer);
+  assert.equal(authored.find(({ name }) => name === prefabName).body.prompt.nodePrefab, true);
+  assert.deepEqual(saved.package.members[0].body.graph.wires.map(wireLabel).sort(), expectedWires);
   const previousQueue = (await invoke(browser, "project_job_queue", { projectId })).jobs;
 
   const review = await reviewSavedRevision(browser, saved);
   const artifacts = review.$(".//label[starts-with(normalize-space(.), 'Review artifact')]/select");
-  await artifacts.selectByAttribute("value", authored[0].key);
-  await review.$("summary=Changes and dependencies").waitForDisplayed({ timeout });
+  await artifacts.selectByAttribute("value", firstAgent.key);
   await click(review.$("summary=Dependencies"));
   await textIsVisible(browser, review, "Draft fixture-role");
   assert.deepEqual((await invoke(browser, "project_job_queue", { projectId })).jobs, previousQueue);
@@ -874,21 +829,23 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   const execution = browser.$('[aria-label="Pinned workflow execution"]');
   await execution.waitForDisplayed({ timeout });
   const nodeEvidence = execution.$('[aria-label="Execution node evidence"]');
-  await select(nodeEvidence, "Inspect execution node", "prompt::execute");
-  const promptRun = nodeEvidence.$('[aria-label="Prompt route and invited Roles"]');
-  await textIsVisible(browser, promptRun, "Route · review");
-  await textIsVisible(browser, promptRun, "The desktop fixture chose review.");
+  await select(nodeEvidence, "Inspect execution node", "prompt-2");
+  await textIsVisible(browser, nodeEvidence.$('[aria-label="Result on result"]'), "The desktop fixture read the summary.");
+  await select(nodeEvidence, "Inspect execution node", end);
+  await textIsVisible(browser, nodeEvidence, "Selected ports · completed");
   const runs = await invoke(browser, "list_repository_deliveries", { projectId });
   const launched = runs.find(({ version }) => version.id === pipeline.id && version.revision === pipeline.revision);
-  assert.ok(launched, "The accepted Prompt revision must be launched");
+  assert.ok(launched, "The published AI pipeline must be launched");
   const snapshot = await invoke(browser, "inspect_workflow_execution", { projectId, runId: launched.id });
   assert.equal(snapshot.launch.automatic, true);
-  const outcome = snapshot.outputs.find(({ current, artifact }) => current && artifact.nodeInstanceId === "prompt::outcome"
-    && artifact.port === "outcome");
-  assert.equal(outcome?.artifact.value.evidence.route, "review");
+  assert.deepEqual(snapshot.definition.subflows.map(({ path }) => path).sort(), ["prompt", "prompt-2"]);
+  const recordedResult = snapshot.outputs.find(({ current, artifact }) =>
+    current && artifact.nodeInstanceId === end && artifact.port === "result");
+  assert.deepEqual(recordedResult?.artifact.value.evidence, { reply: "The desktop fixture read the summary." });
+  assert.equal(snapshot.jobs.filter(({ nodeId }) => nodeId.endsWith("::execute")).length, 2);
   await capture?.(browser, "visual-prompt-run");
 
-  const promptVersion = publication.members.find(({ artifact }) => artifact.name === "Evaluate changes").artifact.version;
+  const prefabVersion = publication.members.find(({ artifact }) => artifact.name === prefabName).artifact.version;
   const reuseTitle = title + " reuse";
   await openBuilder(browser);
   await click(browser.$("button=New pipeline"));
@@ -901,32 +858,21 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   await reuseEditor.waitForDisplayed({ timeout });
   const fresh = (await invoke(browser, "list_workflow_packages", { projectId })).find(({ name }) => name === reuseTitle);
   assert.ok(fresh, "The reuse case needs a separate pipeline draft");
-  const reuseScope = { projectId, draftId: fresh.id };
-  const reuseDraft = await invoke(browser, "inspect_workflow_package", reuseScope);
-  const reusePipeline = reuseDraft.package.members[0];
-  reusePipeline.body.graph.nodes.push({ id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } });
-  reusePipeline.references = { "reusable-subflow": { source: "published", version: promptVersion } };
-  const pinnedDraft = await invoke(browser, "save_workflow_package", {
-    ...reuseScope, expectedRevision: reuseDraft.revision, package: reuseDraft.package,
-  });
-  await browser.refresh();
-  await openBuilder(browser);
-  await click(browser.$(`.//li[.//strong[normalize-space(.)='${reuseTitle}']]//button[normalize-space(.)='Open visual draft']`));
+  await click(reuseEditor.$("button=Add node"));
+  const addNode = browser.$('[role="dialog"]');
+  await click(addNode.$(`.//button[starts-with(normalize-space(.), '${prefabName}')]`));
   const reuseInspector = reuseEditor.$('[aria-label="Node configuration"]');
-  await reuseInspector.$(".//select/option[@value='reusable-subflow']").waitForExist({ timeout });
-  await select(reuseInspector, "Inspect node", "reusable-subflow");
-  const pinnedPrompt = reuseInspector.$('[aria-label="Prompt settings"] textarea[placeholder="Describe the work and expected result."]');
+  const pinnedPrompt = reuseInspector.$('[aria-label="AI Node Agent settings"] textarea');
   await pinnedPrompt.waitForDisplayed({ timeout });
-  assert.equal(await pinnedPrompt.getValue(), "Evaluate the desktop prompt fixture.");
-  assert.equal(await pinnedPrompt.isEnabled(), false);
-  await connectByKeyboard(browser, makeWire("start", "start", "reusable-subflow", "ready"));
+  assert.equal(await pinnedPrompt.getValue(), evaluator);
+  await textIsVisible(browser, reuseInspector, "Inherited prompt");
   await click(browser.$("button=Save draft revision"));
   let reused;
   await browser.waitUntil(async () => {
     reused = await invoke(browser, "inspect_workflow_package", { projectId, draftId: fresh.id });
-    return reused.revision !== pinnedDraft.revision;
+    return reused.revision !== fresh.revision;
   }, { timeout });
-  assert.equal(reused.package.members.length, 1, "Reusing a published Prompt keeps its own immutable artifact");
-  assert.deepEqual(reused.package.members[0].references["reusable-subflow"], { source: "published", version: promptVersion });
+  assert.equal(reused.package.members.length, 1, "Reusing a Node Prefab keeps its own immutable artifact");
+  assert.deepEqual(reused.package.members[0].references.subflow, { source: "published", version: prefabVersion });
   await capture?.(browser, "visual-prompt-reused");
 }

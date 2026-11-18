@@ -1,395 +1,18 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, params};
 
-use crate::{
-    protection,
-    repository::{self, ManagedWorktree, RepositoryMarkdownRevision},
-    store::Store,
-    tasks::{TaskPlacement, insert_project_work, pipeline_work_origin},
-};
+use crate::store::Store;
 
 use super::{
-    ApprovalDecision, ArtifactValue, Executor, NodeConfiguration, PinnedNode, PortType,
-    TaskReference, WorkflowApprovalSubmission, WorkflowArtifact, WorkflowPlanUnit,
-    approval::{issue_prepared_release, require_active_decision, require_current_plan},
-    artifacts::insert_artifact,
-    digest,
+    ArtifactValue, PinnedNode, PortType, WorkflowArtifact, approval::require_active_decision,
     registry::supports_pinned_execution,
 };
 
 pub type NodeInputs = BTreeMap<String, String>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "action",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum WorkflowHostRequest {
-    Start {
-        document: RepositoryMarkdownRevision,
-    },
-    LoadContext,
-    ReadGit(super::diff::GitSelection),
-    VerifyReviewDiff,
-    PublishDiffReport,
-    LinkExistingTask {
-        task_id: String,
-    },
-    CreateTask {
-        title: String,
-    },
-    ApproveImplementation,
-    PrepareWorktree {
-        default_root: PathBuf,
-    },
-}
-
-pub struct WorkflowHostSubmission {
-    pub project_id: String,
-    pub run_id: String,
-    pub node_id: String,
-    pub inputs: NodeInputs,
-    pub request: WorkflowHostRequest,
-}
-
-enum HostAction {
-    Publish(&'static str, ArtifactValue),
-    CreateTask(String),
-    Prepare {
-        decision: ApprovalDecision,
-        artifact_id: String,
-        worktree: ManagedWorktree,
-        units: Vec<WorkflowPlanUnit>,
-    },
-}
-
 impl Store {
-    pub async fn execute_workflow_host(
-        &self,
-        submission: WorkflowHostSubmission,
-    ) -> Result<WorkflowArtifact> {
-        self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
-            self.resolve_workflow_github_base(project, checkout, destination)
-        })
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn execute_workflow_host_with_github(
-        &self,
-        submission: WorkflowHostSubmission,
-        client: &impl super::github::GithubDeliveryClient,
-    ) -> Result<WorkflowArtifact> {
-        self.execute_workflow_host_with_base(submission, |project, checkout, destination| {
-            self.resolve_workflow_github_base_with_client(project, checkout, destination, client)
-        })
-        .await
-    }
-
-    async fn execute_workflow_host_with_base<F>(
-        &self,
-        submission: WorkflowHostSubmission,
-        resolve_base: impl FnOnce(String, String, String) -> F,
-    ) -> Result<WorkflowArtifact>
-    where
-        F: std::future::Future<Output = Result<Option<String>>> + Send,
-    {
-        let WorkflowHostSubmission {
-            project_id,
-            run_id,
-            node_id,
-            inputs,
-            request,
-        } = submission;
-        if matches!(request, WorkflowHostRequest::ApproveImplementation) {
-            return self
-                .approve_workflow_implementation(WorkflowApprovalSubmission {
-                    project_id,
-                    run_id,
-                    node_id,
-                    inputs,
-                })
-                .await;
-        }
-        let (node, inputs) = self
-            .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
-            .await?;
-        let preparation_decision = if matches!(request, WorkflowHostRequest::PrepareWorktree { .. })
-        {
-            inputs.get("decision").map(|approval| approval.id.clone())
-        } else {
-            None
-        };
-        let request_revision = host_request_revision(&inputs, &request)?;
-        let execution_key = inputs
-            .get("plan")
-            .map(|plan| plan.id.clone())
-            .or_else(
-                || match inputs.get("decision").map(|artifact| &artifact.value) {
-                    Some(ArtifactValue::Approval(decision)) => Some(decision.plan_revision.clone()),
-                    _ => None,
-                },
-            )
-            .unwrap_or_default();
-        let saved = self
-            .execute({
-                let (run, node, key, revision) = (
-                    run_id.clone(),
-                    node_id.clone(),
-                    execution_key.clone(),
-                    request_revision.clone(),
-                );
-                let decision = preparation_decision.clone();
-                move |db| {
-                    load_host_completion(db, &run, &node, &key, &revision, decision.as_deref())
-                }
-            })
-            .await?;
-        if let Some(saved) = saved {
-            if matches!(saved.value, ArtifactValue::Task(_)) {
-                self.refresh_control(project_id, run_id).await?;
-            }
-            return Ok(saved);
-        }
-        let action = match (node.definition.executor, request) {
-            (Executor::BindInput, WorkflowHostRequest::Start { document }) => {
-                HostAction::Publish("document", ArtifactValue::Markdown(document))
-            }
-            (Executor::ReadContext, WorkflowHostRequest::LoadContext) => {
-                HostAction::Publish("context", inputs["document"].value.clone())
-            }
-            (Executor::ReadSelectedGit, WorkflowHostRequest::ReadGit(selection)) => {
-                let ArtifactValue::Markdown(document) = &inputs["document"].value else {
-                    anyhow::bail!("Read Git needs the selected document's registered checkout");
-                };
-                let inspection =
-                    super::diff::capture(self, &project_id, &document.checkout_id, selection)
-                        .await?;
-                HostAction::Publish("git", ArtifactValue::GitInspection(inspection))
-            }
-            (Executor::CheckSelectedGit, WorkflowHostRequest::VerifyReviewDiff) => {
-                let NodeConfiguration::RequiredChecks {
-                    names,
-                    parallel_groups,
-                } = node.instance.configuration
-                else {
-                    anyhow::bail!("The diff checks configuration is unavailable");
-                };
-                let checks =
-                    super::diff::verify(self, &project_id, &inputs["git"], names, parallel_groups)
-                        .await?;
-                HostAction::Publish("checks", ArtifactValue::Checks(checks))
-            }
-            (Executor::ReportSelectedGit, WorkflowHostRequest::PublishDiffReport) => {
-                let report = super::diff::report(
-                    self,
-                    &project_id,
-                    &inputs["git"],
-                    &inputs["review"],
-                    &inputs["checks"],
-                )
-                .await?;
-                HostAction::Publish("report", ArtifactValue::DiffReport(report))
-            }
-            (
-                Executor::FindOrCreateWork,
-                work @ (WorkflowHostRequest::LinkExistingTask { .. }
-                | WorkflowHostRequest::CreateTask { .. }),
-            ) => {
-                let ArtifactValue::Review { run_id: review_run } = &inputs["review"].value else {
-                    anyhow::bail!("work linking requires a plan review");
-                };
-                let reviewed = self
-                    .workflow_attempt(project_id.clone(), review_run.clone())
-                    .await?
-                    .context("plan review attempt is unavailable")?;
-                ensure!(
-                    reviewed.pin.plan_revision.as_ref() == Some(&inputs["plan"].id),
-                    "work linking requires a review of the selected plan revision"
-                );
-                match work {
-                    WorkflowHostRequest::LinkExistingTask { task_id } => HostAction::Publish(
-                        "task",
-                        ArtifactValue::Task(
-                            self.workflow_task_reference(project_id.clone(), task_id)
-                                .await?,
-                        ),
-                    ),
-                    WorkflowHostRequest::CreateTask { title } => HostAction::CreateTask(title),
-                    _ => unreachable!(),
-                }
-            }
-            (
-                Executor::ProvisionWorktree,
-                WorkflowHostRequest::PrepareWorktree { default_root },
-            ) => {
-                let ArtifactValue::Task(task) = &inputs["task"].value else {
-                    anyhow::bail!("preparation requires linked work");
-                };
-                let approval = &inputs["decision"];
-                let ArtifactValue::Approval(decision) = &approval.value else {
-                    anyhow::bail!("preparation requires an approval decision");
-                };
-                ensure!(
-                    decision.task == *task && decision.task_artifact_id == inputs["task"].id,
-                    "preparation must use the work from the approval decision"
-                );
-                let units = self
-                    .workflow_plan_units(
-                        project_id.clone(),
-                        run_id.clone(),
-                        decision.plan_revision.clone(),
-                    )
-                    .await?;
-                let plan = self
-                    .resolve_workflow_artifact(
-                        project_id.clone(),
-                        run_id.clone(),
-                        decision.plan_revision.clone(),
-                        super::ArtifactKind::Plan,
-                    )
-                    .await?
-                    .context("The approved plan is unavailable")?;
-                let integration = match plan.value {
-                    ArtifactValue::BacklogPlan(plan) => {
-                        let verified_tip = resolve_base(
-                            project_id.clone(),
-                            decision.source_checkout_id.clone(),
-                            plan.destination_branch.clone(),
-                        )
-                        .await?;
-                        if let Some(repair) = &plan.repair {
-                            let tip = verified_tip
-                                .clone()
-                                .context("The GitHub retry lost its verified destination")?;
-                            let managed = self
-                                .live_managed_worktree(project_id.clone(), task.task_id.clone())
-                                .await?
-                                .context("The GitHub retry lost its managed worktree")?;
-                            let project = project_id.clone();
-                            let checkout = managed.worktree.checkout_id;
-                            let expected = repair.previous_source_sha.clone();
-                            let integration = repository::IntegratedWorktreeBase {
-                                branch: plan.destination_branch.clone(),
-                                prerequisite_commits: vec![repair.destination_sha.clone()],
-                                verified_tip: Some(tip),
-                            };
-                            self.execute(move |db| {
-                                ensure!(
-                                    repository::registered_checkout_head(db, &project, &checkout)?
-                                        == expected,
-                                    "The task worktree advanced after the failed CI revision"
-                                );
-                                integration
-                                    .registered_tip(db, &project, &checkout)
-                                    .context(
-                                        "The GitHub destination lost the previously tested history",
-                                    )?;
-                                Ok(())
-                            })
-                            .await?;
-                        }
-                        Some(repository::IntegratedWorktreeBase {
-                            branch: plan.destination_branch,
-                            prerequisite_commits: plan
-                                .prerequisite_integrations
-                                .into_values()
-                                .collect(),
-                            verified_tip,
-                        })
-                    }
-                    _ => None,
-                };
-                let worktree = repository::provision_task_worktree_at(
-                    self,
-                    default_root,
-                    project_id.clone(),
-                    task.task_id.clone(),
-                    decision.source_checkout_id.clone(),
-                    integration,
-                )
-                .await?;
-                HostAction::Prepare {
-                    decision: decision.clone(),
-                    artifact_id: approval.id.clone(),
-                    worktree,
-                    units,
-                }
-            }
-            _ => anyhow::bail!("the host request does not match the pinned executor"),
-        };
-        if let HostAction::Publish(_, value) = &action {
-            self.check_artifact_source(&project_id, &run_id, &node_id, value)
-                .await?;
-        }
-        let completed = self
-            .execute(move |db| {
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                if !execution_key.is_empty() {
-                    require_current_plan(&tx, &project_id, &run_id, &execution_key)?;
-                }
-                if node.definition.executor == Executor::FindOrCreateWork {
-                    super::units::validate_selected_plan_revision(&tx, &project_id, &run_id, &execution_key)?;
-                }
-                if let Some(saved) =
-                    load_host_completion(&tx, &run_id, &node_id, &execution_key, &request_revision, preparation_decision.as_deref())?
-                {
-                    return Ok(saved);
-                }
-                let declared = inputs.iter().map(|(port, artifact)| (port.clone(), artifact.id.clone())).collect();
-                super::control::require_stage(&tx, &project_id, &run_id, &node_id, None, &declared)?;
-                let artifact = match action {
-                    HostAction::Publish(port, value) => {
-                        if let ArtifactValue::Task(task) = &value {
-                            super::launch::require_launch_work(&tx, &project_id, &run_id, Some(&task.task_id))?;
-                        }
-                        insert_artifact(&tx, &project_id, run_id, node_id, port.into(), value)?
-                    }
-                    HostAction::CreateTask(title) => {
-                        super::launch::require_launch_work(&tx, &project_id, &run_id, None)?;
-                        let origin = pipeline_work_origin(&tx, &project_id, &run_id)?;
-                        let task = insert_project_work(&tx, project_id.clone(), title, TaskPlacement::Task { epic_id: None }, &origin)?;
-                        insert_artifact(
-                            &tx,
-                            &project_id,
-                            run_id,
-                            node_id,
-                            "task".into(),
-                            ArtifactValue::Task(TaskReference {
-                                project_id: task.project_id,
-                                task_id: task.id,
-                            }),
-                        )?
-                    }
-                    HostAction::Prepare {
-                        decision,
-                        artifact_id,
-                        worktree,
-                        units,
-                    } => {
-                        let artifact = issue_prepared_release(&tx, decision, artifact_id, node_id, worktree, units)?;
-                        tx.execute(
-                            "DELETE FROM workflow_host_completions WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND execution_key = ?3",
-                            params![artifact.workflow_run_id, artifact.node_instance_id, execution_key],
-                        )?;
-                        artifact
-                    }
-                };
-                record_host_completion(&tx, &artifact, &execution_key, &request_revision)?;
-                super::inspection::record_workflow_completion_inputs(&tx, &artifact, &execution_key, &inputs)?;
-                super::control::refresh(&tx, &project_id, &artifact.workflow_run_id)?;
-                tx.commit()?;
-                Ok(artifact)
-            })
-            .await?;
-        self.job_signal.send_replace(());
-        Ok(completed)
-    }
-
     pub(super) async fn workflow_execution_inputs(
         &self,
         project: &str,
@@ -406,6 +29,7 @@ impl Store {
             .workflow_definition(project.into(), workflow.version.clone())
             .await?
             .context("workflow definition is unavailable")?;
+        definition.ensure_supported_nodes()?;
         let pinned = self
             .pinned_workflow_node(project.into(), run.into(), node.into())
             .await?
@@ -452,43 +76,7 @@ impl Store {
                 .wires
                 .iter()
                 .find(|wire| wire.to.node == node && wire.to.port == port.name);
-            let mcp_arguments = port.name == "arguments"
-                && matches!(
-                    &pinned.instance.configuration,
-                    NodeConfiguration::McpTool(_)
-                );
-            let optional_agent_input =
-                agent_stage && super::generic_agent::optional_input(&port.name);
-            let optional_delivery_input = matches!(
-                (pinned.instance.kind, port.name.as_str()),
-                (
-                    super::BuiltinNode::Implement
-                        | super::BuiltinNode::ReviewCandidate
-                        | super::BuiltinNode::ReviewDiffCandidate
-                        | super::BuiltinNode::ReviewPlan,
-                    "brief"
-                ) | (super::BuiltinNode::OpenOrUpdatePullRequest, "risk")
-                    | (super::BuiltinNode::MergePullRequest, "approval")
-                    | (
-                        super::BuiltinNode::MaterializeBacklog,
-                        "design" | "strategy"
-                    )
-            ) || pinned.instance.kind
-                == super::BuiltinNode::AcceptCandidate
-                && matches!(pinned.instance.configuration, NodeConfiguration::None)
-                && matches!(port.name.as_str(), "quality" | "build")
-                || pinned.instance.kind == super::BuiltinNode::AcceptCandidate
-                    && port.name == "selected_reviews"
-                    && !matches!(&pinned.instance.configuration,
-                        NodeConfiguration::CandidateAcceptance(config)
-                            if config.review_mode == super::candidate_acceptance::CandidateReviewMode::Selected)
-                || pinned.instance.kind == super::BuiltinNode::VerifyCandidate
-                    && port.name == "strategy"
-                    && !matches!(&pinned.instance.configuration, NodeConfiguration::StagedChecks { strategy_checks, .. }
-                        if !strategy_checks.is_empty());
-            if source.is_none()
-                && (mcp_arguments || optional_agent_input || optional_delivery_input)
-            {
+            if source.is_none() && agent_stage && super::generic_agent::optional_input(&port.name) {
                 continue;
             }
             let source = source.context("pinned workflow input has no source")?;
@@ -502,19 +90,7 @@ impl Store {
             } else {
                 None
             };
-            let value = if mcp_arguments {
-                producer
-                    .definition
-                    .outputs
-                    .iter()
-                    .find(|port| port.name == source.from.port)
-                    .map(|port| port.value)
-                    .filter(|value| matches!(value, PortType::Data(_)))
-                    .context("MCP arguments must come from a typed workflow artifact")?
-            } else {
-                port.value
-            };
-            match value {
+            match port.value {
                 PortType::Control => {
                     if control_checked {
                         continue;
@@ -553,20 +129,17 @@ impl Store {
                         .with_context(|| {
                             format!("artifact for workflow input {} is unavailable", port.name)
                         })?;
-                    let forwarded = control_checked
-                        && producer.instance.kind == super::BuiltinNode::RepeatOutput;
                     ensure!(
-                        forwarded
-                            || (artifact.node_instance_id == source.from.node
-                                && artifact.port == source.from.port
-                                && artifact.unit_id.as_deref() == producer_unit),
+                        artifact.node_instance_id == source.from.node
+                            && artifact.port == source.from.port
+                            && artifact.unit_id.as_deref() == producer_unit,
                         "artifact for workflow input {} is outside its pinned wire",
                         port.name
                     );
                     resolved.insert(port.name.clone(), artifact);
                 }
                 PortType::Evidence => {
-                    anyhow::bail!("Conditions execute through the pinned control scheduler")
+                    anyhow::bail!("Evidence inputs are handled by the workflow scheduler")
                 }
             }
         }
@@ -591,13 +164,6 @@ impl Store {
     }
 }
 
-pub(super) fn host_request_revision(
-    inputs: &BTreeMap<String, WorkflowArtifact>,
-    request: &WorkflowHostRequest,
-) -> Result<String> {
-    Ok(digest(&serde_json::to_vec(&(inputs, request))?))
-}
-
 pub(super) fn record_host_completion(
     db: &Connection,
     artifact: &WorkflowArtifact,
@@ -615,44 +181,4 @@ pub(super) fn record_host_completion(
         ],
     )?;
     Ok(())
-}
-
-fn load_host_completion(
-    db: &Connection,
-    run: &str,
-    node: &str,
-    execution_key: &str,
-    revision: &str,
-    preparation_decision: Option<&str>,
-) -> Result<Option<WorkflowArtifact>> {
-    let saved: Option<(String, Vec<u8>)> = db
-        .query_row(
-            "SELECT h.request_revision, a.payload FROM workflow_host_completions h
-         JOIN workflow_artifacts a ON a.id = h.artifact_id
-         WHERE h.pipeline_run_id = ?1 AND h.node_instance_id = ?2 AND h.execution_key = ?3",
-            params![run, node, execution_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((saved, payload)) = saved else {
-        return Ok(None);
-    };
-    if saved != revision
-        && let Some(decision) = preparation_decision
-    {
-        let was_prepared: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workflow_release_bindings WHERE decision_artifact_id = ?1)",
-            [decision], |row| row.get(0),
-        )?;
-        if !was_prepared {
-            return Ok(None);
-        }
-    }
-    ensure!(
-        saved == revision,
-        "this workflow node has already completed with a different request"
-    );
-    Ok(Some(serde_json::from_slice(&protection::unprotect(
-        &payload,
-    )?)?))
 }

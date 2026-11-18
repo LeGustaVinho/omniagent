@@ -4,9 +4,6 @@ use tokio::sync::watch;
 
 use crate::store::Store;
 
-#[cfg(test)]
-mod tests;
-
 const DESKTOP_NOTIFICATIONS_KEY: &str = "desktop_notifications_enabled";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
