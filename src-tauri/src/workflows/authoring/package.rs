@@ -25,8 +25,9 @@ mod prompt_suggestions;
 mod publish;
 mod request;
 pub use request::WorkflowAuthoringOutput;
+#[cfg(test)]
+mod review_tests;
 pub(crate) mod roles;
-mod simulation;
 #[cfg(test)]
 mod subflow_tests;
 #[cfg(test)]
@@ -37,7 +38,6 @@ pub use prompt_suggestions::PromptSuggestionStatus;
 pub(crate) use publish::{
     ensure_package_repeat_guards, ensure_package_runnable, published_pipeline_layout,
 };
-pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
 const MAX_MEMBERS: usize = 96;
 const MAX_PACKAGE_BYTES: usize = 256 * 1024;

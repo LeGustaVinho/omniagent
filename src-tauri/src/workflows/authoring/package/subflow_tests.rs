@@ -290,7 +290,7 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
 }
 
 #[tokio::test]
-async fn repeat_exports_only_the_approved_round_in_simulation_and_execution() -> Result<()> {
+async fn repeat_exports_only_the_approved_round_in_execution() -> Result<()> {
     use crate::workflows::WorkflowLaunchRequest;
     use serde_json::json;
 
@@ -385,40 +385,6 @@ async fn repeat_exports_only_the_approved_round_in_simulation_and_execution() ->
                 },
             )
             .await?;
-        let trace = serde_json::to_value(
-            store
-                .simulate_workflow_package_revision(
-                    project.clone(),
-                    draft.id.clone(),
-                    draft.revision.clone(),
-                    "root".into(),
-                    Default::default(),
-                )
-                .await?,
-        )?;
-        let exports = &trace["subflows"]
-            .as_array()
-            .context("Missing simulated subflows")?
-            .iter()
-            .find(|entry| entry["path"] == "repeat")
-            .context("Missing simulated repeat")?["outputs"];
-        assert_eq!(
-            exports["decision"]["state"],
-            if max_iterations == 1 {
-                "skipped"
-            } else {
-                "selected"
-            }
-        );
-        assert_eq!(
-            exports["failed"]["state"],
-            if max_iterations == 1 {
-                "selected"
-            } else {
-                "skipped"
-            }
-        );
-
         let WorkflowPackagePublishOutcome::Published { publication } = store
             .publish_reviewed_workflow_package(project.clone(), draft.id, draft.revision)
             .await?

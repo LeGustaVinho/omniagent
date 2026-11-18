@@ -10,7 +10,7 @@ use crate::{
         ManualWorkflowLaunch, NodeInputs, WorkflowLaunchSource, WorkflowRevision, WorkflowRun,
         authoring::package::{
             PackageArtifactBody, PackageMember, PackageReference, WorkflowPackage,
-            WorkflowPackagePublishOutcome, WorkflowSimulationScenario,
+            WorkflowPackagePublishOutcome,
         },
         mcp_tools::{McpServer, McpServerRequest, WorkflowMcpToolSubmission},
         tests::approved_delivery_repository,
@@ -42,7 +42,6 @@ async fn publish_and_launch(
     cap: u16,
     request: &str,
 ) -> Result<WorkflowRun> {
-    let empty = values.is_empty();
     let mut body = body(false, false)?;
     let apply_stage = body
         .workflow
@@ -129,40 +128,6 @@ async fn publish_and_launch(
             },
         )
         .await?;
-    if empty {
-        let scenario: WorkflowSimulationScenario = serde_json::from_value(json!({
-            "inputs": {"document": {"relativePath": "sample.md"}}
-        }))?;
-        let trace = store
-            .simulate_workflow_package_revision(
-                repo.project_id.clone(),
-                draft.id.clone(),
-                draft.revision.clone(),
-                "root".into(),
-                scenario,
-            )
-            .await?;
-        let trace = serde_json::to_value(trace)?;
-        let steps = trace["steps"]
-            .as_array()
-            .context("Missing simulated iteration steps")?;
-        let gather = steps
-            .iter()
-            .find(|step| step["nodeId"] == "each::collect")
-            .context("Missing simulated collector")?;
-        assert_eq!(
-            gather["outputs"]["results"]["value"]["evidence"]["results"],
-            json!([])
-        );
-        assert!(
-            steps
-                .iter()
-                .filter(|step| step["nodeId"]
-                    .as_str()
-                    .is_some_and(|id| id.ends_with("::apply")))
-                .all(|step| step["state"] == "skipped")
-        );
-    }
     let WorkflowPackagePublishOutcome::Published { publication } = store
         .publish_reviewed_workflow_package(repo.project_id.clone(), draft.id, draft.revision)
         .await?

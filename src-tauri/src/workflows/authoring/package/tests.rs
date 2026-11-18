@@ -1014,7 +1014,7 @@ async fn publishes_a_standalone_function_with_typed_ports_and_runs_it_from_a_pip
 }
 
 #[tokio::test]
-async fn visual_data_pipeline_simulates_and_runs_the_same_typed_result() -> Result<()> {
+async fn visual_data_pipeline_retains_layout_and_typed_result() -> Result<()> {
     use crate::workflows::{ArtifactValue, WorkflowLaunchRequest};
     use serde_json::json;
 
@@ -1060,29 +1060,6 @@ async fn visual_data_pipeline_simulates_and_runs_the_same_typed_result() -> Resu
             serde_json::from_value(json!({"pipeline": {"layout": layout}}))?,
         )
         .await?;
-    let trace = store
-        .simulate_workflow_package_revision(
-            project.clone(),
-            draft.id.clone(),
-            draft.revision.clone(),
-            "pipeline".into(),
-            serde_json::from_value(json!({"inputs":{"inputs":{"label":"Visual builder"}}}))?,
-        )
-        .await?;
-    let visible = serde_json::to_value(trace)?;
-    assert_eq!(visible["graph"]["layout"], layout);
-    let result = visible["steps"]
-        .as_array()
-        .context("missing trace steps")?
-        .iter()
-        .find(|step| step["nodeId"] == "result")
-        .context("missing result")?;
-    assert_eq!(
-        result["outputs"]["summary"]["value"]["evidence"]["summary"],
-        "Status for Visual builder"
-    );
-    assert!(store.list_workflow_runs(project.clone()).await?.is_empty());
-
     let publication = commit(&store, &project, &draft).await?;
     let published = artifact(&publication, "pipeline").version.clone();
     let request: WorkflowLaunchRequest = serde_json::from_value(json!({
@@ -1106,15 +1083,22 @@ async fn visual_data_pipeline_simulates_and_runs_the_same_typed_result() -> Resu
 }
 
 #[tokio::test]
-async fn publishes_reuses_and_simulates_the_exact_prompt_contract() -> Result<()> {
-    use crate::workflows::{ArtifactKind, Endpoint, Wire};
-    use serde_json::{Value, json};
+async fn publishes_and_runs_the_exact_reused_prompt_contract() -> Result<()> {
+    use crate::{
+        jobs::AdmissionEnvironment,
+        workflows::{ArtifactKind, Endpoint, Wire, generic_agent::tests::complete_response},
+    };
+    use serde_json::json;
     let temporary = tempfile::tempdir()?;
     let store = Store::open(temporary.path().join("prompts.sqlite"))?;
-    let project = approved_delivery_repository(&store, temporary.path())
-        .await?
-        .project_id;
-    let mut planner = member("planner", role());
+    let repo = approved_delivery_repository(&store, temporary.path()).await?;
+    let project = repo.project_id.clone();
+    let mut role = role();
+    let PackageArtifactBody::Role { template } = &mut role else {
+        unreachable!();
+    };
+    template.review_policy = TemplateReviewPolicy::Independent;
+    let mut planner = member("planner", role);
     planner.destination = PackageDestination::Library;
     let mut card = member(
         "evaluate",
@@ -1212,46 +1196,67 @@ async fn publishes_reuses_and_simulates_the_exact_prompt_contract() -> Result<()
     let reused = store
         .create_workflow_package(project.clone(), None, package(vec![root]))
         .await?;
+    let publication = commit(&store, &project, &reused).await?;
+    let version = &artifact(&publication, "pipeline").version;
+    let source = store
+        .capture_repository_markdown(
+            repo.checkout_id.clone(),
+            Path::new(&repo.checkout_root).join("brief.md"),
+        )
+        .await?;
     for (route, terminal) in [
         ("entregar", "entregar"),
         ("corrigir", "corrigir"),
         ("invalid", "falhou"),
     ] {
-        let scenario = serde_json::from_value(json!({
-            "inputs":{"document":"# Simulated request"},
-            "outcomes":{"prompt::execute":{"state":"completed","outputs":{"response":{
-                "route":route,"reason":"Fixture selected path","outputs":{"summary":"Evidence retained"},"delegations":[]
-            }}}}
-        }))?;
-        let result = store
-            .simulate_workflow_package_revision(
-                project.clone(),
-                reused.id.clone(),
-                reused.revision.clone(),
-                "pipeline".into(),
-                scenario,
-            )
+        let run = store
+            .launch_workflow_request(serde_json::from_value(json!({
+                "projectId": project, "checkoutId": repo.checkout_id, "documentRevisionId": source.revision.id,
+                "workflow": {"id": version.id, "revision": version.revision},
+                "requestId": format!("reused-prompt-{route}"), "automatic": true
+            }))?)
             .await?;
-        let result = serde_json::to_value(result)?;
-        let steps = result["steps"].as_array().context("Missing Prompt trace")?;
-        let find = |id: &str| {
-            steps
+        let stage = store
+            .next_workflow_agent()
+            .await?
+            .context("Missing ready Prompt")?;
+        assert_eq!(stage.fixture_identity().1, "prompt::execute");
+        stage
+            .enqueue(&store, stage.fixture_submission(&store).await?)
+            .await?;
+        let attempt = store
+            .claim_next_job(AdmissionEnvironment {
+                runner: "fixture-runner".into(),
+                bridge_available: false,
+            })
+            .await?
+            .context("Prompt did not pass workflow admission")?;
+        complete_response(
+            &store,
+            &attempt,
+            &json!({"route": route, "reason": "Fixture selected path", "outputs": {"summary": "Evidence retained"}, "delegations": []}).to_string(),
+            None,
+        ).await?;
+        let inspection = store
+            .inspect_workflow_execution(project.clone(), run.id)
+            .await?
+            .context("Missing Prompt execution")?;
+        let selected = |id: &str| {
+            inspection
+                .control
                 .iter()
-                .find(|step| step["nodeId"] == Value::String(id.into()))
+                .any(|receipt| receipt.node_id == id && receipt.selected_ports == ["branches"])
         };
-        assert_eq!(
-            find(terminal).context("Missing selected route")?["state"],
-            "completed",
-            "Prompt trace for {route}: {steps:#?}"
+        assert!(
+            selected(terminal),
+            "Prompt delivery for {route}: {:?}",
+            inspection.control
         );
         for bypassed in ["entregar", "corrigir", "falhou"]
             .into_iter()
             .filter(|id| *id != terminal)
         {
-            assert_eq!(
-                find(bypassed).context("Missing bypassed route")?["state"],
-                "skipped"
-            );
+            assert!(!selected(bypassed));
         }
     }
     Ok(())

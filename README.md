@@ -56,8 +56,8 @@ Create a small pipeline that loads a saved Markdown source and checks whether th
    | `load-context.loaded` | `condition.ready` |
    | `load-context.context` | `condition.value` |
 
-3. Save the package revision, open **Review changes and simulate**, and supply a sample Markdown path such as `docs/release.md`. Inspect the node inputs and the `matched` output in the simulation trace.
-4. Review and confirm publication. From a task's **Workflow** tab, choose **Run published workflow**, select its revision, and provide the checkout and saved source note. Open **Pipelines → Runs** later to inspect the pinned revision and recorded stage outputs.
+3. Save the package revision and open **Review changes** to inspect the graph and its execution requirements. Review and confirm publication.
+4. From a task's **Workflow** tab, choose **Run published workflow**, select its revision, and provide the checkout and saved source note. Open **Pipelines → Runs** to inspect the pinned revision, node inputs, and the condition's selected output.
 
 <details>
 <summary>See the completed pipeline run</summary>
@@ -68,7 +68,7 @@ Create a small pipeline that loads a saved Markdown source and checks whether th
 
 ### Pick up an interrupted run
 
-If OmniAgent restarts during a task, open **Queue** and select the interrupted attempt. Review its recorded outcome and the worktree it used. If the attempt stopped during a Git write, complete the reconciliation review when prompted before retrying. To rehearse this path with example data, choose **Simulate → Recovery**, open **Queue**, and select **Resume from checkpoint**.
+If OmniAgent restarts during a task, open **Queue** and select the interrupted attempt. Review its recorded outcome and the worktree it used. If the attempt stopped during a Git write, complete the reconciliation review when prompted before retrying.
 
 ## Features
 
@@ -76,7 +76,7 @@ If OmniAgent restarts during a task, open **Queue** and select the interrupted a
 | --- | --- |
 | **Conversations** | Stream responses, attach files or reference earlier conversations, and resume, rewind, or fork at a message. Use **Read-only**, **Plan Mode**, or **Goal Mode** where supported. |
 | **Tasks** | Organize epics, tasks, and subtasks in Kanban or table views. Set dependencies and acceptance criteria, assign work by role and model, and track checklists or run them by item. |
-| **Pipelines** | Build workflows with typed ports, branch conditions, approvals, and reusable nodes or subflows. Review simulations, publish revisions, and launch workflows manually or through rules on work-item events. |
+| **Pipelines** | Build workflows with typed ports, branch conditions, approvals, and reusable nodes or subflows. Review and publish revisions, launch workflows manually or through rules on work-item events, and inspect recorded results in Runs. |
 | **Model comparison** | Compare models from the same provider or across providers. Review original responses, individual run states, and recorded execution details. |
 | **Git** | Browse changes, worktrees, and history. Compare branches, inspect staged changes and saved attempt diffs, and review verified commits and merges. |
 | **IDE** | Edit repository files in Monaco, search within the selected checkout, and run commands in the integrated terminal. |
@@ -105,9 +105,9 @@ pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-### Try the sample workflows
+### Open a repository
 
-Choose **Open repository** and select a local Git repository or worktree. Then select **Simulate** in the title bar and pick **Delivery**, **Pipelines**, or **Recovery**. These scenarios use built-in example data, so you can walk through them before signing in to a provider.
+Choose **Open repository** and select a local Git repository or worktree. To try a workflow without a provider, follow [Build a pipeline you can run again](#build-a-pipeline-you-can-run-again) in that checkout.
 
 ### Start a live agent session
 

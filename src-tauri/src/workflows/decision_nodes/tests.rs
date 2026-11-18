@@ -102,7 +102,7 @@ fn answer(ready: Value) -> WorkflowStageDecision {
 }
 
 #[test]
-fn the_pinned_forms_validate_typed_samples_and_can_omit_approval_evidence() -> Result<()> {
+fn the_pinned_forms_validate_typed_responses_and_can_omit_approval_evidence() -> Result<()> {
     let definition = compile("decisions".into(), graph(false))?;
     let ask = definition
         .nodes
@@ -114,47 +114,25 @@ fn the_pinned_forms_validate_typed_samples_and_can_omit_approval_evidence() -> R
         .iter()
         .find(|node| node.instance.id == "review")
         .unwrap();
-    let sample = |port: &str, value| BTreeMap::from([(port.to_owned(), value)]);
-    assert_eq!(
-        simulate_stage_decision(
-            ask,
-            &sample("answers", json!({"ready":false,"checks":["lint"]}))
-        )?,
-        "answered"
-    );
-    assert!(
-        simulate_stage_decision(
-            ask,
-            &sample("answers", json!({"ready":"no","checks":["lint"]}))
-        )
-        .is_err()
-    );
-    assert!(
-        simulate_stage_decision(ask, &sample("answers", json!({"ready":false,"checks":[]})))
-            .is_err()
-    );
-    assert!(
-        simulate_stage_decision(
-            ask,
-            &sample("answers", json!({"ready":false,"checks":["unknown"]}))
-        )
-        .is_err()
-    );
-    assert_eq!(
-        simulate_stage_decision(approval, &sample("decision", json!({"approved":false})))?,
-        "rejected"
-    );
-    assert_eq!(
-        simulate_stage_decision(approval, &sample("decision", json!({"approved":true})))?,
-        "approved"
-    );
-    assert!(
-        simulate_stage_decision(
-            approval,
-            &sample("decision", json!({"approved":true,"release":"fixture"}))
-        )
-        .is_err()
-    );
+    let request = WorkflowDecisionRequest::for_node(ask, None)?;
+    let respond = |ready: Value, checks: Value| {
+        let reply = WorkflowStageDecision::Answer {
+            values: Map::from_iter([("ready".into(), ready), ("checks".into(), checks)]),
+        };
+        validated_evidence(ask, &request, &reply).map(|_| reply.control_port())
+    };
+    assert_eq!(respond(json!(false), json!(["lint"]))?, "answered");
+    assert!(respond(json!("no"), json!(["lint"])).is_err());
+    assert!(respond(json!(false), json!([])).is_err());
+    assert!(respond(json!(false), json!(["unknown"])).is_err());
+
+    let request = WorkflowDecisionRequest::for_node(approval, None)?;
+    for (approved, port) in [(false, "rejected"), (true, "approved")] {
+        let reply = WorkflowStageDecision::Approval { approved };
+        validated_evidence(approval, &request, &reply)?;
+        assert_eq!(reply.control_port(), port);
+    }
+    assert!(validated_evidence(approval, &request, &answer(json!(true))).is_err());
     let mut invalid = question();
     invalid.fields[1].id = invalid.fields[0].id.clone();
     assert!(!invalid.is_valid());

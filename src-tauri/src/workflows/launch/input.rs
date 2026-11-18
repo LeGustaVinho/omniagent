@@ -86,10 +86,6 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl TypedStartConfiguration {
-    pub(crate) fn has_fields(&self) -> bool {
-        !self.fields.is_empty()
-    }
-
     pub(crate) fn accepts_automation(&self) -> bool {
         !self.prompt_or_markdown && self.fields.iter().all(|field| !field.required)
     }

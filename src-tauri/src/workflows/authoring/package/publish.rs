@@ -790,7 +790,7 @@ pub(super) fn compile_graph_with_loader(
         .definition)
 }
 
-pub(super) fn compile_simulation_graph(
+pub(super) fn compile_review_graph(
     db: &Connection,
     project: &str,
     id: &str,
