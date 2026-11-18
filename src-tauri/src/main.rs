@@ -715,6 +715,8 @@ fn main() {
             conversation_runtime::project_job_queue,
             queue_runtime::set_job_queue_paused,
             queue_runtime::set_job_queue_capacity,
+            desktop::desktop_notifications_enabled,
+            desktop::set_desktop_notifications_enabled,
             queue_runtime::project_job_rules,
             queue_runtime::set_project_job_rules,
             queue_runtime::job_failure,

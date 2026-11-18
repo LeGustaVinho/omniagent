@@ -82,6 +82,9 @@ pub fn notify_job_activity(
         loop {
             let result = async {
                 let notice = notices.next().await?;
+                if !notices.is_deliverable(&notice).await? {
+                    return notices.acknowledge(&notice).await;
+                }
                 let body = match notice.kind {
                     JobNoticeKind::JobApproval => "A queued job needs your approval.",
                     JobNoticeKind::Permission => "A running job needs a permission decision.",
@@ -108,6 +111,25 @@ pub fn notify_job_activity(
         }
     });
     Ok(())
+}
+
+#[tauri::command]
+pub async fn desktop_notifications_enabled(store: State<'_, Store>) -> Result<bool, String> {
+    store
+        .desktop_notifications_enabled()
+        .await
+        .map_err(|error| diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn set_desktop_notifications_enabled(
+    store: State<'_, Store>,
+    enabled: bool,
+) -> Result<bool, String> {
+    store
+        .set_desktop_notifications_enabled(enabled)
+        .await
+        .map_err(|error| diagnostics::preview(&error.to_string()))
 }
 
 pub fn hide_main_on_close(window: &tauri::Window, event: &WindowEvent) {

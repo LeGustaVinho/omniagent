@@ -195,7 +195,9 @@ impl FixtureRuns {
                 .expect("active run lock")
                 .active
                 .remove(&run_id);
-            if record_status(&store, &run_id, status).await.is_ok() {
+            if record_status(&store, &run_id, status).await.is_ok()
+                && store.desktop_notifications_enabled().await.unwrap_or(false)
+            {
                 let body = match status {
                     RunStatus::Succeeded => "The fixture run completed.",
                     RunStatus::Cancelled => "The fixture run was cancelled.",

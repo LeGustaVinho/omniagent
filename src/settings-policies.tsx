@@ -17,12 +17,6 @@ type Field = {
 );
 
 export const policyFields = {
-  capacity: [
-    {
-      id: "notifications", label: "Desktop notifications", kind: "toggle", initial: "true",
-      description: "Notify when work needs input, waits for approval or finishes.",
-    },
-  ],
   execution: [
     {
       id: "worktree-root", label: "Managed worktree location", kind: "text", initial: "",

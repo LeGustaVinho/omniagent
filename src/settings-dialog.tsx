@@ -11,6 +11,7 @@ import { DeliveryGitSettings, deliveryMilestoneSetting, destinationDriftSetting 
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
+import { DesktopNotificationSettings, desktopNotificationSetting } from "@/desktop-notification-settings";
 import { openWorkspaceFile } from "@/file-context-actions";
 import { ConversationModelSettings, conversationModelSetting } from "@/model-default-settings";
 import { ProjectWorkModeControls } from "@/project-agile-settings";
@@ -59,7 +60,7 @@ const pages: readonly Page[] = [
     { id: "provider-paths", label: "Executable paths", description: "Codex, Claude Code, Gemini, Antigravity, PATH, authentication, CLI protocol and plugin inventory" },
     { id: "runner", label: "Runners and capabilities", description: "Direct Windows host, Hyper-V guest, sandbox, verified capability profile" },
   ] },
-  { id: "capacity", scope: "device", title: "Execution capacity", icon: Cpu, entries: [managedCapacitySetting, ...policyFields.capacity] },
+  { id: "capacity", scope: "device", title: "Execution capacity", icon: Cpu, entries: [managedCapacitySetting, desktopNotificationSetting] },
   { id: "system", scope: "device", title: "System", icon: HardDrive, entries: [
     { id: "environment", label: "Current installation", description: "Build, local data directory, runtime" },
     { id: "qualification", label: "Prerequisites and qualification", description: "Windows, WebView2, Git for Windows, ripgrep, CLI, model, runner" },
@@ -254,7 +255,7 @@ function SettingsSession({
       case "capacity":
         return <>
           <QueueCapacitySettings key={checkout?.projectId} projectId={checkout?.projectId} />
-          {policy("capacity")}
+          <DesktopNotificationSettings />
         </>;
       case "attachments":
         return checkout && <ProjectAttachmentSettings key={checkout.projectId} projectId={checkout.projectId} />;

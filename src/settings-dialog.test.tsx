@@ -180,6 +180,7 @@ it("saves execution capacity in the same device scheduler used by the queue", as
       case "appearance_settings": return defaultAppearance;
       case "project_job_queue": return { settings: { paused: false, capacity: limit }, active: 0, jobs: [] };
       case "set_job_queue_capacity": return { paused: false, capacity: limit = args!.capacity! };
+      case "desktop_notifications_enabled": return true;
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
@@ -199,11 +200,45 @@ it("saves execution capacity in the same device scheduler used by the queue", as
 });
 
 it("explains how to load execution capacity without fabricating a checkout", () => {
-  invoke.mockResolvedValue(defaultAppearance);
+  invoke.mockImplementation(async (command: string) => command === "desktop_notifications_enabled" ? true : defaultAppearance);
   openSettings({ initialPage: "capacity", checkout: null });
   expect(screen.getByRole<HTMLInputElement>("spinbutton", { name: "Simultaneous managed runs" }).disabled).toBe(true);
   expect(screen.getByText("Open a repository to load execution capacity.")).toBeTruthy();
   expect(invoke.mock.calls.some(([command]) => command === "project_job_queue")).toBe(false);
+});
+
+it("toggles desktop notifications without an open project and preserves the saved value on failure", async () => {
+  let enabled = true;
+  let canSave = true;
+  invoke.mockImplementation(async (command: string, args?: { enabled: boolean }) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "desktop_notifications_enabled": return enabled;
+      case "set_desktop_notifications_enabled":
+        if (canSave && args) return enabled = args.enabled;
+        throw new Error("Database unavailable");
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ checkout: null });
+  const user = userEvent.setup();
+  await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "desktop notifications");
+  await user.click(screen.getByRole("button", { name: "Desktop notifications in Execution capacity" }));
+  const checkbox = screen.getByRole<HTMLInputElement>("checkbox", { name: "Desktop notifications" });
+  await waitFor(() => expect(checkbox.checked && !checkbox.disabled).toBe(true));
+
+  await user.click(checkbox);
+  expect(invoke).toHaveBeenLastCalledWith("set_desktop_notifications_enabled", { enabled: false });
+  await waitFor(() => expect(!checkbox.checked && !checkbox.disabled).toBe(true));
+
+  canSave = false;
+  await user.click(checkbox);
+  expect((await screen.findByRole("alert")).textContent).toBe("Desktop notification preference could not be saved.");
+  expect(checkbox.checked).toBe(false);
+
+  canSave = true;
+  await user.click(checkbox);
+  await waitFor(() => expect(checkbox.checked && !checkbox.disabled).toBe(true));
 });
 
 it("saves Git automation independently of its completion milestone and destination drift policy", async () => {

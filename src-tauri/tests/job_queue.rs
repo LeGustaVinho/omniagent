@@ -781,6 +781,52 @@ async fn native_job_notices_survive_reopen_and_skip_obsolete_approvals() -> Resu
 }
 
 #[tokio::test]
+async fn disabling_desktop_notifications_discards_notices_across_restart() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite");
+    let store = Store::open(database.clone())?;
+    let parent = origin(&store, &temp.path().join("repo")).await?;
+    let mut notices = store.job_notices();
+    assert!(store.desktop_notifications_enabled().await?);
+    store
+        .submit_agent_job(parent.run.id.clone(), "before-mute".into(), request())
+        .await?;
+    let pending = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert!(notices.is_deliverable(&pending).await?);
+
+    assert!(!store.set_desktop_notifications_enabled(false).await?);
+    assert!(!notices.is_deliverable(&pending).await?);
+    let muted = store
+        .submit_agent_job(parent.run.id.clone(), "while-muted".into(), request())
+        .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), notices.next())
+            .await
+            .is_err()
+    );
+    drop(notices);
+    drop(store);
+
+    let store = Store::open(database)?;
+    assert!(!store.desktop_notifications_enabled().await?);
+    // A pending approval remains actionable in the queue while notifications are muted.
+    approve(&store, &muted).await?;
+    store
+        .submit_agent_job(parent.run.id.clone(), "before-unmute".into(), request())
+        .await?;
+    assert!(store.set_desktop_notifications_enabled(true).await?);
+    let new_job = store
+        .submit_agent_job(parent.run.id, "after-unmute".into(), request())
+        .await?;
+    let mut notices = store.job_notices();
+    let next = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(next.kind, JobNoticeKind::JobApproval);
+    assert_eq!(next.job_id, new_job.id);
+    notices.acknowledge(&next).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_replays_resolve_to_the_same_persisted_job_and_conflict_on_changed_input()
 -> Result<()> {
     let temp = tempfile::tempdir()?;

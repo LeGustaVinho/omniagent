@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::watch;
 
 use crate::store::Store;
 
 #[cfg(test)]
 mod tests;
+
+const DESKTOP_NOTIFICATIONS_KEY: &str = "desktop_notifications_enabled";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobNoticeKind {
@@ -34,6 +36,31 @@ pub struct JobNotices {
 }
 
 impl Store {
+    pub async fn desktop_notifications_enabled(&self) -> Result<bool> {
+        self.execute(|db| read_desktop_notifications_enabled(db))
+            .await
+    }
+
+    pub async fn set_desktop_notifications_enabled(&self, enabled: bool) -> Result<bool> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Drop pending notices when muting and any that accumulated while muted.
+            if !enabled || !read_desktop_notifications_enabled(&tx)? {
+                tx.execute("DELETE FROM job_notices", [])?;
+            }
+            tx.execute(
+                "INSERT INTO workspace_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![DESKTOP_NOTIFICATIONS_KEY, enabled.to_string()],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        self.job_signal.send_replace(());
+        Ok(enabled)
+    }
+
     pub fn job_notices(&self) -> JobNotices {
         JobNotices {
             store: self.clone(),
@@ -42,12 +69,31 @@ impl Store {
     }
 }
 
+fn read_desktop_notifications_enabled(db: &Connection) -> Result<bool> {
+    let value = db
+        .query_row(
+            "SELECT value FROM workspace_settings WHERE key = ?1",
+            [DESKTOP_NOTIFICATIONS_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(value
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(true))
+}
+
 impl JobNotices {
     pub async fn next(&mut self) -> Result<JobNotice> {
         loop {
             self.wake.borrow_and_update();
             if let Some(notice) = self.store.execute(|db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if !read_desktop_notifications_enabled(&tx)? {
+                    tx.execute("DELETE FROM job_notices", [])?;
+                    tx.commit()?;
+                    return Ok(None);
+                }
                 // Drop requests that were answered, superseded, or cancelled before delivery.
                 tx.execute(
                     "DELETE FROM job_notices WHERE sequence NOT IN (SELECT sequence FROM deliverable_job_notices)",
@@ -83,6 +129,18 @@ impl JobNotices {
                 .await
                 .context("job notice signal closed")?;
         }
+    }
+
+    pub async fn is_deliverable(&self, notice: &JobNotice) -> Result<bool> {
+        let sequence = notice.sequence;
+        self.store
+            .execute(move |db| {
+                Ok(read_desktop_notifications_enabled(db)?
+                    && db
+                        .prepare("SELECT 1 FROM deliverable_job_notices WHERE sequence = ?1")?
+                        .exists([sequence])?)
+            })
+            .await
     }
 
     pub async fn acknowledge(&self, notice: &JobNotice) -> Result<()> {
