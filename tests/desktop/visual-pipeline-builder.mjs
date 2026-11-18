@@ -341,8 +341,20 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await click(views.$("button=Library"));
   const library = browser.$('[aria-label="Workflow library"]');
   await library.$("button=New Schema").waitForDisplayed({ timeout });
+  for (const [open, create] of [["New Node Prefab", "Create Node Prefab"], ["New Function", "Create Function"]]) {
+    await click(library.$(`button=${open}`));
+    const reusable = browser.$('[role="dialog"]');
+    await reusable.$(`button=${create}`).waitForDisplayed({ timeout });
+    await browser.keys("Escape");
+    await reusable.waitForDisplayed({ timeout, reverse: true });
+  }
   assert.equal(await library.$("[data-pipeline-node]").isExisting(), false);
   assert.equal(await library.$("summary=Import or export workflow packages").isExisting(), false);
+  const libraryViews = browser.$('[aria-label="Library views"]');
+  await click(libraryViews.$("button=Roles"));
+  await browser.$('[aria-label="Role library"]').waitForDisplayed({ timeout });
+  await click(libraryViews.$("button=Artifacts"));
+  await library.waitForDisplayed({ timeout });
   await click(views.$("button=Maintenance"));
   const maintenance = browser.$('[aria-label="Workflow maintenance"]');
   await maintenance.$("h3=Proposed changes").waitForDisplayed({ timeout });
@@ -361,8 +373,11 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await click(landing.$("button=Create or edit with AI"));
   const authoring = browser.$('[role="dialog"]');
   await authoring.$("h2=Create or edit with AI").waitForDisplayed({ timeout });
+  for (const output of ["pipeline", "node_prefab", "function", "role", "schema", "package"]) {
+    assert.equal(await authoring.$(`select option[value="${output}"]`).isExisting(), true);
+  }
   await select(authoring, "Output", "pipeline");
-  await authoring.$("option=Choose a conversation").waitForExist({ timeout });
+  assert.equal(await authoring.$(".//label[starts-with(normalize-space(.), 'Source conversation')]").isExisting(), false);
   assert.equal(await authoring.$("button=Start authoring request").isEnabled(), false);
   await capture?.(browser, "real-pipeline-builder-ai");
   await browser.keys("Escape");
@@ -380,7 +395,13 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const draft = staged.find(({ name }) => name === title);
   assert.ok(draft, "The named builder action did not create a project draft");
   const draftScope = { projectId, draftId: draft.id };
-  await click(editor.$("button=Add node"));
+  const canvasActions = `${canvas} [aria-label="Workflow canvas actions"]`;
+  assert.ok(await browser.execute((selector) => {
+    const surface = document.querySelector(selector);
+    surface?.focus();
+    return document.activeElement === surface;
+  }, canvasActions));
+  await browser.keys([Key.Shift, Key.F10]);
   const insertNode = browser.$('[role="dialog"]');
   await insertNode.$("button=AI Node Agent").waitForDisplayed({ timeout });
   await insertNode.$("button=Parallel / Fork").waitForDisplayed({ timeout });
