@@ -108,7 +108,7 @@ impl Store {
             let mut bases = Vec::new();
             for payload in statement.query_map(params![project, DIRECT_WORKFLOW_ID], |row| row.get::<_, Vec<u8>>(0))? {
                 let mut definition: WorkflowDefinition = open(&payload?)?;
-                definition.normalize_prompt_joins();
+                definition.normalize_legacy_prompt_nodes();
                 if definition.unsupported_node().is_none() {
                     bases.push(AuthoringBase {
                         start: super::WorkflowStartSchema::for_definition(&definition),

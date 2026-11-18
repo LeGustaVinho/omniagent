@@ -196,6 +196,7 @@ pub enum ConfigurationKind {
     Fork,
     JoinResults,
     JoinFailures,
+    LegacyReviewVerdict,
     Loop,
     LoopGate,
     LoopStep,
@@ -253,6 +254,7 @@ pub enum NodeConfiguration {
     Fork(super::orchestration::ForkConfiguration),
     JoinResults(super::orchestration::JoinResultsConfiguration),
     JoinFailures,
+    LegacyReviewVerdict,
     Loop(super::orchestration::LoopConfiguration),
     LoopGate(super::orchestration::LoopGateConfiguration),
     LoopStep(super::orchestration::LoopStepConfiguration),
@@ -477,6 +479,7 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
             configure_conversation_agent(&mut current);
             if pinned.title == "Conversation Agent" {
                 current.title = pinned.title.clone();
+                current.outputs = vec![control("completed"), object("result"), control("failed")];
             }
         }
         BuiltinNode::Agent if pinned.revision == 3 => {
@@ -493,6 +496,11 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
         }
         BuiltinNode::JoinResults if pinned.configuration == ConfigurationKind::JoinFailures => {
             configure_failure_join(&mut current);
+        }
+        BuiltinNode::JoinResults
+            if pinned.configuration == ConfigurationKind::LegacyReviewVerdict =>
+        {
+            configure_legacy_review_verdict(&mut current);
         }
         BuiltinNode::Loop if pinned.configuration.is_loop_phase() => {
             let Some((executor, title)) = loop_phase_definition(pinned.configuration) else {
@@ -539,6 +547,21 @@ pub(super) fn configure_failure_join(definition: &mut NodeDefinition) {
     definition.configuration = ConfigurationKind::JoinFailures;
     definition.inputs = vec![control("branches")];
     definition.outputs = vec![control("joined")];
+}
+
+pub(super) fn configure_legacy_review_verdict(definition: &mut NodeDefinition) {
+    definition.title = "Cross-review verdict".into();
+    definition.executor = Executor::EvaluateCondition;
+    definition.configuration = ConfigurationKind::LegacyReviewVerdict;
+    definition.effect = Effect::ReadEvidence;
+    definition.inputs = vec![
+        control("ready"),
+        Port {
+            name: "value".into(),
+            value: PortType::Evidence,
+        },
+    ];
+    definition.outputs = vec![control("matched"), control("unmatched")];
 }
 
 fn control(name: &str) -> Port {
@@ -797,10 +820,18 @@ impl ArtifactKind {
 
 impl NodeConfiguration {
     pub(super) fn is_generated(&self) -> bool {
-        matches!(
-            self,
-            Self::LoopGate(_) | Self::LoopStep(_) | Self::LoopResult(_) | Self::JoinFailures
-        )
+        match self {
+            Self::LoopGate(_)
+            | Self::LoopStep(_)
+            | Self::LoopResult(_)
+            | Self::JoinFailures
+            | Self::LegacyReviewVerdict => true,
+            Self::AgentRole { requirements, .. } => requirements
+                .structured
+                .as_ref()
+                .is_some_and(|config| config.review_verdict),
+            _ => false,
+        }
     }
 
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
@@ -808,6 +839,7 @@ impl NodeConfiguration {
             (Self::None, ConfigurationKind::None) => true,
             (Self::End, ConfigurationKind::End) => true,
             (Self::JoinFailures, ConfigurationKind::JoinFailures) => true,
+            (Self::LegacyReviewVerdict, ConfigurationKind::LegacyReviewVerdict) => true,
             (Self::Human(config), ConfigurationKind::Human) => config.is_valid(),
             (Self::Wait(config), ConfigurationKind::Wait) => config.is_valid(),
             (Self::Fork(_), ConfigurationKind::Fork)

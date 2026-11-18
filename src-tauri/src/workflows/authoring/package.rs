@@ -47,9 +47,6 @@ impl PackageDocument {
         previous: Option<&Self>,
     ) -> Result<Self> {
         validate_structure(&package)?;
-        for member in &package.members {
-            member.body.ensure_supported_nodes()?;
-        }
         let registry: HashMap<_, _> = builtin_registry()
             .into_iter()
             .map(|definition| (definition.kind, definition))
@@ -77,6 +74,19 @@ impl PackageDocument {
                     .map(|version| publish::load_published(db, project, version))
                     .transpose()?
                     .flatten();
+                if let Err(error) = member.body.ensure_supported_nodes() {
+                    let opens_saved_revision = previous.is_none()
+                        && base.as_ref().is_some_and(|saved| {
+                            saved.body == member.body
+                                && saved.references.len() == member.references.len()
+                                && saved.references.iter().all(|(slot, reference)| {
+                                    member.references.get(slot) == Some(&reference.clone().into())
+                                })
+                        });
+                    if !opens_saved_revision {
+                        return Err(error);
+                    }
+                }
                 if previous.is_none_or(|saved| !saved.definitions.contains_key(&member.key))
                     && let Some(base) = &base
                     && !base.layout.is_empty()

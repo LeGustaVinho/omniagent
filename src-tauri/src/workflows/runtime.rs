@@ -638,7 +638,7 @@ pub(crate) fn load_definition(
         .map(|payload| {
             let mut definition: WorkflowDefinition =
                 serde_json::from_slice(&protection::unprotect(&payload)?)?;
-            definition.normalize_prompt_joins();
+            definition.normalize_legacy_prompt_nodes();
             Ok(definition)
         })
         .transpose()

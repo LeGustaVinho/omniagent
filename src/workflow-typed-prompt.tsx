@@ -80,12 +80,14 @@ export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPro
       source="Inherited" reset={() => onReference(slot)}>{picker}</Resettable>;
   };
   const effectiveRole = role && { ...role, ...defaultRoleOverrides, ...roleOverrides } as RoleSnapshot;
+  const requiresWrite = effectiveRole?.toolScope === "approved_write";
   const unresolved = ["role", "input_schema", "output_schema"].filter((slot) =>
     !((references as Record<string, unknown>)[slot] ?? (defaults as Record<string, unknown>)[slot]));
   return <div className="workflow-prompt-inspector pipeline-form pipeline-stack" aria-label="AI Node Agent settings">
     {onTitle && <label>Card title<input value={title ?? ""} disabled={disabled}
       onChange={(event) => onTitle(event.currentTarget.value)} /></label>}
     {field("role", "Role", roleChoices)}
+    {requiresWrite && <p role="status">This Role requests worktree write access. Choose a read-only Role or set Tool scope to Repository read.</p>}
     {field("input_schema", "Input Schema", schemaChoices)}
     {field("output_schema", "Output Schema", schemaChoices)}
     {effectiveRole?.reviewPolicy === "cross_review" && field("reviewer", "Review Role", roleChoices)}
@@ -111,7 +113,7 @@ export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPro
       inherited={defaultRoleOverrides} local={roleOverrides} disabled={disabled} onChange={onRoleOverrides} />}
     {onSavePrefab && <WorkflowBuilderDialog title="Save Node Prefab" description="Reuse this configuration in other pipelines."
       open={showSave} onOpenChange={setShowSave} trigger={<Button type="button" variant="outline" className="w-fit"
-        disabled={disabled || !!unresolved.length || !body.trim()}><Save size={15} aria-hidden /> Save as Node Prefab</Button>}>
+        disabled={disabled || requiresWrite || !!unresolved.length || !body.trim()}><Save size={15} aria-hidden /> Save as Node Prefab</Button>}>
       <form className="pipeline-form pipeline-stack" onSubmit={(event) => {
         event.preventDefault();
         if (!name.trim()) return;
@@ -160,7 +162,8 @@ function RoleOverrides({ projectId, checkoutId, role, inherited, local, disabled
       {field("completionContract", <label>Completion contract<textarea rows={3} value={role.completionContract}
         onChange={(event) => write("completionContract", event.currentTarget.value)} /></label>)}
       {field("toolScope", <label>Tool scope<select value={role.toolScope} onChange={(event) => write("toolScope", event.currentTarget.value)}>
-        <option value="read_only">Repository read</option><option value="approved_write">Approved worktree write</option>
+        <option value="read_only">Repository read</option>
+        {role.toolScope === "approved_write" && <option value="approved_write" disabled>Approved worktree write</option>}
       </select></label>)}
       {field("reviewPolicy", <label>Review policy<select value={role.reviewPolicy} onChange={(event) => write("reviewPolicy", event.currentTarget.value)}>
         <option value="independent">Independent review</option><option value="cross_review">Cross-review</option>

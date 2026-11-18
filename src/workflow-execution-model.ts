@@ -97,18 +97,37 @@ type BacklogExecution = ExecutionWait & {
   tasks: { key: string; taskId: string; workflowRunId: string }[];
 };
 
-export function subflowForStage(definition: WorkflowExecutionSnapshot["definition"], nodeId: string) {
-  if (!definition.nodes.some(({ instance }) => instance.kind === "end" && !instance.id.includes("::"))) return undefined;
+const executionHelperKinds = new Set(["loop_gate", "loop_step", "loop_result", "join_failures", "legacy_review_verdict"]);
+
+export function isExecutionHelper({ instance }: ExecutionPinnedNode) {
+  return executionHelperKinds.has(instance.configuration.kind);
+}
+
+function foldsSubflows(definition: WorkflowExecutionSnapshot["definition"]) {
+  return definition.nodes.some((node) => isExecutionHelper(node) ||
+    node.instance.kind === "end" && !node.instance.id.includes("::"));
+}
+
+function subflowForStage(definition: WorkflowExecutionSnapshot["definition"], nodeId: string) {
+  if (!foldsSubflows(definition)) return undefined;
   return definition.subflows?.filter(({ nodes }) => nodes.includes(nodeId))
     .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+export function executionStageLocation(definition: WorkflowExecutionSnapshot["definition"], node: ExecutionPinnedNode) {
+  const scope = subflowForStage(definition, node.instance.id);
+  if (scope && isExecutionHelper(node)) {
+    const parent = scope.path.lastIndexOf("::");
+    return { nodeId: scope.path, scopePath: parent < 0 ? "" : scope.path.slice(0, parent) };
+  }
+  return { nodeId: node.instance.id, scopePath: scope?.path ?? "" };
 }
 
 export function executionCanvasGraph(definition: WorkflowExecutionSnapshot["definition"], scope?: ExecutionSubflow) {
   const scoped = scope ? new Set(scope.nodes) : undefined;
   const original = new Map(definition.nodes.map((node) => [node.instance.id, node]));
   const prefix = scope ? scope.path + "::" : "";
-  const fold = definition.nodes.some(({ instance }) => instance.kind === "end" && !instance.id.includes("::"));
-  const subflows = new Map((fold ? definition.subflows ?? [] : []).filter(({ path }) =>
+  const subflows = new Map((foldsSubflows(definition) ? definition.subflows ?? [] : []).filter(({ path }) =>
     path.startsWith(prefix) && !path.slice(prefix.length).includes("::"))
     .map((subflow) => [subflow.path, subflow]));
   const owners = new Map<string, ExecutionSubflow>();
@@ -163,10 +182,7 @@ export function executionCanvasGraph(definition: WorkflowExecutionSnapshot["defi
     const id = node.instance.id;
     if (scoped && !scoped.has(id)) return [];
     const subflow = owners.get(id);
-    if (!subflow) {
-      if (["loop_gate", "loop_step", "loop_result", "join_failures"].includes(node.instance.configuration.kind)) return [];
-      return [node];
-    }
+    if (!subflow) return isExecutionHelper(node) ? [] : [node];
     if (emitted.has(subflow.path)) return [];
     emitted.add(subflow.path);
     const resultSource = subflow.outputs.results && original.get(subflow.outputs.results.node);

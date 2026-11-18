@@ -385,8 +385,9 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await browser.keys([Key.Shift, Key.F10]);
   const insertNode = browser.$('[role="dialog"]');
   await insertNode.$("button=AI Node Agent").waitForDisplayed({ timeout });
-  const choices = await insertNode.$$(".workflow-node-picker-list button");
-  assert.deepEqual(await Promise.all(choices.map((choice) => choice.getText())), [
+  const choices = await browser.execute(() =>
+    [...document.querySelectorAll(".workflow-node-picker-list button")].map((choice) => choice.textContent.trim()));
+  assert.deepEqual(choices, [
     "AI Node Agent", "Parallel / Fork", "Join", "Wait", "Loop", "Human in the Loop",
   ]);
   await browser.keys("Escape");
@@ -750,7 +751,8 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   const draftScope = { projectId, draftId: created.id };
   await setWindow(browser, invoke, 1440, 900);
   await openBuilder(browser);
-  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open visual draft']`));
+  await click(browser.$('nav[aria-label="Pipelines views"]').$("button=Library"));
+  await click(browser.$(`[aria-label="Workflow library"] button[aria-label=${JSON.stringify("Open draft of " + title)}]`));
   const editor = browser.$(builder);
   const inspector = editor.$('[aria-label="Node configuration"]');
   const promptSettings = inspector.$('[aria-label="AI Node Agent settings"]');

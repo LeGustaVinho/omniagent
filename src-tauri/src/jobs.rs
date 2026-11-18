@@ -89,11 +89,11 @@ pub(crate) use native_goal_qualification::{
 };
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use orchestration::RunOrchestration;
+pub(crate) use pipeline::WorkflowJobLaunch;
 pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,
 };
-pub(crate) use pipeline::WorkflowJobLaunch;
 pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,

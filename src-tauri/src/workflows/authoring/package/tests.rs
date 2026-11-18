@@ -70,6 +70,118 @@ fn package(members: Vec<PackageMember>) -> WorkflowPackage {
 }
 
 #[tokio::test]
+async fn opens_an_archived_function_for_repair_without_publishing_retired_nodes() -> Result<()> {
+    use crate::workflows::ArchivedNode;
+    use serde_json::json;
+
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("archived-function.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id;
+    let body = serde_json::from_value(json!({
+        "kind": "subflow",
+        "graph": {
+            "name": "Archived Function",
+            "nodes": [
+                {"id": "start", "kind": "start", "configuration": {"kind": "none"}},
+                {"id": "legacy", "kind": "join", "configuration": {"kind": "none"}},
+                {"id": "end", "kind": "end", "configuration": {"kind": "end"}}
+            ],
+            "wires": [
+                {"from": {"node": "start", "port": "start"}, "to": {"node": "legacy", "port": "branches"}},
+                {"from": {"node": "legacy", "port": "joined"}, "to": {"node": "end", "port": "ready"}}
+            ]
+        }
+    }))?;
+    let version = PackageArtifactVersion {
+        destination: PackageDestination::Project,
+        kind: PackageArtifactKind::Subflow,
+        id: "archived-function".into(),
+        revision: "saved-revision".into(),
+    };
+    let legacy_definition = serde_json::from_value(json!({
+        "kind": "join", "revision": 1, "title": "Join", "executor": "join_branches",
+        "configuration": "none", "effect": "none",
+        "inputs": [{"name": "branches", "value": {"kind": "control"}}],
+        "outputs": [{"name": "joined", "value": {"kind": "control"}}]
+    }))?;
+    let artifact = PublishedPackageArtifact {
+        version: version.clone(),
+        name: "Archived Function".into(),
+        body,
+        references: BTreeMap::new(),
+        definitions: BTreeMap::from([("legacy".into(), legacy_definition)]),
+        layout: serde_json::from_value(json!({"legacy": {"x": 36, "y": 24}}))?,
+        blockers: Vec::new(),
+        prompt_expansion: None,
+    };
+    let mut editing = member("artifact", artifact.body.clone());
+    editing.base = Some(version.clone());
+    let scope = version.destination.key(&project);
+    store
+        .execute(move |db| {
+            db.execute(
+                "INSERT INTO workflow_package_artifact_revisions VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    scope,
+                    version.kind.sql(),
+                    version.id,
+                    version.revision,
+                    seal(&artifact)?
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO workflow_package_artifact_heads VALUES (?1, ?2, ?3, ?4)",
+                params![scope, version.kind.sql(), version.id, version.revision],
+            )?;
+            Ok(())
+        })
+        .await?;
+
+    let draft = store
+        .create_workflow_package(project.clone(), None, package(vec![editing.clone()]))
+        .await?;
+    assert!(draft.layouts["artifact"].contains_key("legacy"));
+    assert!(
+        store
+            .publish_reviewed_workflow_package(
+                project.clone(),
+                draft.id.clone(),
+                draft.revision.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retired node type")
+    );
+    let PackageArtifactBody::Subflow { graph, .. } = &mut editing.body else {
+        unreachable!();
+    };
+    assert_eq!(
+        graph.nodes[1].kind,
+        BuiltinNode::Archived(ArchivedNode::Join)
+    );
+    graph.nodes.remove(1);
+    graph.wires = crate::workflows::tests::simple_graph("Repaired Function").wires;
+    let saved = store
+        .save_workflow_package(
+            project.clone(),
+            draft.id,
+            draft.revision,
+            package(vec![editing]),
+        )
+        .await?;
+    assert!(saved.layouts.is_empty());
+    assert!(matches!(
+        store
+            .publish_reviewed_workflow_package(project, saved.id, saved.revision)
+            .await?,
+        WorkflowPackagePublishOutcome::Published { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
     use crate::{
         conversations::ConversationPipelineChoice,

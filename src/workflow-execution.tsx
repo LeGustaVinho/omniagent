@@ -14,8 +14,8 @@ import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowStageDecisionForm } from "@/workflow-stage-decisions";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import {
-  controlForNode, executionCanvasGraph, executionOutputForWire, needsExecutionRefresh,
-  presentation, subflowForStage, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
+  controlForNode, executionCanvasGraph, executionOutputForWire, executionStageLocation, isExecutionHelper, needsExecutionRefresh,
+  presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
   type ExecutionSubflow, type ExecutionUnit, type WorkflowExecutionFocus, type WorkflowExecutionSnapshot,
   type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
@@ -79,18 +79,24 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
   const workId = origin && origin.kind !== "editor" ? origin.workId : undefined;
   const focusedOutput = focusedNode && runFocus?.artifactId ? snapshot.outputs.find(({ artifact }) =>
     artifact.id === runFocus.artifactId && artifact.nodeInstanceId === focusedNode.instance.id)?.artifact : undefined;
-  const [selected, setSelected] = useState(focusedNode?.instance.id ?? definition.nodes[0]?.instance.id ?? "");
+  const focus = focusedNode && executionStageLocation(definition, focusedNode);
+  const [selected, setSelected] = useState(() => focus?.nodeId ?? executionCanvasGraph(definition).nodes[0]?.instance.id ?? "");
   const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
   function viewStage(id: string) {
-    if (!graph.nodes.some(({ instance }) => instance.id === id)) {
-      setSubflowPath(subflowForStage(definition, id)?.path ?? "");
+    const visible = graph.nodes.some(({ instance }) => instance.id === id);
+    if (visible) {
+      setSelected(id);
+    } else {
+      const node = staged.get(id)?.node;
+      if (!node) return;
+      const location = executionStageLocation(definition, node);
+      setSubflowPath(location.scopePath);
+      setSelected(location.nodeId);
     }
-    setSelected(id);
     revealInspector((request) => request + 1);
   }
   const [selectedUnit, setSelectedUnit] = useState<string>();
-  const [subflowPath, setSubflowPath] = useState(() =>
-    subflowForStage(definition, focusedNode?.instance.id ?? "")?.path ?? "");
+  const [subflowPath, setSubflowPath] = useState(() => focus?.scopePath ?? "");
   const [theme, setTheme] = useState(readTheme);
   const [menu, setMenu] = useState<{ target: ExecutionTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement }>();
   const { copy, feedback } = useContextActionFeedback();
@@ -139,7 +145,11 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
   const active = stages.find(({ node }) => node.instance.id === selected);
   const retired = definition.nodes.some(({ instance }) => !isSupportedWorkflowNode(instance.kind));
   const scopedStages = subflow ? concreteStages.filter(({ node }) => subflow.nodes.includes(node.instance.id)) : concreteStages;
-  const waiting = scopedStages.find(({ pending }) => pending) ?? scopedStages.find(({ detail }) => detail.status === "waiting");
+  const waitingStages = scopedStages.filter(({ node, detail }) => detail.status === "waiting" && !isExecutionHelper(node));
+  const waiting = waitingStages.find(({ pending }) => pending)
+    ?? waitingStages.find(({ node }) => snapshot.timedWaits?.some(({ nodeId }) => node.instance.id === nodeId))
+    ?? waitingStages.find(({ detail }) => !detail.missing)
+    ?? waitingStages[0];
   const failed = scopedStages.find(({ detail }) => detail.status === "failed" || detail.status === "interrupted");
   const nodes: ExecutionNode[] = stages.map(({ node, detail }) => ({
     id: node.instance.id, position: snapshot.layout?.[node.instance.id] ?? positions[node.instance.id]!, type: "execution", selected: node.instance.id === selected,
@@ -289,12 +299,14 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
             {active.detail.status === "completed" && Object.entries(active.group.outputs).map(([port, endpoint]) => {
               const artifact = executionOutputForWire(snapshot, endpoint, unit)?.artifact;
               if (!artifact) return null;
+              const source = staged.get(endpoint.node)?.node;
               return <section key={port} aria-label={`Result on ${port}`}>
                 <h3>{port}</h3>
                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs">
                   {typeof artifact.value.evidence === "string" ? artifact.value.evidence : JSON.stringify(artifact.value.evidence, null, 2)}
                 </pre>
-                <Button type="button" variant="ghost" onClick={() => viewStage(endpoint.node)}>Inspect result source</Button>
+                {source && !isExecutionHelper(source) &&
+                  <Button type="button" variant="ghost" onClick={() => viewStage(endpoint.node)}>Inspect result source</Button>}
               </section>;
             })}
           </section> : <>

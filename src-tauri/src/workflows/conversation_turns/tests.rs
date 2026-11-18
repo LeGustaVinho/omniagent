@@ -1,6 +1,8 @@
 use super::*;
 use crate::{
-    conversations::ConversationPipelineChoice,
+    conversations::{ConversationPipelineChoice, SessionScope},
+    providers::Provider,
+    repository::ProjectCheckout,
     workflows::{WorkflowGraph, tests::approved_delivery_repository},
 };
 
@@ -28,18 +30,110 @@ async fn publish_fixture(
     Ok(workflow)
 }
 
+fn direct_scope(repo: &ProjectCheckout) -> Result<SessionScope> {
+    Ok(SessionScope {
+        provider: Provider::Codex,
+        profile_id: "fixture".into(),
+        account_binding: None,
+        executable: std::env::current_exe()?,
+        checkout: repo.checkout_root.clone().into(),
+        cli_version: "1.2.3".into(),
+        mode: SessionMode::ReadOnly,
+        model: None,
+        effort: None,
+        runner: "fixture-runner".into(),
+        permission_revision: "fixture-policy".into(),
+    })
+}
+
+#[tokio::test]
+async fn direct_chat_with_legacy_pin_can_send_a_fresh_turn() -> Result<()> {
+    use crate::jobs::JobContext;
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("native-chat.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let chat = store
+        .create_conversation(repo.checkout_id.clone(), "Direct".into())
+        .await?;
+    let project = repo.project_id.clone();
+    let conversation = chat.id.clone();
+    let legacy = store
+        .execute(move |db| {
+            let version = pin_direct_conversation(db, &project, &conversation)?;
+            let definition = load_definition(db, &project, &version)?
+                .context("Missing direct conversation pin")?;
+            let mut saved = serde_json::to_value(definition)?;
+            let agent = saved["nodes"]
+                .as_array_mut()
+                .and_then(|nodes| {
+                    nodes
+                        .iter_mut()
+                        .find(|node| node["instance"]["id"] == "conversation-agent")
+                })
+                .context("Missing direct conversation agent")?;
+            agent["instance"]["kind"] = "conversation_agent".into();
+            agent["definition"]["kind"] = "conversation_agent".into();
+            agent["definition"]["title"] = "Conversation Agent".into();
+            // The old executor exposed the data port before the failure port.
+            agent["definition"]["outputs"] = serde_json::json!([
+                {"name":"completed", "value":{"kind":"control"}},
+                {"name":"result", "value":{"kind":"data", "artifact":"json_object"}},
+                {"name":"failed", "value":{"kind":"control"}}
+            ]);
+            db.execute(
+                "UPDATE workflow_revisions SET definition = ?4
+                 WHERE project_id = ?1 AND workflow_id = ?2 AND revision = ?3",
+                params![
+                    project,
+                    version.id,
+                    version.revision,
+                    protection::protect(&serde_json::to_vec(&saved)?)?
+                ],
+            )?;
+            Ok(version)
+        })
+        .await?;
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    reopened
+        .save_conversation_draft(chat.id.clone(), "A new question".into())
+        .await?;
+    let job = reopened
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id,
+            },
+            direct_scope(&repo)?,
+            "A new question".into(),
+        )
+        .await?;
+    let turns = reopened.conversation_pipeline_turns(chat.id).await?;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].request_id, job.id);
+    let run_id = turns[0].run_id.clone().context("Missing new direct run")?;
+    let run = reopened
+        .workflow_run(repo.project_id, run_id)
+        .await?
+        .context("Missing pinned direct run")?;
+    assert_eq!(run.version, legacy);
+    Ok(())
+}
+
 #[tokio::test]
 async fn direct_turn_keeps_the_revised_instruction_and_recovers_to_end() -> Result<()> {
     use crate::{
-        conversations::SessionScope,
         jobs::{AdmissionEnvironment, JobContext, RecoveryAction},
-        providers::Provider,
         runs::RunStatus,
     };
 
     let temp = tempfile::tempdir()?;
     let store = Store::open(temp.path().join("native-chat.sqlite"))?;
     let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let scope = direct_scope(&repo)?;
     let chat = store
         .create_conversation_with_pipeline(
             repo.checkout_id,
@@ -47,19 +141,6 @@ async fn direct_turn_keeps_the_revised_instruction_and_recovers_to_end() -> Resu
             ConversationPipelineChoice::Direct,
         )
         .await?;
-    let scope = SessionScope {
-        provider: Provider::Codex,
-        profile_id: "fixture".into(),
-        account_binding: None,
-        executable: std::env::current_exe()?,
-        checkout: repo.checkout_root.into(),
-        cli_version: "1.2.3".into(),
-        mode: SessionMode::ReadOnly,
-        model: None,
-        effort: None,
-        runner: "fixture-runner".into(),
-        permission_revision: "fixture-policy".into(),
-    };
     store
         .save_conversation_draft(chat.id.clone(), "Native question".into())
         .await?;

@@ -942,6 +942,22 @@ impl<'a> Evaluation<'a> {
                 {
                     (ControlStageState::Completed, Some("joined"), None)
                 }
+                JoinResults
+                    if matches!(
+                        node.instance.configuration,
+                        NodeConfiguration::LegacyReviewVerdict
+                    ) =>
+                {
+                    let approved = selected_artifact("value").is_some_and(|artifact| {
+                        matches!(&artifact.value, ArtifactValue::JsonObject(value)
+                            if value.get("approved") == Some(&serde_json::Value::Bool(true)))
+                    });
+                    (
+                        ControlStageState::Completed,
+                        Some(if approved { "matched" } else { "unmatched" }),
+                        None,
+                    )
+                }
                 _ => return Ok(None),
             }
         };

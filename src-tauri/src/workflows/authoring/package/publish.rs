@@ -1084,6 +1084,14 @@ impl<'a> GraphCompiler<'a> {
         if let Some(expansion) = &artifact.prompt_expansion
             && expansion.workflow.unsupported_node().is_none()
         {
+            ensure!(
+                expansion
+                    .workflow
+                    .nodes
+                    .iter()
+                    .all(|node| node.definition.executor != crate::workflows::Executor::WriteAgent),
+                prompt_card::WORKFLOW_WRITE_UNAVAILABLE
+            );
             return Ok(BoundSubflow {
                 name: artifact.name.clone(),
                 version: artifact.version.clone(),

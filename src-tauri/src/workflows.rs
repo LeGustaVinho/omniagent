@@ -180,7 +180,7 @@ impl WorkflowDefinition {
         Ok(())
     }
 
-    fn normalize_prompt_joins(&mut self) {
+    fn normalize_legacy_prompt_nodes(&mut self) {
         let generated_joins = self
             .subflows
             .iter()
@@ -196,6 +196,7 @@ impl WorkflowDefinition {
                 .then(|| failure.node.clone())
             })
             .collect::<HashSet<_>>();
+        let generated_verdicts = self.generated_legacy_review_verdicts();
         for node in &mut self.nodes {
             if generated_joins.contains(&node.instance.id)
                 && node.instance.kind == BuiltinNode::Archived(ArchivedNode::Join)
@@ -207,7 +208,63 @@ impl WorkflowDefinition {
                 node.definition.kind = BuiltinNode::JoinResults;
                 registry::configure_failure_join(&mut node.definition);
             }
+            if generated_verdicts.contains(&node.instance.id) {
+                node.instance.kind = BuiltinNode::JoinResults;
+                node.instance.configuration = NodeConfiguration::LegacyReviewVerdict;
+                node.definition.kind = BuiltinNode::JoinResults;
+                registry::configure_legacy_review_verdict(&mut node.definition);
+            }
         }
+    }
+
+    fn generated_legacy_review_verdicts(&self) -> HashSet<String> {
+        let nodes: HashMap<_, _> = self
+            .nodes
+            .iter()
+            .map(|node| (node.instance.id.as_str(), node))
+            .collect();
+        self.subflows.iter().filter_map(|scope| {
+            use role_templates::TemplateReviewPolicy;
+
+            let execute = format!("{}::execute", scope.path);
+            let reviewer = format!("{}::reviewer", scope.path);
+            let verdict = format!("{}::verdict", scope.path);
+            let failure = format!("{}::failure", scope.path);
+            let end = format!("{}::return", scope.path);
+            let old = *nodes.get(verdict.as_str())?;
+            let execute_role = &structured_agent::configuration(nodes.get(execute.as_str())?)?.effective_role;
+            let review_config = structured_agent::configuration(nodes.get(reviewer.as_str())?)?;
+            let targets = |name: &str, node: &str, port: &str| {
+                scope.outputs.get(name).is_some_and(|endpoint| endpoint.node == node && endpoint.port == port)
+            };
+            let wired = |from: &str, output: &str, to: &str, input: &str| {
+                self.wires.iter().any(|wire| {
+                    wire.from.node == from && wire.from.port == output
+                        && wire.to.node == to && wire.to.port == input
+                })
+            };
+            (old.instance.kind == BuiltinNode::Archived(ArchivedNode::Condition)
+                && old.definition.kind == old.instance.kind
+                && old.definition.executor == Executor::EvaluateCondition
+                && old.definition.configuration == ConfigurationKind::Condition
+                && matches!(&old.instance.configuration, NodeConfiguration::Condition {
+                    predicate: ConditionPredicate::Equals { pointer, value: serde_json::Value::Bool(true) }
+                } if pointer == "/evidence/approved")
+                && execute_role.review_policy == TemplateReviewPolicy::CrossReview
+                && review_config.effective_role.review_policy == TemplateReviewPolicy::Independent
+                && !review_config.review_verdict
+                && scope.nodes.contains(&verdict)
+                && targets("completed", &end, "completed")
+                && targets("result", &end, "result")
+                && targets("failed", &failure, "joined")
+                && self.wires.iter().filter(|wire| wire.to.node == verdict).count() == 2
+                && self.wires.iter().filter(|wire| wire.from.node == verdict).count() == 2
+                && wired(&reviewer, "completed", &verdict, "ready")
+                && wired(&reviewer, "result", &verdict, "value")
+                && wired(&verdict, "matched", &end, "ready")
+                && wired(&verdict, "unmatched", &failure, "branches"))
+            .then_some(verdict)
+        }).collect()
     }
 }
 

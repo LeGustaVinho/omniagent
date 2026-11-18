@@ -10,7 +10,7 @@ import type { Job } from "@/bindings/Job";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
-import { executionCanvasGraph, needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
+import { executionCanvasGraph, executionStageLocation, needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
   type ExecutionPinnedNode, type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { testCheckout } from "@/test-fixtures/checkout";
 
@@ -116,6 +116,71 @@ it("shows a Function as one live graph node with its published result and intern
   expect(within(screen.getByRole("region", { name: "Result on reply" })).getByText(/A structured summary/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Open internal graph" }));
   expect(screen.getByRole("button", { name: "AI Node Agent · Completed" })).toBeTruthy();
+});
+
+it.each([true, false])("opens the waiting Loop iteration with a root End: %s", async (withEnd) => {
+  const start = node("start", "Start", [], [control("start")]);
+  const entry = node("loop::start", "Start", [control("ready")], [control("ready")]);
+  const wait = node("loop::iteration-1::wait", "Wait", [control("ready")], [control("completed")]);
+  const end = node("end", "End", [control("ready")]);
+  entry.instance.kind = entry.definition.kind = "start";
+  wait.instance.kind = wait.definition.kind = "wait";
+  function phase(id: string, title: string, kind: string, input: string, output: string) {
+    const stage = node(`loop::${id}`, title, [control(input)], [control(output)]);
+    stage.instance.kind = stage.definition.kind = "loop";
+    stage.instance.configuration = { kind };
+    return stage;
+  }
+  const collect = phase("collect", "Collect loop outputs", "loop_result", "exit:1", "completed");
+  collect.definition.outputs.push(port("results", "json_object"));
+  const gate = phase("gate-1", "Start loop iteration", "loop_gate", "ready", "iterate");
+  const step = phase("step-1", "Record loop iteration", "loop_step", "completed", "exit");
+  const connect = (source: ExecutionPinnedNode, output: string, target: ExecutionPinnedNode, input: string) =>
+    ({ from: { node: source.instance.id, port: output }, to: { node: target.instance.id, port: input } });
+  const body = { id: "pause", revision: "published-pause", kind: "subflow" as const, destination: "project" as const };
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, projectId, version, planRevision: null },
+    definition: {
+      version, name: "Timed loop", nodes: [start, entry, collect, gate, wait, step, ...(withEnd ? [end] : [])],
+      wires: [
+        connect(start, "start", entry, "ready"), connect(entry, "ready", gate, "ready"),
+        connect(gate, "iterate", wait, "ready"), connect(wait, "completed", step, "completed"),
+        connect(step, "exit", collect, "exit:1"), ...(withEnd ? [connect(collect, "completed", end, "ready")] : []),
+      ],
+      subflows: [
+        { path: "loop", name: "Loop Pause", version: body,
+          nodes: [entry, collect, gate, wait, step].map(({ instance }) => instance.id),
+          outputs: { completed: { node: collect.instance.id, port: "completed" }, results: { node: collect.instance.id, port: "results" } } },
+        { path: "loop::iteration-1", name: "Pause", version: body, nodes: [wait.instance.id],
+          outputs: { completed: { node: wait.instance.id, port: "completed" } } },
+      ],
+    },
+    units: [], unitNodeIds: [], jobs: [], outputs: [],
+    control: [
+      { nodeId: start.instance.id, state: "completed", selectedPorts: ["start"] },
+      { nodeId: entry.instance.id, state: "completed", selectedPorts: ["ready"] },
+      { nodeId: gate.instance.id, state: "completed", selectedPorts: ["iterate"] },
+    ],
+    timedWaits: [{ nodeId: wait.instance.id, unitId: null, deadlineAt: Date.now() + 60_000 }],
+  };
+  expect(executionStageLocation(snapshot.definition, collect)).toEqual({ nodeId: "loop", scopePath: "" });
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "list_repository_deliveries") return [snapshot.run];
+    if (command === "inspect_workflow_execution") return snapshot;
+    throw new Error(command);
+  });
+  render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={testCheckout}
+    target={`run:${runId}`} openWorkspace={vi.fn()}
+    openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
+  expect(await screen.findByRole("button", { name: "Loop Pause · Waiting" })).toBeTruthy();
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "View waiting stage" }));
+  const scope = screen.getByRole<HTMLSelectElement>("combobox", { name: "Pinned subflow" });
+  expect(scope.value).toBe("loop::iteration-1");
+  const inspector = within(screen.getByRole("complementary", { name: "Execution node evidence" }));
+  expect(inspector.getByRole<HTMLInputElement>("combobox", { name: "Inspect execution node" }).value).toBe(wait.instance.id);
+  expect(inspector.getByText(/^Resumes /)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Collect loop outputs/ })).toBeNull();
 });
 
 it("keeps wait text scoped to its unit and resolves the original artifact forwarded through Repeat until", () => {
