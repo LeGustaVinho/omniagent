@@ -22,7 +22,7 @@ import { PROMPT_EXECUTORS, promptNodeDefinition, promptReferenceValue, type Prom
   initialPromptSample, type PromptSample } from "@/workflow-prompt-model";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { configuredBranches, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowNodeConfiguration,
-  type WorkflowEndpoint, type WorkflowGraph, type WorkflowLayout, type WorkflowPortType, type WorkflowReuseSelection } from "@/workflow-graph-model";
+  type WorkflowEndpoint, type WorkflowGraph, type WorkflowGraphNode, type WorkflowLayout, type WorkflowPortType, type WorkflowReuseSelection } from "@/workflow-graph-model";
 import { PublishedSubflow, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
   type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 
@@ -183,7 +183,7 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         graph={graph.graph} references={graph.references ?? {}} draftPresets={draftPresets}
         canvas={canvasByMember[graph.key] ?? { layout: layouts[graph.key] ?? {}, updateDefinitions: {} }}
         setCanvas={(canvas) => changeCanvas(graph.key, canvas)}
-        pinned={pinned} catalog={registry.data} disabled={disabled} graphs={graphs} memberKey={graph.key}
+        pinned={pinned} catalog={registry.data} disabled={disabled} graphs={graphs} memberKey={graph.key} isFunction={graph.kind === "subflow"}
         edit={(next, references) => edit(graph.key, next, references)}
         promptMembers={promptMembers} draftRoles={draftRoles} draftSchemas={draftSchemas} editPrompt={editPrompt} newPrompt={newPrompt} savePrefab={savePrefab}
         previewMembers={preview.data.members}
@@ -220,8 +220,13 @@ function promptRoles(drafts: PromptRoleChoice[], published?: { name: string; ver
   }))];
 }
 
+function acceptsStartSchema(node: WorkflowGraphNode, definition?: WorkflowDefinition) {
+  return node.kind === "typed_start" || node.configuration.kind === "subflow_entry" && definition?.outputs.some(({ name, value }) =>
+    name === "inputs" && value.kind === "data" && value.artifact === "json_object") === true;
+}
+
 function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow,
-  canvas, setCanvas, graphs, memberKey, onDerive, deriveDisabled, toolbarStart, initialViewport, onViewportChange,
+  canvas, setCanvas, graphs, memberKey, isFunction, onDerive, deriveDisabled, toolbarStart, initialViewport, onViewportChange,
   promptMembers, draftRoles, draftSchemas, editPrompt, previewMembers, newPrompt, savePrefab }: {
   projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
   references: Record<string, ReusableReference>; draftPresets: Record<string, ReusableBody>;
@@ -238,6 +243,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   setCanvas: (canvas: WorkflowCanvasEdit) => void;
   graphs: GraphMember[];
   memberKey: string;
+  isFunction: boolean;
   onDerive: (selection: WorkflowReuseSelection) => void;
   deriveDisabled: boolean;
   toolbarStart?: ReactNode;
@@ -349,13 +355,23 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
       inputSchemas: schemaPorts(child.inputs), outputSchemas: schemaPorts(child.outputs) };
   }
   const definitions = editorDefinitions(state, discovered, catalog, subflowDefinition);
+  const savedReferences = previewMembers.find(({ key }) => key === memberKey)?.dependencies;
   for (const node of graph.nodes) {
-    const schema = resources.schema(references[node.id + ":schema"]);
+    const slot = node.id + ":schema";
+    const schema = resources.schema(references[slot]);
     const definition = definitions[node.id];
     if (!definition) continue;
-    if (schema && node.kind === "typed_start") definitions[node.id] = { ...definition, outputSchemas: { inputs: schema } };
-    if (node.kind === "end") definitions[node.id] = schema ? { ...definition, inputSchemas: { result: schema }, outputSchemas: { result: schema } }
-      : { ...definition, inputSchemas: undefined, outputSchemas: undefined };
+    if (acceptsStartSchema(node, definition) && (schema || savedReferences?.[slot])) {
+      const outputSchemas = { ...definition.outputSchemas };
+      if (schema) outputSchemas.inputs = schema;
+      else delete outputSchemas.inputs;
+      definitions[node.id] = { ...definition, outputSchemas };
+    }
+    if (node.kind === "end") {
+      const terminal = isFunction ? { ...definition, title: "Return" } : definition;
+      definitions[node.id] = schema ? { ...terminal, inputSchemas: { result: schema }, outputSchemas: { result: schema } }
+        : { ...terminal, inputSchemas: undefined, outputSchemas: undefined };
+    }
     if (schema && node.kind === "validate_output") definitions[node.id] = { ...definition, outputSchemas: { object: schema } };
   }
   for (const [id, member] of promptsByNode) {
@@ -375,9 +391,10 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   function referencePicker(id: string) {
     const node = graph.nodes.find((candidate) => candidate.id === id);
     if (!node) return null;
-    if (["end", "typed_start", "validate_output"].includes(node.kind) && graph.nodes.some(({ kind }) => kind === "end")) {
+    const startSchema = acceptsStartSchema(node, definitions[id]);
+    if ((startSchema || ["end", "validate_output"].includes(node.kind)) && graph.nodes.some(({ kind }) => kind === "end")) {
       const slot = id + ":schema";
-      return <WorkflowReferenceField label={node.kind === "typed_start" ? "Input Schema" : "Output Schema"} selected={references[slot]}
+      return <WorkflowReferenceField label={startSchema ? "Input Schema" : "Output Schema"} selected={references[slot]}
         choices={schemas} disabled={disabled} onChange={(reference) => edit(graph, replaceReference(references, slot, reference))} />;
     }
     const kind = ["subflow", "repeat_until", "for_each", "loop"].includes(node.kind) ? "subflow"
@@ -432,6 +449,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
       fullHeight toolbarStart={toolbarStart} initialViewport={initialViewport} onViewportChange={onViewportChange}
+      nameLabel={isFunction ? "Function name" : undefined}
       insertTools={newPrompt && graph.nodes.some(({ kind }) => kind === "end") ? (insert, options) =>
         <WorkflowNodePicker {...options} projectId={projectId} disabled={disabled} onAdd={(kind) => {
           if (kind === "subflow") insert(kind, { reference: newPrompt() });

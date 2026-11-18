@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
+import type { PackageDraft } from "@/workflow-authoring-package";
 import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
@@ -145,6 +146,79 @@ it("loads published Library artifacts without loading the Builder node registry"
   expect(library.queryByText("Import or export workflow packages")).toBeNull();
   expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions", expect.anything());
   expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: exampleCheckout.projectId });
+});
+
+it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and opens its editor", async (title) => {
+  const schema = { kind: "schema", destination: "project", id: "schema", revision: "schema-revision" };
+  const useFunction = title === "Function";
+  const end: WorkflowDefinition = { ...start, kind: "end", title: "End", configuration: "end",
+    inputs: [control("ready"), data("result", "json_object")], outputs: [control("completed"), data("result", "json_object")] };
+  const ipc = vi.mocked(invoke);
+  let draft: PackageDraft | undefined;
+  const projectId = exampleCheckout.projectId;
+  ipc.mockImplementation(async (command, payload) => {
+    switch (command) {
+      case "list_workflow_packages": return draft ? [{ id: draft.id, name: draft.package.name, memberCount: 1, standalonePipeline: false, published: false }] : [];
+      case "workflow_package_catalog": return [{ name: "Request object", version: schema, blockers: [] }];
+      case "create_workflow_package":
+        draft = { id: "new-artifact", revision: "initial", conversationId: null, publication: null, request: null,
+          package: (payload as { package: PackageDraft["package"] }).package };
+        return draft;
+      case "inspect_workflow_package": return draft;
+      case "preview_workflow_package_revision": return { revision: draft?.revision, revisions: [draft?.revision], members: [] };
+      case "workflow_node_definitions": return [start, end];
+      case "read_published_workflow_package_artifact": return { body: { kind: "schema", fields: [{ name: "message", type: "string", required: true }] } };
+      case "save_workflow_package":
+        draft = { ...draft!, revision: "configured", package: (payload as { package: PackageDraft["package"] }).package };
+        return draft;
+      default: throw new Error(command);
+    }
+  });
+  function Workspace() {
+    const [target, setTarget] = useState("library");
+    return <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target={target}
+      openWorkspace={(_, next) => setTarget(next ?? "")} startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />;
+  }
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <Workspace />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: `New ${title}` }));
+  const dialog = within(screen.getByRole("dialog", { name: `New ${title}` }));
+  const create = dialog.getByRole<HTMLButtonElement>("button", { name: `Create ${title}` });
+  expect(create.disabled).toBe(true);
+  await user.type(dialog.getByRole("textbox", { name: "Name" }), "  Analyze requests  ");
+  await user.click(create);
+  expect(ipc).toHaveBeenCalledWith("create_workflow_package", {
+    projectId, conversationId: null, package: expect.objectContaining({ name: "Analyze requests", members: [expect.objectContaining({
+      name: "Analyze requests", body: expect.objectContaining(useFunction ? { kind: "subflow",
+        inputs: { ready: { node: "start", port: "ready" }, input: { node: "start", port: "inputs" } },
+        outputs: { completed: { node: "return", port: "completed" }, result: { node: "return", port: "result" } },
+      } : { kind: "prompt", prompt: expect.objectContaining({ schemaContract: true, nodePrefab: true }) }),
+    })] }),
+  });
+
+  if (useFunction) {
+    expect(await screen.findByRole<HTMLInputElement>("textbox", { name: "Function name" })).toHaveProperty("value", "Analyze requests");
+    const chooseInput = within(screen.getByRole("combobox", { name: "Input Schema" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Input Schema" }), chooseInput.getByRole("option", { name: /Request object/ }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Inspect node" }), "return");
+    expect(screen.getByRole("heading", { name: "Return" })).toBeTruthy();
+    const chooseOutput = screen.getByRole("combobox", { name: "Output Schema" });
+    await user.selectOptions(chooseOutput, within(chooseOutput).getByRole("option", { name: /Request object/ }));
+    await user.click(screen.getByRole("button", { name: "Save draft revision" }));
+    expect(ipc).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({ package: expect.objectContaining({
+      members: [expect.objectContaining({ references: {
+        "start:schema": { source: "published", version: schema }, "return:schema": { source: "published", version: schema },
+      } })],
+    }) }));
+  } else {
+    const settings = within(await screen.findByLabelText("AI Node Agent settings"));
+    expect(settings.getByRole("textbox", { name: "Card title" })).toHaveProperty("value", "Analyze requests");
+    expect(settings.getByRole("textbox", { name: "Prompt" })).toBeTruthy();
+  }
+  await user.click(screen.getByRole("button", { name: "Library" }));
+  expect(await screen.findByRole("button", { name: "Open draft of Analyze requests" })).toBeTruthy();
 });
 
 it("uses the canvas node picker and saves an AI Node with its position and Schema references", async () => {

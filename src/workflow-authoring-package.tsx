@@ -367,9 +367,10 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     const current = JSON.parse(currentText.current) as Package;
     const previous = current.members.find((member) => member.key === key);
     if (!previous) return;
+    const functionName = previous.body.kind === "subflow" && previous.body.graph?.name !== graph.name ? graph.name : undefined;
     const removedRefs = new Set(Object.values(previous.references ?? {}).flatMap((ref) => ref.source === "draft" ? [ref.key] : []));
     const members = current.members.map((item) => item.key === key
-      ? { ...item, ...(references && { references }), body: { ...item.body, graph } } : item);
+      ? { ...item, name: functionName ?? item.name, ...(references && { references }), body: { ...item.body, graph } } : item);
     const used = new Set(members.flatMap((member) =>
       Object.values(member.references ?? {}).flatMap((ref) => ref.source === "draft" ? [ref.key] : [])));
     for (const promptKey of used) {
@@ -383,7 +384,8 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
       promptArchive.current.set(member.key, member);
       return false;
     });
-    setText(JSON.stringify({ ...current, members: retained }, null, 2));
+    setText(JSON.stringify({ ...current, members: retained,
+      name: functionName !== undefined && retained.length === 1 ? functionName : current.name }, null, 2));
   }
   function editPrompt(prompt: PromptMember, rename?: PromptPortRename) {
     const current = JSON.parse(currentText.current) as Package;

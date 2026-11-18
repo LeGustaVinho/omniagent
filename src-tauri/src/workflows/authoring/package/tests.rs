@@ -98,7 +98,7 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
     let mut prompt = member(
         "prefab",
         serde_json::from_value(json!({
-            "kind":"prompt", "prompt":{"text":"Respond to {{input.reply}}.", "executor":"agent", "schemaContract":true}
+            "kind":"prompt", "prompt":{"text":"Respond to {{input.reply}}.", "executor":"agent", "schemaContract":true, "nodePrefab":true}
         }))?,
     );
     prompt.references = BTreeMap::from([
@@ -147,6 +147,17 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
         )
         .await?;
     let published = commit(&store, &project, &draft).await?;
+    let catalog = serde_json::to_value(store.workflow_package_catalog(project.clone()).await?)?;
+    assert!(
+        catalog
+            .as_array()
+            .context("Expected library catalog")?
+            .iter()
+            .any(|item| {
+                item["nodePrefab"] == true
+                    && item["version"]["id"] == artifact(&published, "prefab").version.id
+            })
+    );
     let version = artifact(&published, "pipeline").version.clone();
     let chat = store
         .create_conversation_with_pipeline(
@@ -886,6 +897,119 @@ async fn visual_canvas_positions_are_protected_revision_edits() -> Result<()> {
         serde_json::to_value(&reopened.layouts)?,
         serde_json::json!({"pipeline": {"start": {"x": 114.0, "y": 72.0}}})
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn publishes_a_standalone_function_with_typed_ports_and_runs_it_from_a_pipeline() -> Result<()>
+{
+    use crate::workflows::{ArtifactValue, WorkflowLaunchRequest};
+    use serde_json::json;
+
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("standalone-function.sqlite"))?;
+    let checkout = approved_delivery_repository(&store, temp.path()).await?;
+    let project = checkout.project_id;
+    let schema = member(
+        "message-schema",
+        serde_json::from_value(json!({
+            "kind":"schema", "fields":[{"name":"message","required":true,"type":"string"}]
+        }))?,
+    );
+    let draft = store
+        .create_workflow_package(project.clone(), None, package(vec![schema]))
+        .await?;
+    let published = commit(&store, &project, &draft).await?;
+    let schema = PackageReference::Published {
+        version: artifact(&published, "message-schema").version.clone(),
+    };
+
+    let mut function = member(
+        "function",
+        serde_json::from_value(json!({
+            "kind":"subflow", "graph":{
+                "name":"Forward message",
+                "nodes":[
+                    {"id":"start","kind":"start","configuration":{"kind":"subflow_entry","outputs":[
+                        {"name":"ready","value":{"kind":"control"}},
+                        {"name":"inputs","value":{"kind":"data","artifact":"json_object"}}
+                    ]}},
+                    {"id":"return","kind":"end","configuration":{"kind":"end"}}
+                ],
+                "wires":[
+                    {"from":{"node":"start","port":"ready"},"to":{"node":"return","port":"ready"}},
+                    {"from":{"node":"start","port":"inputs"},"to":{"node":"return","port":"result"}}
+                ]
+            },
+            "inputs":{"ready":{"node":"start","port":"ready"},"input":{"node":"start","port":"inputs"}},
+            "outputs":{"completed":{"node":"return","port":"completed"},"result":{"node":"return","port":"result"}}
+        }))?,
+    );
+    function.name = "Forward message".into();
+    function.references = BTreeMap::from([
+        ("start:schema".into(), schema.clone()),
+        ("return:schema".into(), schema.clone()),
+    ]);
+    let draft = store
+        .create_workflow_package(project.clone(), None, package(vec![function]))
+        .await?;
+    let published = commit(&store, &project, &draft).await?;
+    let version = artifact(&published, "function").version.clone();
+    let description = store
+        .describe_workflow_reusable_node(project.clone(), version.clone())
+        .await?;
+    assert_eq!(
+        description.definition.input_schemas["input"]["properties"]["message"]["type"],
+        "string"
+    );
+    assert_eq!(
+        description.definition.output_schemas["result"],
+        description.definition.input_schemas["input"]
+    );
+
+    let mut pipeline = member(
+        "pipeline",
+        serde_json::from_value(json!({
+            "kind":"pipeline", "graph":{
+                "name":"Call the Function",
+                "nodes":[
+                    {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+                    {"id":"forward","kind":"subflow","configuration":{"kind":"none"}},
+                    {"id":"end","kind":"end","configuration":{"kind":"end"}}
+                ],
+                "wires":[
+                    {"from":{"node":"start","port":"start"},"to":{"node":"forward","port":"ready"}},
+                    {"from":{"node":"start","port":"inputs"},"to":{"node":"forward","port":"input"}},
+                    {"from":{"node":"forward","port":"completed"},"to":{"node":"end","port":"ready"}},
+                    {"from":{"node":"forward","port":"result"},"to":{"node":"end","port":"result"}}
+                ]
+            }
+        }))?,
+    );
+    pipeline.references = BTreeMap::from([
+        ("start:schema".into(), schema.clone()),
+        ("forward".into(), PackageReference::Published { version }),
+        ("end:schema".into(), schema),
+    ]);
+    let draft = store
+        .create_workflow_package(project.clone(), None, package(vec![pipeline]))
+        .await?;
+    let published = commit(&store, &project, &draft).await?;
+    let pipeline = &artifact(&published, "pipeline").version;
+    let input = json!({"message": "Preserve the caller input"});
+    let request: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId":project, "checkoutId":checkout.checkout_id, "requestId":"standalone-function",
+        "workflow":{"id":pipeline.id,"revision":pipeline.revision}, "inputs":input
+    }))?;
+    let run = store.launch_workflow_request(request).await?;
+    let snapshot = store
+        .inspect_workflow_execution(project, run.id)
+        .await?
+        .context("Missing Function pipeline run")?;
+    for id in ["forward::return", "end"] {
+        assert!(snapshot.outputs.iter().any(|output| output.current && output.artifact.node_instance_id == id
+            && matches!(&output.artifact.value, ArtifactValue::JsonObject(value) if json!(value) == input)));
+    }
     Ok(())
 }
 

@@ -211,7 +211,7 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
   backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
-  promptRoles, inspectPrompt, insertTools, cloneBinding }: {
+  promptRoles, inspectPrompt, insertTools, cloneBinding, nameLabel = "Pipeline name" }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -233,6 +233,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   initialViewport?: Viewport;
   onViewportChange?: (viewport: Viewport) => void;
   promptRoles?: Record<string, string>;
+  nameLabel?: string;
   inspectPrompt?: (id: string) => ReactNode;
   insertTools?: (insert: (kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) => void,
     options: InsertToolsOptions) => ReactNode;
@@ -672,7 +673,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
             }}>{action.label}</Button>)}</div>
         </details>,
       })}
-      <label className="pipeline-inline-field workflow-graph-name"><span>Pipeline name</span><input aria-label="Pipeline name" value={graph.name} disabled={disabled} onChange={(event) => {
+      <label className="pipeline-inline-field workflow-graph-name"><span>{nameLabel}</span><input aria-label={nameLabel} value={graph.name} disabled={disabled} onChange={(event) => {
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
