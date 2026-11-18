@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
 import { openWorkspaceFile } from "@/file-context-actions";
-import { ProjectModelSettings, projectModelSettings } from "@/model-default-settings";
+import { ConversationModelSettings, conversationModelSetting } from "@/model-default-settings";
 import { ProjectWorkModeControls } from "@/project-agile-settings";
 import { ResizablePanel } from "@/panel-resize";
 import { ProjectAttachmentSettings } from "@/provider-settings";
@@ -71,7 +71,7 @@ const pages: readonly Page[] = [
     { id: "attachment-limits", label: "Attachment limits", description: "Files per turn, native and staged bytes per file and turn, UTF-8 excerpt size" },
   ] },
   { id: "execution", scope: "project", title: "Execution policies", icon: Shield, entries: policyFields.execution },
-  { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: [projectModelSettings.conversation, ...policyFields.conversation] },
+  { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: [conversationModelSetting, ...policyFields.conversation] },
   { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: [
     deliveryGitSetting,
     deliveryMilestoneSetting,
@@ -290,7 +290,7 @@ function SettingsSession({
       case "conversation":
         if (simulation || !checkout) return policy("conversation");
         return <>
-          <ProjectModelSettings key={`conversation-model-${checkout.projectId}`} projectId={checkout.projectId} purposes={["conversation"]} />
+          <ConversationModelSettings key={`conversation-model-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
           <ComposerSuggestionSettings />
           <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context" && id !== "suggestions")} stored={undefined} simulate={simulate} />
@@ -298,12 +298,11 @@ function SettingsSession({
       case "execution":
         if (simulation || !checkout) return policy("execution");
         return <>
-          <ProjectModelSettings key={`work-models-${checkout.projectId}`} projectId={checkout.projectId} purposes={["planning", "implementation"]} />
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
           <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectWorkModeControls key={`modes-${checkout.projectId}`} projectId={checkout.projectId} settings />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["planning-model", "implementation-model", "subagent-policy", "subagent-cap", "subagent-audit", "live-wait", "branch-strategy", "checklist-mode"].includes(id))}
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait", "branch-strategy", "checklist-mode"].includes(id))}
             stored={undefined} simulate={simulate} />
         </>;
       case "git":

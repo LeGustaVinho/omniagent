@@ -10,9 +10,9 @@
   z-index: 81;
   inset: 50% auto auto 50%;
   transform: translate(-50%, -50%);
-  --settings-inset: 40px;
-  width: clamp(700px, var(--panel-width, 1024px), calc(100vw - var(--settings-inset)));
-  height: clamp(min(320px, calc(100dvh - var(--settings-inset))), var(--panel-height, 800px), calc(100dvh - var(--settings-inset)));
+  --settings-inset: 24px;
+  width: clamp(700px, var(--panel-width, 1280px), calc(100vw - var(--settings-inset)));
+  height: clamp(min(320px, calc(100dvh - var(--settings-inset))), var(--panel-height, 960px), calc(100dvh - var(--settings-inset)));
   display: flex;
   flex-direction: column;
   padding-right: var(--panel-resize-hit-size);
@@ -289,10 +289,6 @@
   scroll-margin-block: 12px;
 }
 
-.settings-model-row {
-  padding: 9px 0;
-}
-
 .settings-row-label > label,
 .settings-row-label > span,
 .settings-row-label .context-actions-target > label {
@@ -303,7 +299,6 @@
 .settings-profile-model-menu .model-picker-field { flex: 1; min-width: 0; }
 
 .settings-row-label p,
-.settings-model-row p,
 .settings-notice p,
 .settings-system-group > p {
   margin-top: 4px;

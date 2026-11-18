@@ -1,9 +1,7 @@
 import { useState } from "react";
-import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { projectWorkModeSettings } from "@/project-agile-settings";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
-import { exampleSettingsModels } from "@/settings-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Choice = readonly [value: string, label: string];
@@ -18,7 +16,6 @@ type Field = {
   | { kind: "number"; min: number; max: number }
   | { kind: "text"; placeholder?: string }
   | { kind: "toggle" }
-  | { kind: "model" }
 );
 
 export const policyFields = {
@@ -29,14 +26,6 @@ export const policyFields = {
     },
   ],
   execution: [
-    {
-      id: "planning-model", label: "Planning model", kind: "model", initial: "",
-      description: "Use this verified read-only profile for plans and context compaction.",
-    },
-    {
-      id: "implementation-model", label: "Implementation model", kind: "model", initial: "",
-      description: "Use this model in new implementation stages when the worktree and approval allow writes.",
-    },
     {
       id: "worktree-root", label: "Managed worktree location", kind: "text", initial: "",
       description: "The app creates task worktrees here. Existing worktrees keep their paths.",
@@ -174,16 +163,11 @@ export function PolicyForm({
       }}>
         <fieldset disabled={!save}>
           {fields.map((field) => {
-            const input = <PolicyInput available={Boolean(save)} field={field}
+            const input = <PolicyInput field={field}
               value={save ? draft[field.id] ?? field.initial : ""} change={(value) => edit(field.id, value)} />;
-            return field.kind === "model"
-              ? <div className="settings-model-row" key={field.id} data-setting={field.id}>
-                  {input}
-                  <p>{field.description}</p>
-                </div>
-              : <SettingRow key={field.id} id={field.id} label={field.label} description={field.description}>
-                  {input}
-                </SettingRow>;
+            return <SettingRow key={field.id} id={field.id} label={field.label} description={field.description}>
+              {input}
+            </SettingRow>;
           })}
           <div className="settings-save">
             <Button type="submit">Save</Button>
@@ -195,18 +179,9 @@ export function PolicyForm({
   );
 }
 
-function PolicyInput({ field, value, change, available }: {
-  field: Field; value: string; change: (value: string) => void; available: boolean;
+function PolicyInput({ field, value, change }: {
+  field: Field; value: string; change: (value: string) => void;
 }) {
-  if (field.kind === "model") {
-    return <div>
-      <ModelPicker label={field.label} options={available ? exampleSettingsModels : []} disabled={!available}
-        selection={{ mode: "single", selected: exampleSettingsModels.find(({ selection }) => selection.modelId === value)?.selection ?? null,
-          onChange: ({ modelId }) => change(modelId) }} />
-      {value && <button type="button" className="mt-1 underline" onClick={() => change("")}>Use conversation model</button>}
-    </div>;
-  }
-
   const description = `${field.id}-description`;
   if (field.kind === "toggle") {
     return (

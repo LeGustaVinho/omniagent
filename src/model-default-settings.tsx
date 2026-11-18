@@ -9,37 +9,35 @@ import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import {
   CHECKOUT_MODEL_DEFAULTS, EXECUTION_PROFILE_MODEL, PROJECT_MODEL_DEFAULTS,
   useExecutionProfileDefault, useProjectModelDefaults,
-  type ModelDefaultPurpose, type ProjectModelDefaults,
+  type ProjectModelDefaults,
 } from "@/model-defaults";
 import { SettingRow } from "@/settings-controls";
 
 const providerLabels: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", antigravity: "Antigravity" };
 
-export const projectModelSettings = {
-  conversation: { id: "conversation-model", label: "Conversation model", description: "Start new conversation turns with this model." },
-  planning: { id: "planning-model", label: "Planning model", description: "Use this model for planning and as the default for context compaction." },
-  implementation: { id: "implementation-model", label: "Implementation model", description: "Use this model for approved repository work that has no planned assignment." },
-} satisfies Record<ModelDefaultPurpose, { id: string; label: string; description: string }>;
+export const conversationModelSetting = {
+  id: "conversation-model", label: "Conversation model", description: "Start new conversation turns with this model.",
+};
 
-export function ProjectModelSettings({ projectId, purposes }: { projectId: string; purposes: readonly ModelDefaultPurpose[] }) {
+export function ConversationModelSettings({ projectId }: { projectId: string }) {
   const defaults = useProjectModelDefaults(projectId);
   return <>
     {defaults.isPending && <p role="status">Loading project model defaults…</p>}
     {defaults.error && <p role="alert" className="settings-result settings-result-error">{String(defaults.error)}</p>}
-    {defaults.data && purposes.map((purpose) => <ProjectDefault key={`${projectId}/${purpose}`} projectId={projectId} purpose={purpose} saved={defaults.data[purpose]} />)}
+    {defaults.data && <ConversationModelDefault key={projectId} projectId={projectId} saved={defaults.data.conversation} />}
   </>;
 }
 
-function ProjectDefault({ projectId, purpose, saved }: { projectId: string; purpose: ModelDefaultPurpose; saved: ModelSelection | null }) {
+function ConversationModelDefault({ projectId, saved }: { projectId: string; saved: ModelSelection | null }) {
   const [chosenProvider, setProvider] = useState<Provider>();
   const provider = chosenProvider ?? saved?.provider ?? "codex";
-  const setting = projectModelSettings[purpose];
+  const setting = conversationModelSetting;
   const { feedback, copy } = useContextActionFeedback();
   const client = useQueryClient();
   const { options, loading, errors } = useLiveModelOptions([provider]);
   const selection = availableModelSelection(options, saved);
   const save = useMutation({
-    mutationFn: (selection: ModelSelection | null) => invoke<ProjectModelDefaults>("set_project_model_default", { projectId, purpose, selection }),
+    mutationFn: (selection: ModelSelection | null) => invoke<ProjectModelDefaults>("set_project_model_default", { projectId, purpose: "conversation", selection }),
     onSuccess: (defaults) => {
       client.setQueryData([...PROJECT_MODEL_DEFAULTS, projectId], defaults);
       return client.invalidateQueries({ queryKey: CHECKOUT_MODEL_DEFAULTS });

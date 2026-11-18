@@ -9,7 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ConversationPanel } from "@/conversation-panels";
-import { ProjectModelSettings, ExecutionProfileModelSettings } from "@/model-default-settings";
+import { ConversationModelSettings, ExecutionProfileModelSettings } from "@/model-default-settings";
 import { CHECKOUT_MODEL_DEFAULTS, type ModelDefaultPurpose, type ProjectModelDefaults } from "@/model-defaults";
 import { TaskAssignment } from "@/task-assignment";
 import { useWorkspace } from "@/workspace-state";
@@ -74,7 +74,7 @@ function fixture({ rejectProjectSave = false, checkoutDefaults }: {
   useWorkspace.getState().selectCheckout(checkout);
   render(<QueryClientProvider client={client}>
     <ConversationPanel {...props} />
-    <section aria-label="Project defaults"><ProjectModelSettings projectId={checkout.projectId} purposes={["conversation", "planning"]} /></section>
+    <section aria-label="Project defaults"><ConversationModelSettings projectId={checkout.projectId} /></section>
     <section aria-label="Provider defaults"><ExecutionProfileModelSettings provider="claude" /></section>
     <section aria-label="Agile work"><TaskAssignment projectId={checkout.projectId} taskId="task" /></section>
   </QueryClientProvider>);
@@ -121,24 +121,24 @@ it("uses identical rating meters in live conversation, project settings and Agil
 
 it("shows an availability error from the settings authority and keeps the saved selection", async () => {
   const { user } = fixture({ rejectProjectSave: true });
-  await chooseAndMeasure(user, /^Planning model · /, codex, "$1.25");
+  await chooseAndMeasure(user, /^Conversation model · /, codex, "$1.25");
   const project = within(screen.getByRole("region", { name: "Project defaults" }));
   expect((await project.findByRole("alert")).textContent).toContain("The selected model is no longer available");
-  expect(project.getByRole("button", { name: "Planning model · Use profile default" })).toBeTruthy();
+  expect(project.getByRole("button", { name: "Conversation model · Use profile default" })).toBeTruthy();
 });
 
 it("copies and resets the clicked saved model default at the correct scope", async () => {
   const { user } = fixture();
-  await chooseAndMeasure(user, /^Planning model · /, codex, "$1.25");
+  await chooseAndMeasure(user, /^Conversation model · /, codex, "$1.25");
   const setting = within(screen.getByRole("region", { name: "Project defaults" }));
-  const planning = setting.getByText("Planning model", { selector: "label" });
-  fireEvent.contextMenu(planning);
+  const label = setting.getByText("Conversation model", { selector: "label" });
+  fireEvent.contextMenu(label);
   await user.click(screen.getByRole("menuitem", { name: "Copy saved profile ID" }));
   expect(await navigator.clipboard.readText()).toBe(codex.selection.profileId);
-  fireEvent.contextMenu(planning);
+  fireEvent.contextMenu(label);
   await user.click(screen.getByRole("menuitem", { name: "Use profile default" }));
-  expect(invoke).toHaveBeenCalledWith("set_project_model_default", { projectId: checkout.projectId, purpose: "planning", selection: null });
-  expect(await setting.findByRole("button", { name: "Planning model · Use profile default" })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("set_project_model_default", { projectId: checkout.projectId, purpose: "conversation", selection: null });
+  expect(await setting.findByRole("button", { name: "Conversation model · Use profile default" })).toBeTruthy();
 });
 
 it("keeps the explicit conversation selection when the project model arrives later", async () => {

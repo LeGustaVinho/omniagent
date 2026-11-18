@@ -557,9 +557,9 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Finish");
   await capture(browser, "04-system-settings");
   await click(browser, "button=Execution policies");
-  await click(browser.$('.settings-dialog'), 'button[aria-label^="Planning model ·"]');
-  await click(browser, '.model-picker-menu [aria-label="GPT‑6.1 Sol"]');
-  assert.equal(await browser.$('.settings-dialog button[aria-label^="Planning model ·"]').getText(), "GPT‑6.1 Sol");
+  for (const field of ["planning-model", "implementation-model"]) {
+    assert.equal(await browser.$(`.settings-dialog [data-setting="${field}"]`).isExisting(), false);
+  }
   await click(browser, "button=Appearance");
   await capture(browser, "04-appearance-settings");
   await click(browser, 'button[aria-label="Close settings"]');
