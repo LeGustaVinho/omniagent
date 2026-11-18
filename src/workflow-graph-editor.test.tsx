@@ -137,8 +137,8 @@ it("loads published Library artifacts without loading the Builder node registry"
   ipc.mockClear();
   ipc.mockResolvedValue([]);
   render(<QueryClientProvider client={new QueryClient()}>
-    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={vi.fn()}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+    <PipelinesWorkspace checkout={exampleCheckout} target="library" openWorkspace={vi.fn()}
+      openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const library = within(screen.getByRole("region", { name: "Workflow library" }));
   expect(await library.findByText("No published schemas.")).toBeTruthy();
@@ -176,8 +176,8 @@ it.each(["Node Prefab", "Function"] as const)("creates a %s from Library and ope
   });
   function Workspace() {
     const [target, setTarget] = useState("library");
-    return <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target={target}
-      openWorkspace={(_, next) => setTarget(next ?? "")} startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />;
+    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
+      openWorkspace={(_, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <Workspace />
@@ -254,8 +254,8 @@ it("uses the canvas node picker and saves an AI Node with its position and Schem
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" simulation={null} openWorkspace={vi.fn()}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" openWorkspace={vi.fn()}
+      openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await screen.findByRole("button", { name: "Add node" });
@@ -447,7 +447,7 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
       default: throw new Error(`Unexpected ${command}`);
     }
   });
-  const props = { checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(),
+  const props = { checkout: exampleCheckout,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   const client = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const mount = (target?: string) => render(<QueryClientProvider client={client()}><PipelinesWorkspace {...props} target={target} /></QueryClientProvider>);

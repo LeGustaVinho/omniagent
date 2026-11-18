@@ -61,8 +61,8 @@ function mountPromptEditor(opened: typeof draft) {
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout} simulation={null}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
+    <WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout}
+      openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   return userEvent.setup();
 }

@@ -63,7 +63,7 @@ it("reopens a completed task and navigates its selected diff, accepted review, a
   const visited = vi.fn();
   function ReopenedWorkbench() {
     const [inspection, setInspection] = useState<{ runId: string; conversationId?: string }>();
-    const props: WorkspaceProps = { checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(), openChanges: vi.fn(),
+    const props: WorkspaceProps = { checkout: exampleCheckout, openChanges: vi.fn(),
       openWorkspace: vi.fn(),
       openActivity: (runId, conversationId) => { visited(runId, conversationId); setInspection({ runId, conversationId }); } };
     return <>
@@ -179,7 +179,7 @@ it("shows full receipts for the Task, its independent units, and each contributi
   const navigation = { openActivity: vi.fn(), openWorkspace: vi.fn() };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const app = render(<QueryClientProvider client={client}>
-    <ProjectTasksWorkspace checkout={exampleCheckout} target={parent.id} simulation={null} startSimulation={vi.fn()} openChanges={vi.fn()} {...navigation} />
+    <ProjectTasksWorkspace checkout={exampleCheckout} target={parent.id} openChanges={vi.fn()} {...navigation} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   const parentDetail = within(await screen.findByRole("region", { name: parent.title }));

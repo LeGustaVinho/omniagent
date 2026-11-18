@@ -65,8 +65,8 @@ function setup(stale = false) {
   });
   function mount() {
     return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <PipelineAuthoringEditor draftId={publication.draftId} checkout={exampleCheckout} simulation={null}
-        openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} startSimulation={vi.fn()} />
+      <PipelineAuthoringEditor draftId={publication.draftId} checkout={exampleCheckout}
+        openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
     </QueryClientProvider>);
   }
   return { user: userEvent.setup(), mount };

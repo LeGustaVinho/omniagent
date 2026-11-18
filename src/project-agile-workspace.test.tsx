@@ -183,8 +183,8 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
   const openQueueJob = vi.fn();
-  const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout} simulation={null}
-    startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()}
+  const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout}
+    openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()}
     openQueueJob={activity?.jobs ? openQueueJob : undefined} /></QueryClientProvider>);
   const user = userEvent.setup();
   return { ...app, states, checklistRun, openActivity, openWorkspace, openQueueJob, user };

@@ -41,7 +41,7 @@ function mount(child: ReactNode) {
 }
 
 function navigation() {
-  return { checkout, simulation: null, startSimulation: vi.fn(), openWorkspace: vi.fn(), openChanges: vi.fn(), openActivity: vi.fn(), openQueueJob: vi.fn() };
+  return { checkout, openWorkspace: vi.fn(), openChanges: vi.fn(), openActivity: vi.fn(), openQueueJob: vi.fn() };
 }
 
 async function submit(user: ReturnType<typeof userEvent.setup>, revision: string) {

@@ -160,7 +160,7 @@ type ReadingProps = {
   files: readonly ExampleFile[];
   jump?: { anchor?: string; line?: number; token: number };
   onLink: (link: NoteTarget) => void;
-  onAttachment: (attachment: NoteAttachment) => void;
+  onAttachment?: (attachment: NoteAttachment) => void;
   sampleAttachments?: boolean;
   checkoutId?: string;
   onRepositoryAttachment?: (paths: string[], label: string) => void;
@@ -182,7 +182,7 @@ const components: Components = {
     return <pre {...props}>{children}</pre>;
   },
   a: function ReadingLink({ href, children, id, className, node, "aria-describedby": describedBy, "aria-label": label, ...props }) {
-    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment, anchorScope, resolveLinks, previewFor } = useContext(ReadingContext);
+    const { path, files, onLink, onAttachment, sampleAttachments = Boolean(onAttachment), checkoutId, onRepositoryAttachment, anchorScope, resolveLinks, previewFor } = useContext(ReadingContext);
     const origin = originAttributes(node);
     const from = origin["data-note-source"] ?? path;
     const line = Number(origin["data-note-line"]) || undefined;
@@ -193,7 +193,7 @@ const components: Components = {
       const link = { ...parsed, sourcePath: from, sourceLine: line };
       const attachment = sampleAttachments ? noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name) : undefined;
       if (attachment) return <button {...origin} type="button" className="note-inline-link" data-note-context-link={href}
-        onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;
+        onClick={() => onAttachment?.(attachment)}><FileText size={13} />{children}</button>;
       const resolution = resolveLinks?.(link, path);
       const paths = resolveLinks
         ? resolution?.status === "attachment" ? resolution.paths : []

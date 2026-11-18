@@ -1,32 +1,24 @@
 import {
-  Activity, ArrowLeft, Blocks, BookOpen, ClipboardList, Code2, FlaskConical, GitBranch, ListChecks, MessageSquare,
-  PanelLeft, PanelLeftClose, PanelLeftOpen, RotateCcw, Search, Settings, type LucideIcon,
+  Activity, ArrowLeft, Blocks, BookOpen, ClipboardList, Code2, GitBranch, ListChecks, MessageSquare,
+  PanelLeft, PanelLeftClose, PanelLeftOpen, Search, Settings, type LucideIcon,
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CheckoutSelector } from "@/checkout-selector";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
-import { ConversationMarkdown } from "@/conversation-markdown";
-import { previewPlan } from "@/conversation-preview-data";
 import { RealConversations, RealDiagnostics } from "@/desktop-dock";
-import { GitSimulationProvider } from "@/git-simulation";
 import { openWorkspaceFile } from "@/file-context-actions";
 import type { FileLinkTarget } from "@/file-links";
-import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
+import { RunInspector } from "@/inspection-panel";
 import { InspectorTabs } from "@/inspector-tabs";
 import { PanelResizeScope } from "@/panel-resize";
 import { useRunSubscription } from "@/run-projection";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { GoTo, type Destination } from "@/workbench-navigation";
 import { useWorkspaceSize, WorkbenchPanel, WorkspaceDrawersSuspended, WorkspaceVisibility } from "@/workbench-panel";
-import {
-  exampleCheckout, nextDeliveryStep, scenarios,
-  type DeliveryAction, type DeliveryStep, type QuestionFocus, type QueueJobFocus, type ScenarioId, type SimulationSession,
-  type WorkspaceDestination, type WorkspaceId, type WorkspaceProps,
-} from "@/workbench-contract";
+import type { QuestionFocus, QueueJobFocus, WorkspaceDestination, WorkspaceId, WorkspaceProps } from "@/workbench-contract";
 
-const ConversationsPreview = lazy(() => import("@/conversations-preview"));
 const SettingsDialog = lazy(() => import("@/settings-dialog"));
 const QueuePanel = lazy(() => import("@/queue-panel"));
 const ChangesPanel = lazy(() => import("@/changes-panel"));
@@ -59,7 +51,6 @@ type Navigation = {
   visited: Partial<Record<WorkspaceId, { target?: string }>>;
   trail: Origin[];
 };
-type SimulationState = { scenario: ScenarioId; epoch: number; delivery: DeliveryStep; navigation: Navigation };
 type SidePane = { type: "activity"; runId: string; conversationId?: string; focusQuestion?: QuestionFocus }
   | { type: "changes"; target: "saved" | "working" };
 
@@ -132,21 +123,17 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   fileTarget?: FileLinkTarget;
 }) {
   const lastAreaKey = "omniagent-workspace-area:" + checkout.checkoutId;
-  const [realNavigation, setRealNavigation] = useState(() => {
+  const [nav, setNavigation] = useState(() => {
     const prior = readNavigation(lastAreaKey);
     if (destination) return show(destination.workspace, destination.target, prior);
     return initialConversationId ? show("conversations", initialConversationId, prior) : prior;
   });
-  const [preview, setPreview] = useState<SimulationState | null>(null);
-  const [epoch, setEpoch] = useState(0);
   const [settingsPage, setSettingsPage] = useState<string>();
   const [settingsVisited, setSettingsVisited] = useState(false);
-  const [realSide, setRealSide] = useState<SidePane | null>(null);
-  const [previewSide, setPreviewSide] = useState<SidePane | null>(null);
+  const [side, setSide] = useState<SidePane | null>(null);
   const [closingInspector, setClosingInspector] = useState(false);
-  const [realQueue, setRealQueue] = useState<"open" | "closed">();
+  const [queueState, setQueueState] = useState<"open" | "closed">();
   const [queueFocus, setQueueFocus] = useState<QueueJobFocus>();
-  const [previewQueue, setPreviewQueue] = useState<"open" | "closed">();
   const [sidebarOverride, setSidebarOverride] = useState<boolean>();
   const [collapsed, setCollapsed] = useState(false);
   const [goTo, setGoTo] = useState(false);
@@ -163,13 +150,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   const compact = useWorkspaceSize(workViews).width < 840;
   const queueDrawer = availableWidth < 900 || size.height < 600;
   const { error, reconnect } = useRunSubscription(checkout);
-  const nav = preview?.navigation ?? realNavigation;
 
   useEffect(() => {
     if (!fileTarget) return;
-    setPreview(null);
     setSettingsPage(undefined);
-    openWorkspaceFile((workspace, target) => setRealNavigation((prior) => show(workspace, target, prior)),
+    openWorkspaceFile((workspace, target) => setNavigation((prior) => show(workspace, target, prior)),
       fileTarget.path, fileTarget.line ?? undefined, { column: fileTarget.column ?? undefined, repeat: true });
   }, [fileTarget]);
 
@@ -205,46 +190,14 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
 
   useEffect(() => {
     try {
-      localStorage.setItem(lastAreaKey, realNavigation.active);
+      localStorage.setItem(lastAreaKey, nav.active);
     } catch {
       // Navigation remains available in memory.
     }
-  }, [lastAreaKey, realNavigation.active]);
-
-  function startSimulation(choice?: ScenarioId) {
-    const scenario = choice ?? (nav.active === "pipelines" ? "pipelines" : "delivery");
-    const example = scenarios[scenario];
-    const destination = choice ? example.workspace : nav.active;
-    const target = choice ? example.target : nav.visited[destination]?.target;
-    setEpoch(epoch + 1);
-    setPreview({ scenario, epoch: epoch + 1, delivery: example.initialStep, navigation: show(destination, target) });
-    setPreviewSide(null);
-    setPreviewQueue(undefined);
-    if (scenario === "windows") showSettings("system");
-    else setSettingsPage(undefined);
-  }
-
-  function leaveSimulation() {
-    setSettingsPage(undefined);
-    setPreviewSide(null);
-    setPreviewQueue(undefined);
-    setPreview(null);
-  }
-
-  function advanceDelivery(action: DeliveryAction) {
-    setPreview((current) => current && ({ ...current, delivery: nextDeliveryStep(current.delivery, action) }));
-  }
-
-  function changeNavigation(simulated: boolean, update: (prior: Navigation) => Navigation) {
-    if (simulated) {
-      setPreview((current) => current && ({ ...current, navigation: update(current.navigation) }));
-    } else {
-      setRealNavigation(update);
-    }
-  }
+  }, [lastAreaKey, nav.active]);
 
   function navigateArea(destination: WorkspaceId) {
-    changeNavigation(Boolean(preview), (prior) => show(destination, undefined, prior, []));
+    setNavigation((prior) => show(destination, undefined, prior, []));
   }
 
   function restoreWorkspaceFocus(trigger: HTMLElement | null, framesLeft = 4) {
@@ -257,7 +210,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
       requestAnimationFrame(() => restoreWorkspaceFocus(trigger, framesLeft - 1));
       return;
     }
-    const view = workViews.current?.querySelector('.work-deck:not([hidden]) .work-view:not([hidden])');
+    const view = workViews.current?.querySelector('.work-deck .work-view:not([hidden])');
     const heading = Array.from(view?.querySelectorAll<HTMLElement>('h1, h2, h3') ?? [])
       .find((element) => element.getClientRects().length);
     if (heading) {
@@ -269,14 +222,14 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   function goBack() {
     const origin = nav.trail.at(-1);
     if (!origin) return;
-    changeNavigation(Boolean(preview), (prior) => ({
+    setNavigation((prior) => ({
       ...prior,
       active: origin.area,
       visited: { ...prior.visited, [origin.area]: { target: origin.target } },
       trail: prior.trail.slice(0, -1),
     }));
-    (preview ? setPreviewSide : setRealSide)(origin.inspector);
-    if (origin.queue) (preview ? setPreviewQueue : setRealQueue)("open");
+    setSide(origin.inspector);
+    if (origin.queue) setQueueState("open");
     requestAnimationFrame(() => {
       for (const { element, top, left } of origin.scroll) {
         if (element.isConnected) { element.scrollTop = top; element.scrollLeft = left; }
@@ -285,12 +238,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
     });
   }
 
-  function context(simulation: SimulationSession | null): WorkspaceProps {
-    const setSide = simulation ? setPreviewSide : setRealSide;
+  function workspaceContext(): WorkspaceProps {
     function showSide(next: SidePane) {
       const active = document.activeElement;
       if (active instanceof HTMLElement && !active.closest(".work-inspector")) sideTrigger.current = active;
-      const existing = simulation ? previewSide : realSide;
+      const existing = side;
       if (next.type === "activity" && !next.focusQuestion && existing?.type === "activity" && next.runId === existing.runId) {
         requestAnimationFrame(() => document.querySelector<HTMLElement>('.work-inspector [aria-label="Close activity"]')?.focus());
         return;
@@ -298,20 +250,17 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
       setSide(next);
     }
     return {
-      checkout: simulation ? exampleCheckout : checkout,
-      simulation,
-      startSimulation,
+      checkout,
       openWorkspace: (workspace, target) => {
-        const source = simulation ? preview?.navigation : realNavigation;
-        const inspector = simulation ? previewSide : realSide;
+        const inspector = side;
         const focused = document.activeElement;
         const trigger = focused instanceof HTMLElement && focused !== document.body ? focused : null;
-        const jumping = source && source.active !== workspace;
+        const jumping = nav.active !== workspace;
         const fromQueue = Boolean(trigger?.closest(".work-queue-panel"));
-        const scroll = jumping ? scrollPositions(workViews.current?.querySelector<HTMLElement>(".work-deck:not([hidden]) .work-view:not([hidden])"), trigger) : [];
+        const scroll = jumping ? scrollPositions(workViews.current?.querySelector<HTMLElement>(".work-deck .work-view:not([hidden])"), trigger) : [];
         if (jumping && inspector) setSide(null);
-        if (jumping && fromQueue && queueDrawer) (simulation ? setPreviewQueue : setRealQueue)("closed");
-        changeNavigation(Boolean(simulation), (prior) => show(workspace, target, prior, jumping ? [...prior.trail, {
+        if (jumping && fromQueue && queueDrawer) setQueueState("closed");
+        setNavigation((prior) => show(workspace, target, prior, jumping ? [...prior.trail, {
           area: prior.active,
           target: prior.visited[prior.active]?.target,
           trigger,
@@ -323,30 +272,27 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
       openActivity: (runId, conversationId, requestId) => showSide({
         type: "activity", runId, conversationId, focusQuestion: requestId === undefined ? undefined : { requestId },
       }),
-      openCheckoutWorkspace: simulation ? undefined : async (selected, destination) => {
+      openCheckoutWorkspace: async (selected, destination) => {
         if (selected.projectId !== checkout.projectId) throw new Error("This worktree is unavailable in the current project.");
-        if (selected.checkoutId === checkout.checkoutId) setRealNavigation((current) => show(destination.workspace, destination.target, current));
+        if (selected.checkoutId === checkout.checkoutId) setNavigation((current) => show(destination.workspace, destination.target, current));
         else await onSelectCheckout(selected, undefined, destination);
       },
       openChanges: (target) => showSide({ type: "changes", target }),
-      openQueueJob: simulation ? undefined : (jobId) => {
+      openQueueJob: (jobId) => {
         rememberQueueTrigger();
-        if (queueDrawer) setRealSide(null);
+        if (queueDrawer) setSide(null);
         setQueueFocus({ projectId: checkout.projectId, jobId });
-        setRealQueue("open");
+        setQueueState("open");
       },
     };
   }
 
-  const real = context(null);
-  const simulated = preview && context({ scenario: preview.scenario, epoch: preview.epoch, delivery: preview.delivery, advanceDelivery });
-  const current = simulated ?? real;
-  const side = preview ? previewSide : realSide;
+  const workspace = workspaceContext();
   const sideDrawer = availableWidth < (side?.type === "changes" ? 990 : 840);
   const sidebar = sidebarOverride ?? !compact;
   function closeSide() {
     setClosingInspector(true);
-    (preview ? setPreviewSide : setRealSide)(null);
+    setSide(null);
     const trigger = sideTrigger.current;
     // Keep child drawers suspended until they can measure the width released by the inspector.
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -359,8 +305,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
     setSidebarOverride(visible);
     if (!visible && compact) requestAnimationFrame(() => sidebarTrigger.current?.focus());
   }
-  const queue = (preview ? previewQueue : realQueue) === "open";
-  const changeQueue = preview ? setPreviewQueue : setRealQueue;
+  const queue = queueState === "open";
   function rememberQueueTrigger() {
     const active = document.activeElement;
     if (active instanceof HTMLElement && !active.closest(".work-queue-panel")) queueTrigger.current = active;
@@ -368,12 +313,12 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   function showQueue() {
     rememberQueueTrigger();
     if (queueDrawer) {
-      (preview ? setPreviewSide : setRealSide)(null);
+      setSide(null);
     }
-    changeQueue("open");
+    setQueueState("open");
   }
   function closeQueue() {
-    changeQueue("closed");
+    setQueueState("closed");
     requestAnimationFrame(() => {
       const trigger = queueTrigger.current;
       if (trigger?.getClientRects().length) trigger.focus({ preventScroll: true });
@@ -409,38 +354,23 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
               <ArrowLeft size={16} aria-hidden="true" />
             </Button>
           </ControlTooltip>}
-          {nav.active === "conversations" && !preview && <ControlTooltip label="Toggle conversation navigation">
+          {nav.active === "conversations" && <ControlTooltip label="Toggle conversation navigation">
             <Button ref={sidebarTrigger} variant="ghost" className="ui-icon-button" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
               onClick={() => changeSidebar(!sidebar)}><PanelLeft size={16} aria-hidden="true" /></Button>
           </ControlTooltip>}
-          {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout}
+          <CheckoutSelector checkout={checkout}
             onSelect={async (selected, shortcut) => {
-              if (shortcut && selected.checkoutId === checkout.checkoutId) real.openWorkspace(shortcut.workspace, shortcut.target);
+              if (shortcut && selected.checkoutId === checkout.checkoutId) workspace.openWorkspace(shortcut.workspace, shortcut.target);
               else await onSelectCheckout(selected, undefined, shortcut);
-            }} />}
+            }} />
           <span className="work-crumb-divider" aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
         </div>
         {!narrowRail && navigationSearch}
-        {!preview && <div className="flex shrink-0 items-center gap-2">
-          <Button variant="ghost" className="px-2.5" onClick={() => startSimulation()} title="Try a workflow with example data"><FlaskConical size={15} />Simulate</Button>
-          {openRepository}
-        </div>}
+        <div className="flex shrink-0 items-center gap-2">{openRepository}</div>
       </header>
-      {preview && <div className="work-simulation" role="region" aria-label="Simulation controls">
-        <span className="work-simulation-label"><FlaskConical size={15} />Simulation · example data</span>
-        <label className="flex min-w-0 items-center gap-2">
-          <span className="sr-only">Scenario</span>
-          <select value={preview.scenario} onChange={(event) => startSimulation(event.target.value as ScenarioId)}>
-            {Object.entries(scenarios).map(([id, entry]) => <option key={id} value={id}>{entry.name}</option>)}
-          </select>
-        </label>
-        <Button variant="ghost" className="work-reset ml-auto" aria-label="Reset simulation" onClick={() => startSimulation(preview.scenario)}><RotateCcw size={14} /><span>Reset simulation</span></Button>
-        <Button variant="outline" onClick={leaveSimulation}>Exit simulation</Button>
-      </div>}
-      {!preview && error && (
+      {error && (
         <div className="work-banner" role="alert"><span>{error}</span><Button variant="outline" onClick={reconnect}>Reconnect</Button></div>
       )}
-      <GitSimulationProvider epoch={preview?.epoch}>
       <div className="work-body" ref={workBody}>
         <aside aria-label="Workspace" className="work-rail">
           {narrowRail ? navigationSearch : <RailButton label={collapsed ? "Expand navigation" : "Collapse navigation"}
@@ -457,63 +387,45 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
         </aside>
         <div className="work-decks" ref={workViews}>
           <WorkspaceDrawersSuspended.Provider value={Boolean(side || closingInspector || queue && queueDrawer || settingsPage || goTo)}>
-          <div className="work-deck" hidden={Boolean(preview)}>
-            <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, openWorkspace: real.openWorkspace, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined,
-              openGitAttempt: (runId) => real.openWorkspace("git", `attempt:${runId}`), openProviders: () => showSettings("providers") }}>
-              <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar && !(compact && (side || queueDrawer && queue))} onSidebarChange={changeSidebar} compact={compact}
-                deckVisible={!preview} onOpenOtherCheckout={onSelectCheckout} openSystem={() => showSettings("system")} />
-            </RunInspectorNavigation.Provider>
-          </div>
-          {preview && simulated && <PanelResizeScope scope="simulation" key={"simulation-workspaces:" + preview.epoch}>
             <div className="work-deck">
-              <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}
-                compact={compact} openSystem={() => showSettings("system")} />
+              <RunInspectorNavigation.Provider value={{ openActivity: workspace.openActivity, openWorkspace: workspace.openWorkspace, activeRunId: side?.type === "activity" ? side.runId : undefined,
+                openGitAttempt: (runId) => workspace.openWorkspace("git", `attempt:${runId}`), openProviders: () => showSettings("providers") }}>
+                <WorkspaceViews nav={nav} context={workspace} sidebar={sidebar && !(compact && (side || queueDrawer && queue))} onSidebarChange={changeSidebar} compact={compact}
+                  onOpenOtherCheckout={onSelectCheckout} openSystem={() => showSettings("system")} />
+              </RunInspectorNavigation.Provider>
             </div>
-          </PanelResizeScope>}
           </WorkspaceDrawersSuspended.Provider>
-          {realQueue && <WorkbenchPanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue"
-            drawer={queueDrawer} drawerClass="work-queue-drawer" label="Queue" open={!preview && realQueue === "open" && !(queueDrawer && side)} onClose={closeQueue}>
-            <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
+          {queueState && <WorkbenchPanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue"
+            drawer={queueDrawer} drawerClass="work-queue-drawer" label="Queue" open={queueState === "open" && !(queueDrawer && side)} onClose={closeQueue}>
+            <Suspense fallback={loading}><QueuePanel {...workspace} focusJob={queueFocus}
               onOpenRegisteredWorktree={(source, destination) => onSelectCheckout(source, undefined, destination)}
-              active={!preview && realQueue === "open"} onClose={closeQueue} /></Suspense>
-          </WorkbenchPanel>}
-          {previewQueue && simulated && <WorkbenchPanel className="work-queue-panel" edge="top" resizeKey="example-queue" resizeLabel="queue"
-            key={"simulation-queue:" + preview?.epoch} drawer={queueDrawer} drawerClass="work-queue-drawer" label="Queue"
-            open={previewQueue === "open" && !(queueDrawer && side)} onClose={closeQueue}>
-            <PanelResizeScope scope="simulation">
-              <Suspense fallback={loading}><QueuePanel {...simulated} onClose={closeQueue} /></Suspense>
-            </PanelResizeScope>
+              active={queueState === "open"} onClose={closeQueue} /></Suspense>
           </WorkbenchPanel>}
         </div>
-        {side && <PanelResizeScope scope={preview ? "simulation" : null}>
-          <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={sideDrawer} close={closeSide}
-            plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
-            <Suspense fallback={loading}>
-              {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId}
-                focusQuestion={side.focusQuestion} onClose={closeSide} /> : <PanelResizeScope scope="changes-inspector">
-                <ChangesPanel {...current} target={side.target} />
-              </PanelResizeScope>}
-            </Suspense>
-          </SideInspector>
-        </PanelResizeScope>}
+        {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={sideDrawer} close={closeSide}>
+          <Suspense fallback={loading}>
+            {side.type === "activity" ? <RunInspector {...workspace} runId={side.runId} conversationId={side.conversationId}
+              focusQuestion={side.focusQuestion} onClose={closeSide} /> : <PanelResizeScope scope="changes-inspector">
+              <ChangesPanel {...workspace} target={side.target} />
+            </PanelResizeScope>}
+          </Suspense>
+        </SideInspector>}
       </div>
-      {settingsVisited && <PanelResizeScope scope={preview ? "simulation" : null}>
-        <Suspense fallback={null}><SettingsDialog key={preview?.epoch ?? "real"} {...current} open={Boolean(settingsPage)} initialPage={settingsPage}
-          onOpenChange={(open) => { if (!open) setSettingsPage(undefined); }} /></Suspense>
-      </PanelResizeScope>}
+      {settingsVisited && <Suspense fallback={null}>
+        <SettingsDialog {...workspace} open={Boolean(settingsPage)} initialPage={settingsPage}
+          onOpenChange={(open) => { if (!open) setSettingsPage(undefined); }} />
+      </Suspense>}
       {goTo && <GoTo destinations={destinations} onClose={closeGoTo} />}
-      </GitSimulationProvider>
     </div>
   );
 }
 
-function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, deckVisible = true, openSystem, onOpenOtherCheckout }: {
+function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openSystem, onOpenOtherCheckout }: {
   nav: Navigation;
   context: WorkspaceProps;
   sidebar: boolean;
   onSidebarChange: (visible: boolean) => void;
   compact: boolean;
-  deckVisible?: boolean;
   openSystem?: () => void;
   onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId?: string, destination?: WorkspaceDestination) => Promise<void>;
 }) {
@@ -523,35 +435,24 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, deckV
     const visible = nav.active === workspace;
     const target = state?.target;
     return <div key={id} className="work-view" hidden={!visible}>
-      <WorkspaceVisibility.Provider value={deckVisible && visible}><Suspense fallback={loading}>
-        {workspace === "conversations" ? context.simulation
-          ? <ConversationsPreview {...context} target={target} compact={compact} />
-          : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
+      <WorkspaceVisibility.Provider value={visible}><Suspense fallback={loading}>
+        {workspace === "conversations" ? <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
             compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} onOpenCheckoutInIde={async (source) => {
               if (source.checkoutId === context.checkout.checkoutId) context.openWorkspace("ide");
               else if (onOpenOtherCheckout) await onOpenOtherCheckout(source, undefined, { workspace: "ide" });
               else throw new Error("This worktree cannot be opened from the current workspace.");
             }} />
-          : workspace === "diagnostics" ? context.simulation
-            ? <SimulationDiagnostics {...context} openSystem={openSystem} />
-            : <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />
+          : workspace === "diagnostics" ? <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />
             : View && <View {...context} target={target} />}
       </Suspense></WorkspaceVisibility.Provider>
     </div>;
   });
 }
 
-function SavedPlan() {
-  return <article className="work-inspection-body max-h-full overflow-auto">
-    <p className="font-mono text-xs">Plan revision 1 · docs/release.md</p>
-    <ConversationMarkdown>{previewPlan}</ConversationMarkdown>
-  </article>;
-}
-
-function SideInspector({ side, compact, close, children, plan }: { side: SidePane; compact: boolean; close: () => void; children: ReactNode; plan?: ReactNode }) {
+function SideInspector({ side, compact, close, children }: { side: SidePane; compact: boolean; close: () => void; children: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const title = side.type === "changes" ? "Changes" : "Activity";
-  const tabs = <InspectorTabs title={title} content={children} plan={plan} expanded={expanded} onExpand={() => setExpanded(!expanded)} onClose={close} />;
+  const tabs = <InspectorTabs title={title} content={children} expanded={expanded} onExpand={() => setExpanded(!expanded)} onClose={close} />;
   return <WorkbenchPanel as="aside" className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded}
     drawer={compact} drawerClass="work-inspector-drawer" label={title} open onClose={close}
     edge="left" resizeKey={`inspector-${side.type}`} resizeLabel={title} onKeyDown={(event) => {

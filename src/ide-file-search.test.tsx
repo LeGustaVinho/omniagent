@@ -34,7 +34,7 @@ it("submits literal search to the selected checkout, marks partial results, and 
   const openWorkspace = vi.fn();
   const props: WorkspaceProps = {
     checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\linked" },
-    openWorkspace, openActivity: vi.fn(), openChanges: vi.fn(), startSimulation: vi.fn(), simulation: null,
+    openWorkspace, openActivity: vi.fn(), openChanges: vi.fn(),
   };
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -117,7 +117,7 @@ it("scopes content search to a closed Explorer file, an inactive tab and a file 
   const second = "src/active.ts";
   const props: WorkspaceProps = {
     checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\linked" },
-    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), startSimulation: vi.fn(), simulation: null,
+    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(),
   };
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -240,7 +240,7 @@ it("jumps to a Markdown match while preserving the canonical tab and repeated op
   const content = "# A real note\n\nThird line\nFourth line";
   const checkoutId = "selected-worktree";
   const checkout = { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\worktree" };
-  const props: WorkspaceProps = { checkout, simulation: null, startSimulation: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn() };
+  const props: WorkspaceProps = { checkout, openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn() };
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   const unsupported = ["getClientRects", "getBoundingClientRect"].filter(name => !(name in Range.prototype));
   for (const name of unsupported) Object.defineProperty(Range.prototype, name, {

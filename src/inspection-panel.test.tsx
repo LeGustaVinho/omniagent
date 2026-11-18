@@ -24,7 +24,7 @@ function readDownload(blob: Blob) {
   });
 }
 
-it("opens recorded run pages through the same Activity tabs as Simulate and loads exact evidence on selection", async () => {
+it("opens recorded run pages and loads exact evidence on selection", async () => {
   const conversationId = "recorded-conversation";
   const run: RunRecord = {
     id: "recorded-run", projectId: exampleCheckout.projectId, checkoutId: exampleCheckout.checkoutId,
@@ -54,16 +54,14 @@ it("opens recorded run pages through the same Activity tabs as Simulate and load
     }
   });
   const props = {
-    checkout: exampleCheckout, runId: run.id, conversationId, onClose: vi.fn(), startSimulation: vi.fn(),
+    checkout: exampleCheckout, runId: run.id, conversationId, onClose: vi.fn(),
     openWorkspace: vi.fn(), openChanges: vi.fn(), openActivity: vi.fn(),
   };
-  const result = render(<RunInspector {...props} simulation={{ scenario: "delivery", delivery: "verified", epoch: 1, advanceDelivery: vi.fn() }} />);
-  const sampleTabs = screen.getAllByRole("tab").map((element) => element.textContent);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  result.rerender(<QueryClientProvider client={client}><RunInspector {...props} simulation={null} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><RunInspector {...props} /></QueryClientProvider>);
 
   const activity = within(await screen.findByRole("complementary", { name: "Conversation activity" }));
-  expect(activity.getAllByRole("tab").map((element) => element.textContent)).toEqual(sampleTabs);
+  expect(activity.getAllByRole("tab").map((element) => element.textContent)).toEqual(["Overview", "Timeline", "Agents", "Context", "Exact input", "Approvals", "Artifacts"]);
   expect(activity.getByRole("tab", { name: "Overview", selected: true })).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "conversation_input")).toBe(false);
   await userEvent.click(activity.getByRole("tab", { name: "Exact input" }));
@@ -110,7 +108,7 @@ it("copies captured command output and failure evidence for the exact inspected 
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={run.id}
-    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={openWorkspace} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
+ onClose={vi.fn()} openWorkspace={openWorkspace} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("region", { name: "Command activity" }));
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "command_job_output")).toBe(false);
@@ -218,7 +216,7 @@ it("compares only recorded attempts of the inspected conversation and opens the 
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={runId} conversationId={conversationId}
-    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
+ onClose={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("complementary", { name: "Conversation activity" }));
   await user.click(activity.getByRole("tab", { name: "Artifacts" }));

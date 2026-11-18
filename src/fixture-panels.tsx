@@ -64,11 +64,11 @@ function FixtureProcess({ title, heading, status, checkoutId, runId, events, err
   });
   const visible = entries?.filter(({ channel }) => filter === "all" || filter === channel);
   const captured = () => JSON.stringify({
-    source: checkoutId ? "fixture_recent_events" : "simulation",
+    source: "fixture_recent_events",
     checkoutId: checkoutId ?? null,
     runId: runId ?? null,
     filter,
-    output: checkoutId ? "redacted_preview" : "simulated",
+    output: "redacted_preview",
     events: visible?.map(({ event }) => event) ?? [],
   }, null, 2);
   const range = filter === "all" ? "recent" : "visible";
@@ -80,7 +80,7 @@ function FixtureProcess({ title, heading, status, checkoutId, runId, events, err
       ) },
       { label: `Copy ${range} fixture events as JSON`, run: () => copy(captured()) },
       { label: `Download ${range} fixture events (.json)`, run: () => void perform(async () => {
-        const filename = runId ? `fixture-${runId}-events` : "simulated-fixture-events";
+        const filename = `fixture-${runId}-events`;
         downloadArtifact(`${filename}-${filter}.json`, new Blob([captured()], { type: "application/json" }));
       }) },
     ] : []),
@@ -105,9 +105,7 @@ function FixtureProcess({ title, heading, status, checkoutId, runId, events, err
             {filters.map((channel) => <option key={channel} value={channel}>{filterLabels[channel]}</option>)}
           </select>
         </label>
-        <p className="text-xs text-muted-foreground">{checkoutId
-          ? "Recent events for this checkout and run. Output previews may be redacted or shortened, and older events may be omitted."
-          : "Events from this simulation."}</p>
+        <p className="text-xs text-muted-foreground">Recent events for this checkout and run. Output previews may be redacted or shortened, and older events may be omitted.</p>
         <ol aria-label="Run events" className="max-h-96 min-h-36 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs">
           {visible.map(({ event, channel, display, text }) => <li key={event.seq}>
             <ContextActions label={`${display} event ${event.seq}`} groups={[[
@@ -140,25 +138,6 @@ function FixtureProcess({ title, heading, status, checkoutId, runId, events, err
       {children}
     </div>
   </DiagnosticsCard>;
-}
-
-export function SimulationFixture() {
-  const [status, setStatus] = useState<"idle" | "waiting_for_input" | "succeeded" | "cancelled">("idle");
-  const [input, setInput] = useState("");
-  const events: FixtureEvent[] = [];
-  if (status !== "idle") events.push({ seq: "1", data: { type: "status", status: "waiting_for_input" } });
-  if (status === "succeeded") {
-    events.push({ seq: "2", data: { type: "output", stream: "stdout", preview: `Input received: ${input}` } });
-  }
-  if (status === "succeeded" || status === "cancelled") events.push({ seq: "3", data: { type: "status", status } });
-
-  return <FixtureProcess title="Process fixture" status={status === "idle" ? "Idle" : STATUS_LABELS[status]}
-    events={status === "idle" ? undefined : events}
-    start={status !== "waiting_for_input" ? () => { setInput(""); setStatus("waiting_for_input"); } : undefined}
-    cancel={status === "waiting_for_input" ? () => setStatus("cancelled") : undefined}
-    input={status === "waiting_for_input" ? {
-      value: input, onChange: setInput, onSend: () => setStatus("succeeded"), disabled: !input.trim(),
-    } : undefined} />;
 }
 
 export function FixtureListPanel({ containerApi }: IDockviewPanelProps) {

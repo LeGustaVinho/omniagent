@@ -81,8 +81,8 @@ function mount({ stale = false, publication = null, openWorkspace = vi.fn(), mem
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" simulation={null}
-      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} startSimulation={vi.fn()} />
+    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft"
+      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   return userEvent.setup();
 }

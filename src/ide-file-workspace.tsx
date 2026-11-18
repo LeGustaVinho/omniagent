@@ -933,8 +933,8 @@ export function FileCaption({ path, revision, actions, onReveal }: {
   </div>;
 }
 
-export function FileUnavailable({ title, path, detail, onSimulate }: {
-  title: string; path?: string; detail?: string; onSimulate?: () => void;
+export function FileUnavailable({ title, path, detail }: {
+  title: string; path?: string; detail?: string;
 }) {
   return (
     <section className="file-unavailable">
@@ -942,7 +942,7 @@ export function FileUnavailable({ title, path, detail, onSimulate }: {
       <h2>{title}</h2>
       {path && <p><code>{path}</code></p>}
       {detail && <p>{detail}</p>}
-      {onSimulate && <button type="button" className="fw-btn fw-primary" onClick={onSimulate}>Simulate</button>}
+
     </section>
   );
 }

@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { deliveryGitModes, deliveryGitSetting, deliveryMilestoneKey, type DeliveryGitPolicy,
   type DeliveryMilestonePolicy, type DestinationDriftPolicy } from "@/delivery-git-policy";
-import { useGitSimulation } from "@/git-simulation";
 import { SettingRow } from "@/settings-controls";
 
 export const deliveryMilestoneSetting = {
@@ -32,24 +31,6 @@ function PolicySelect({ value, pending, onChange }: {
       {deliveryGitModes.map(([policy, label]) => <option key={policy} value={policy}>{label}</option>)}
     </select>
   </SettingRow>;
-}
-
-export function SimulatedDeliveryGitSettings({ branch, drift, onBranchChange, onDriftChange }: {
-  branch: string;
-  drift: DestinationDriftPolicy;
-  onBranchChange: (branch: string) => void;
-  onDriftChange: (policy: DestinationDriftPolicy) => void;
-}) {
-  const git = useGitSimulation();
-  const saved: DeliveryMilestonePolicy = { milestone: git.mergeRequired ? "verified_merge" : "verified_commit", destinationBranch: branch };
-  return <>
-    <PolicySelect value={git.gitMode} onChange={git.setGitMode} />
-    <CompletionSettings key={JSON.stringify(saved)} saved={saved} onSave={({ milestone, destinationBranch }) => {
-      git.setMergeRequired(milestone === "verified_merge");
-      onBranchChange(destinationBranch ?? "");
-    }} />
-    <DestinationDriftSettings value={drift} onChange={onDriftChange} />
-  </>;
 }
 
 export function DeliveryGitSettings({ projectId }: { projectId: string }) {

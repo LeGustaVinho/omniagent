@@ -70,7 +70,7 @@ const main = "checkout-main";
 const alternate = "checkout-alternate";
 const propsFor = (checkoutId: string): WorkspaceProps => ({
   checkout: { checkoutId, projectId: "project", repositoryRoot: "C:\\repo", checkoutRoot: `C:\\${checkoutId}` },
-  simulation: null, openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(), startSimulation: vi.fn(),
+  openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
 });
 const documentAt = (checkoutId: string, rev: string, text: string, path = file, format?: FileFormat) => ({
   status: "document",

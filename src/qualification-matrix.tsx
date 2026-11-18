@@ -34,7 +34,7 @@ type RecordedProfile = {
 
 type Cursor = Pick<RecordedProfile, "recordedAt" | "runId">;
 type QualificationPage = { records: RecordedProfile[]; nextCursor: Cursor | null };
-type MatrixRow = { id: string; cli: ReactNode; model: ReactNode; host: ReactNode; runner: ReactNode; qualification: ReactNode };
+type MatrixRow = { cli: ReactNode; model: ReactNode; host: ReactNode; runner: ReactNode; qualification: ReactNode };
 
 const providers: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", antigravity: "Antigravity" };
 const modes: Record<SessionMode, string> = { read_only: "Read only", plan: "Plan", approved_write: "Approved write" };
@@ -45,12 +45,6 @@ const statuses: Record<RecordedCapability["status"], string> = {
 const origins: Record<NonNullable<RecordedCapability["evidence"]>["origin"], string> = {
   protocol_fixture: "Protocol fixture", authenticated_fixture: "Authenticated fixture", authenticated_provider_run: "Authenticated provider run",
 };
-
-const exampleRows: MatrixRow[] = [
-  { id: "codex", cli: "Codex", model: "GPT-6.1 Sol", host: "Windows 11", runner: "Direct", qualification: "Verified · Read-only and writing" },
-  { id: "claude", cli: "Claude Code", model: "Claude Sonnet 5.5", host: "Windows 11", runner: "Direct", qualification: "Verified · Approval prompts" },
-  { id: "antigravity", cli: "Antigravity", model: "Gemini 4 Argon", host: "Windows 10 22H2", runner: "Hyper-V guest", qualification: "Blocked · Pairing required" },
-];
 
 const displayDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const windowsArchitectures: Partial<Record<number, string>> = { 0: "x86", 9: "x64", 12: "ARM64" };
@@ -153,7 +147,7 @@ function RecordedProfileRow({ record }: { record: RecordedProfile }) {
     </>} />;
 }
 
-function MatrixTableRow({ cli, model, host, runner, qualification }: Omit<MatrixRow, "id">) {
+function MatrixTableRow({ cli, model, host, runner, qualification }: MatrixRow) {
   return <tr className="align-top"><td>{cli}</td><td>{model}</td><td>{host}</td><td>{runner}</td><td>{qualification}</td></tr>;
 }
 
@@ -191,15 +185,14 @@ function RecordedQualifications({ validationCheckoutId, provider }: { validation
   </>;
 }
 
-export function QualificationMatrix({ examples = false, validationCheckoutId = null, provider }: {
-  examples?: boolean;
+export function QualificationMatrix({ validationCheckoutId = null, provider }: {
   validationCheckoutId?: string | null;
   provider?: Provider;
 }) {
   const [expanded, setExpanded] = useState(false);
   return <details className="settings-matrix" onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary>Qualification matrix</summary>
-    {examples ? <MatrixTable>{exampleRows.map(({ id, ...row }) => <MatrixTableRow key={id} {...row} />)}</MatrixTable> : expanded &&
+    {expanded &&
       <RecordedQualifications key={validationCheckoutId} validationCheckoutId={validationCheckoutId} provider={provider} />}
   </details>;
 }

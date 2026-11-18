@@ -49,8 +49,8 @@ const after = "[[docs/Lançamento#Checklist|Release readiness]]";
 const props: WorkspaceProps = {
   checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\repo" },
   target: "notes/release.md",
-  simulation: null,
-  startSimulation: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
+
+  openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
 };
 
 function setupRepository() {

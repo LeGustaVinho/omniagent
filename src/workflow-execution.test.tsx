@@ -109,7 +109,7 @@ it("shows a Function as one live graph node with its published result and intern
     throw new Error(command);
   });
   render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={exampleCheckout}
-    target={`run:${runId}`} simulation={null} startSimulation={vi.fn()} openWorkspace={vi.fn()}
+    target={`run:${runId}`} openWorkspace={vi.fn()}
     openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "Summarize request · Completed" }));
@@ -140,7 +140,7 @@ it("opens a legacy run link in Runs and navigates between the parent backlog and
   const openWorkspace = vi.fn();
   function Harness() {
     const [target, setTarget] = useState(runId);
-    return <PipelinesWorkspace checkout={exampleCheckout} target={target} simulation={null} startSimulation={vi.fn()}
+    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
       openWorkspace={(workspace, next) => { openWorkspace(workspace, next); setTarget(next ?? ""); }}
       openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
@@ -181,7 +181,7 @@ it("opens the real Builder from the Runs empty state", async () => {
   vi.mocked(invoke).mockResolvedValue([]);
   const openWorkspace = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} target="runs" simulation={null} startSimulation={vi.fn()}
+    <PipelinesWorkspace checkout={exampleCheckout} target="runs"
       openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const runs = within(screen.getByRole("region", { name: "Workflow runs" }));
@@ -197,7 +197,7 @@ it("navigates from the context of the clicked saved run", async () => {
   ]);
   const openWorkspace = vi.fn();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelinesWorkspace checkout={exampleCheckout} target="runs" simulation={null} startSimulation={vi.fn()}
+    <PipelinesWorkspace checkout={exampleCheckout} target="runs"
       openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
@@ -265,7 +265,7 @@ it.each(["checkbox", "context menu"])("hands saved responses from the %s to the 
   });
   function Harness() {
     const [target, setTarget] = useState("compare");
-    return <PipelinesWorkspace checkout={exampleCheckout} target={target} simulation={null} startSimulation={vi.fn()}
+    return <PipelinesWorkspace checkout={exampleCheckout} target={target}
       openWorkspace={(_workspace, next) => setTarget(next ?? "")} openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -593,7 +593,7 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
       default: throw new Error(`Unexpected ${command}`);
     }
   });
-  const props = { checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(),
+  const props = { checkout: exampleCheckout,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openQueueJob: vi.fn() };
   function NavigablePipelines() {
     const [target, setTarget] = useState<string | undefined>("automations");
@@ -715,7 +715,7 @@ it("shows a pending decision only for the pinned node in the current plan and se
     }
     throw new Error(`Unexpected ${command}`);
   });
-  const props = { checkout: exampleCheckout, target: `run:${runId}`, simulation: null, startSimulation: vi.fn(),
+  const props = { checkout: exampleCheckout, target: `run:${runId}`,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
   const user = userEvent.setup();
@@ -772,7 +772,7 @@ it("opens comparison outcomes for the exact wired input and preserves the candid
     }
     throw new Error(`Unexpected ${command}`);
   });
-  const props = { checkout: exampleCheckout, target: `run:${runId}`, simulation: null, startSimulation: vi.fn(),
+  const props = { checkout: exampleCheckout, target: `run:${runId}`,
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
   const user = userEvent.setup();

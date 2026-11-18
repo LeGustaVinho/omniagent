@@ -94,8 +94,8 @@ function descriptionFixture() {
 
 function mountWorkspace() {
   const props: WorkspaceProps = {
-    checkout: exampleCheckout, simulation: null, openWorkspace: vi.fn(), openActivity: vi.fn(),
-    startSimulation: vi.fn(), openChanges: vi.fn(),
+    checkout: exampleCheckout, openWorkspace: vi.fn(), openActivity: vi.fn(),
+    openChanges: vi.fn(),
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(<QueryClientProvider client={client}><ProjectTasksWorkspace {...props} /></QueryClientProvider>);

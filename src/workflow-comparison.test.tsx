@@ -27,7 +27,7 @@ function mount(target?: string, fromNavigation = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const Surface = fromNavigation ? PipelinesWorkspace : WorkflowComparisons;
   return render(<QueryClientProvider client={client}><Surface checkout={exampleCheckout} target={target}
-    simulation={null} startSimulation={vi.fn()} openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
+      openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
 }
 
 it("pins the selected Git revision and preserves selection order for same-provider candidates", async () => {

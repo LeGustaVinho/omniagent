@@ -6,8 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { RealDiagnostics } from "@/desktop-dock";
 import { downloadArtifact } from "@/download-artifact";
 import { FixtureRunPanel } from "@/fixture-panels";
-import { SimulationDiagnostics } from "@/inspection-panel";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import { exampleCheckout } from "@/workbench-contract";
 import { useWorkspace } from "@/workspace-state";
 
 const { getVersion, invoke } = vi.hoisted(() => ({ getVersion: vi.fn(), invoke: vi.fn() }));
@@ -54,36 +53,6 @@ it("reads actual desktop and CLI status and exposes the device settings link", a
   await user.click(screen.getByRole("button", { name: "Check installed executables" }));
   await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "desktop_cli_prerequisites")).toHaveLength(2));
   expect(invoke.mock.calls.every(([command]) => ["runtime_status", "desktop_cli_prerequisites"].includes(command))).toBe(true);
-});
-
-it("uses the same view navigation for a disposable fixture without invoking the runtime", async () => {
-  const ctx: WorkspaceProps = {
-    checkout: exampleCheckout,
-    simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: vi.fn() },
-    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), startSimulation: vi.fn(),
-  };
-  render(<SimulationDiagnostics {...ctx} />);
-  const user = userEvent.setup();
-  const fixtureTab = screen.getByRole("button", { name: "Fixture runs" });
-  fixtureTab.focus();
-  await user.keyboard("{Enter}");
-  expect(fixtureTab.getAttribute("aria-current")).toBe("page");
-  await user.click(screen.getByRole("button", { name: "Start fixture" }));
-  await user.type(screen.getByLabelText("Fixture input"), "Boundary check");
-  await user.click(screen.getByRole("button", { name: "Send input" }));
-  expect(screen.getByText("Input received: Boundary check")).toBeTruthy();
-  fireEvent.contextMenu(screen.getByText("Input received: Boundary check"));
-  await user.click(screen.getByRole("menuitem", { name: "Copy event text" }));
-  expect(await navigator.clipboard.readText()).toBe("Input received: Boundary check");
-  fireEvent.contextMenu(screen.getByRole("heading", { name: "Process fixture" }));
-  await user.click(screen.getByRole("menuitem", { name: "Copy recent fixture events" }));
-  expect(await navigator.clipboard.readText()).toBe("[1 state] Waiting for input\n[2 stdout] Input received: Boundary check\n[3 state] Succeeded");
-  await user.click(screen.getByRole("button", { name: "Desktop" }));
-  expect(screen.queryByRole("region", { name: "Process fixture" })).toBeNull();
-  await user.click(fixtureTab);
-  expect(within(screen.getByRole("region", { name: "Process fixture" })).getByText("Input received: Boundary check")).toBeTruthy();
-  expect(invoke).not.toHaveBeenCalled();
-  expect(getVersion).not.toHaveBeenCalled();
 });
 
 it("copies only the selected fixture's events and keeps protected input display scoped to its run", async () => {

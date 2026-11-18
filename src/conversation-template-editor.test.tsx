@@ -85,8 +85,8 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   function LiveWorkspace() {
     const [target, setTarget] = useState<string>();
-    return <PipelinesWorkspace checkout={checkout} target={target} simulation={null}
-      openWorkspace={(_, destination) => setTarget(destination)} startSimulation={vi.fn()}
+    return <PipelinesWorkspace checkout={checkout} target={target}
+      openWorkspace={(_, destination) => setTarget(destination)}
       openActivity={vi.fn()} openChanges={vi.fn()} />;
   }
   render(<QueryClientProvider client={client}>

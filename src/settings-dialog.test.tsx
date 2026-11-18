@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { defaultAppearance, useAppAppearance } from "@/settings-appearance";
 import SettingsDialog from "@/settings-dialog";
-import { exampleCheckout, type SimulationSession } from "@/workbench-contract";
+import { exampleCheckout } from "@/workbench-contract";
 
 const { invoke, getVersion } = vi.hoisted(() => ({ invoke: vi.fn(), getVersion: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -20,13 +20,13 @@ function AppearanceRoot() {
 }
 
 function openSettings({ checkout = exampleCheckout, ...options }: {
-  initialPage?: string; simulation: SimulationSession | null; checkout?: ProjectCheckout | null;
+  initialPage?: string; checkout?: ProjectCheckout | null;
 }) {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    {!options.simulation && <AppearanceRoot />}
+    <AppearanceRoot />
     <SettingsDialog checkout={checkout} open onOpenChange={unusedAction}
       openActivity={unusedAction} openChanges={unusedAction} openWorkspace={unusedAction}
-      startSimulation={unusedAction} {...options} />
+      {...options} />
   </QueryClientProvider>);
 }
 
@@ -44,7 +44,7 @@ it("restores the last saved theme if the appearance write fails", async () => {
     ? Promise.resolve(defaultAppearance)
     : Promise.reject(new Error("Database unavailable")));
   const user = userEvent.setup();
-  openSettings({ simulation: null });
+  openSettings({});
 
   const light = screen.getByRole("button", { name: "Light" });
   await waitFor(() => expect((light.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(false));
@@ -59,7 +59,7 @@ it("restores the last saved theme if the appearance write fails", async () => {
 
 it("saves the Markdown width and applies it app-wide", async () => {
   invoke.mockImplementation(async (command: string, args) => command === "appearance_settings" ? defaultAppearance : args.settings);
-  openSettings({ simulation: null });
+  openSettings({});
   const width = screen.getByLabelText("Markdown width");
   await waitFor(() => expect((width.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(false));
 
@@ -87,7 +87,7 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
-  openSettings({ initialPage: "providers", simulation: null });
+  openSettings({ initialPage: "providers" });
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "Check CLI" }));
   expect((await screen.findByText("Effective CLI permissions")).nextElementSibling?.textContent).toContain("plan");
@@ -121,7 +121,7 @@ it("stages the verified backup only after confirmation and reports the pending r
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
-  openSettings({ initialPage: "system", simulation: null });
+  openSettings({ initialPage: "system" });
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Preview restore" }));
   expect(await screen.findByText(archive)).toBeTruthy();
@@ -149,7 +149,7 @@ it("finds the device's external editor setting, preserves it on cancel and clear
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
-  openSettings({ simulation: null, checkout: null });
+  openSettings({ checkout: null });
   const user = userEvent.setup();
   await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "external editor");
   await user.click(screen.getByRole("button", { name: "External editor in System" }));
@@ -183,7 +183,7 @@ it("saves execution capacity in the same device scheduler used by the queue", as
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
-  openSettings({ initialPage: "capacity", simulation: null });
+  openSettings({ initialPage: "capacity" });
   const user = userEvent.setup();
   const capacity = () => screen.getByRole<HTMLInputElement>("spinbutton", { name: "Simultaneous managed runs" });
   const save = () => screen.getByRole<HTMLButtonElement>("button", { name: "Save capacity" });
@@ -200,7 +200,7 @@ it("saves execution capacity in the same device scheduler used by the queue", as
 
 it("explains how to load execution capacity without fabricating a checkout", () => {
   invoke.mockResolvedValue(defaultAppearance);
-  openSettings({ initialPage: "capacity", simulation: null, checkout: null });
+  openSettings({ initialPage: "capacity", checkout: null });
   expect(screen.getByRole<HTMLInputElement>("spinbutton", { name: "Simultaneous managed runs" }).disabled).toBe(true);
   expect(screen.getByText("Open a repository to load execution capacity.")).toBeTruthy();
   expect(invoke.mock.calls.some(([command]) => command === "project_job_queue")).toBe(false);
@@ -220,7 +220,7 @@ it("saves Git automation independently of its completion milestone and destinati
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
-  openSettings({ initialPage: "git", simulation: null });
+  openSettings({ initialPage: "git" });
   const policy = screen.getByLabelText("After accepting a diff") as HTMLSelectElement;
   const user = userEvent.setup();
   await waitFor(() => expect(policy.value).toBe("automatic_commit_user_merge"));
@@ -256,7 +256,12 @@ it("saves Git automation independently of its completion milestone and destinati
 });
 
 it("focuses the matching control when the same settings search result is opened again", async () => {
-  openSettings({ simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: unusedAction } });
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "appearance_settings") return defaultAppearance;
+    throw new Error(command);
+  });
+  openSettings({});
+  await waitFor(() => expect(screen.getByLabelText<HTMLSelectElement>("Motion").closest("fieldset")?.disabled).toBe(false));
   const user = userEvent.setup();
   const search = screen.getByRole("searchbox", { name: "Search settings" });
   await user.type(search, "motion");
@@ -273,36 +278,7 @@ it("focuses the matching control when the same settings search result is opened 
 });
 
 it("opens the backup section from its settings link", () => {
-  openSettings({ initialPage: "backup", simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: unusedAction } });
+  openSettings({ initialPage: "backup" });
   expect(screen.getByRole("heading", { name: "System" })).toBeTruthy();
   expect(document.activeElement).toBe(screen.getByRole("button", { name: "Create backup" }));
-});
-
-it("checks a backup profile and recovers a failed simulated update without desktop commands", async () => {
-  const user = userEvent.setup();
-  openSettings({
-    initialPage: "system",
-    simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: unusedAction },
-  });
-
-  await user.selectOptions(screen.getByLabelText("Archive source"), "different-profile");
-  await user.click(screen.getByRole("button", { name: "Preview restore" }));
-  expect(screen.getByRole("alert").textContent).toContain("another Windows user profile");
-  expect(screen.queryByRole("button", { name: "Restore selected backup" })).toBeNull();
-
-  await user.selectOptions(screen.getByLabelText("Update example"), "launch-failed");
-  await user.click(screen.getByRole("button", { name: "Check for updates" }));
-  await user.click(screen.getByRole("button", { name: "Install signed build" }));
-  for (let index = 0; index < 4; index++) {
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-  }
-  await user.click(screen.getByRole("button", { name: "Finish" }));
-  expect(screen.getByText(/The candidate failed its restart check/).getAttribute("role")).toBe("alert");
-  await user.click(screen.getByRole("button", { name: "Restore previous build" }));
-  await user.click(screen.getByRole("button", { name: "Continue" }));
-  await user.click(screen.getByRole("button", { name: "Continue" }));
-  await user.click(screen.getByRole("button", { name: "Finish" }));
-  expect(screen.getByRole("status").textContent).toContain("Restored the previous build");
-  expect(invoke).not.toHaveBeenCalled();
-  expect(getVersion).not.toHaveBeenCalled();
 });

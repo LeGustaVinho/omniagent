@@ -87,7 +87,7 @@ it("dispatches only exact cross-file source URIs from its own Monaco editor", as
   const uri = (path: string, extra: Partial<Uri> = {}) => ({ scheme: "omni-source", path, authority: "", query: "", fragment: "", ...extra }) as Uri;
   const target = "/checkout:real/src/ação %2F #1.ts";
   for (const invalid of [
-    uri("/checkout:real/src/main.ts"), uri("/checkout-copy:real/src/main.ts"), uri("/checkout:simulation/src/main.ts"),
+    uri("/checkout/src/main.ts"), uri("/checkout-copy/src/main.ts"), uri("/another-checkout/src/main.ts"),
     uri("/checkout:real/../other.ts"), uri("/checkout:real/.git/config"), uri("/checkout:real/C:/other.ts"),
     uri("/checkout:real//src/other.ts"), uri("/checkout:real/src\\other.ts"), uri("/checkout:real/src. /other.ts"),
     uri(target, { scheme: "file" }), uri(target, { authority: "another-checkout" }), uri(target, { fragment: "wrong" }),

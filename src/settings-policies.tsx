@@ -1,8 +1,6 @@
-import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { projectWorkModeSettings } from "@/project-agile-settings";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
-import type { WorkspaceProps } from "@/workbench-contract";
 
 type Choice = readonly [value: string, label: string];
 
@@ -130,80 +128,22 @@ export const policyFields = {
   ],
 } satisfies Record<string, readonly Field[]>;
 
-export function PolicyForm({
-  fields,
-  stored,
-  save,
-  simulate,
-}: {
-  fields: readonly Field[];
-  stored: Record<string, string> | undefined;
-  save?: (settings: Record<string, string>) => void;
-  simulate?: WorkspaceProps["startSimulation"];
-}) {
-  const [draft, setDraft] = useState<Record<string, string>>(() =>
-    stored ?? Object.fromEntries(fields.map(({ id, initial }) => [id, initial])));
-  const [saved, setSaved] = useState(false);
-  function edit(id: string, value: string) {
-    setDraft((current) => ({ ...current, [id]: value }));
-    setSaved(false);
-  }
-
-  return (
-    <>
-      {!save && (
-        <IntegrationNotice start={simulate}>
-          This page is ready for the project and scheduler policies API.
-        </IntegrationNotice>
-      )}
-      <form onSubmit={(event) => {
-        event.preventDefault();
-        save?.(draft);
-        setSaved(true);
-      }}>
-        <fieldset disabled={!save}>
-          {fields.map((field) => {
-            const input = <PolicyInput field={field}
-              value={save ? draft[field.id] ?? field.initial : ""} change={(value) => edit(field.id, value)} />;
-            return <SettingRow key={field.id} id={field.id} label={field.label} description={field.description}>
-              {input}
-            </SettingRow>;
-          })}
-          <div className="settings-save">
-            <Button type="submit">Save</Button>
-            {saved && <span role="status">Saved for this simulation.</span>}
-          </div>
-        </fieldset>
-      </form>
-    </>
-  );
+export function PolicyForm({ fields }: { fields: readonly Field[] }) {
+  return <>
+    <IntegrationNotice>These settings are currently unavailable.</IntegrationNotice>
+    <fieldset disabled>
+      {fields.map((field) => <SettingRow key={field.id} id={field.id} label={field.label} description={field.description}>
+        <UnavailablePolicyInput field={field} />
+      </SettingRow>)}
+      <div className="settings-save"><Button type="button">Save</Button></div>
+    </fieldset>
+  </>;
 }
 
-function PolicyInput({ field, value, change }: {
-  field: Field; value: string; change: (value: string) => void;
-}) {
+function UnavailablePolicyInput({ field }: { field: Field }) {
   const description = `${field.id}-description`;
-  if (field.kind === "toggle") {
-    return (
-      <input id={field.id} type="checkbox" aria-describedby={description} checked={value === "true"}
-        onChange={(event) => change(String(event.target.checked))} />
-    );
-  }
-  if (field.kind === "choice") {
-    return (
-      <select id={field.id} aria-describedby={description} value={value} onChange={(event) => change(event.target.value)}>
-        {value === "" && <option value="">Unavailable</option>}
-        {field.options.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-      </select>
-    );
-  }
-  return (
-    <input id={field.id} aria-describedby={description} value={value}
-      type={field.kind === "number" ? "number" : "text"}
-      required={field.kind === "number"}
-      min={field.kind === "number" ? field.min : undefined}
-      max={field.kind === "number" ? field.max : undefined}
-      placeholder={field.kind === "text" ? field.placeholder : undefined}
-      onChange={(event) => change(event.target.value)} />
-  );
+  if (field.kind === "toggle") return <input id={field.id} type="checkbox" aria-describedby={description} />;
+  if (field.kind === "choice") return <select id={field.id} aria-describedby={description}><option>Unavailable</option></select>;
+  return <input id={field.id} aria-describedby={description} type={field.kind === "number" ? "number" : "text"}
+    placeholder={field.kind === "text" ? field.placeholder : undefined} />;
 }

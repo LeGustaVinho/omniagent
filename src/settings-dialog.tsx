@@ -6,8 +6,8 @@ import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CandidateGateSettings } from "@/candidate-gate-settings";
-import { deliveryGitSetting, type DestinationDriftPolicy } from "@/delivery-git-policy";
-import { DeliveryGitSettings, SimulatedDeliveryGitSettings, deliveryMilestoneSetting, destinationDriftSetting } from "@/delivery-git-settings";
+import { deliveryGitSetting } from "@/delivery-git-policy";
+import { DeliveryGitSettings, deliveryMilestoneSetting, destinationDriftSetting } from "@/delivery-git-settings";
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
@@ -16,13 +16,13 @@ import { ConversationModelSettings, conversationModelSetting } from "@/model-def
 import { ProjectWorkModeControls } from "@/project-agile-settings";
 import { ResizablePanel } from "@/panel-resize";
 import { ProjectAttachmentSettings } from "@/provider-settings";
-import { CapacityEditor, managedCapacitySetting, QueueCapacitySettings } from "@/queue-policy";
-import { defaultAppearance, useAppearancePresentation, useEditableAppearance } from "@/settings-appearance";
+import { managedCapacitySetting, QueueCapacitySettings } from "@/queue-policy";
+import { defaultAppearance, useEditableAppearance } from "@/settings-appearance";
 import { SettingRow } from "@/settings-controls";
 import { PolicyForm, policyFields } from "@/settings-policies";
-import { ProviderProfiles, useProviderExamples } from "@/settings-provider-profiles";
+import { ProviderProfiles } from "@/settings-provider-profiles";
 import { ComposerSuggestionSettings } from "@/conversation-side-requests";
-import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
+import { SystemSettings } from "@/settings-system";
 import { ProjectSubagentControls } from "@/subagent-quota";
 import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -166,7 +166,7 @@ function scopeTarget(scope: Scope, checkout: ProjectCheckout | null) {
 }
 
 export default function SettingsDialog(props: SettingsDialogProps) {
-  return <SettingsSession key={props.simulation ? `simulation-${props.simulation.epoch}` : "live"} {...props} />;
+  return <SettingsSession {...props} />;
 }
 
 function SettingsSession({
@@ -176,25 +176,14 @@ function SettingsSession({
   openActivity,
   openWorkspace,
   initialPage,
-  simulation,
-  startSimulation,
 }: SettingsDialogProps) {
   const [selection, setSelection] = useState<{ page: PageId; anchor?: string }>(() => ({
     page: initialSelection(initialPage), anchor: initialAnchor(initialPage),
   }));
   const [mobilePage, setMobilePage] = useState(() => pageFromLink(initialPage));
   const [query, setQuery] = useState("");
-  const [exampleAppearance, setExampleAppearance] = useState(defaultAppearance);
-  const [exampleCapacity, setExampleCapacity] = useState(3);
-  const [exampleBranch, setExampleBranch] = useState("main");
-  const [exampleDrift, setExampleDrift] = useState<DestinationDriftPolicy>("pause");
-  const [disposablePolicies, setDisposablePolicies] = useState<Partial<Record<PageId, Record<string, string>>>>({});
-  const [approvedExample, setApprovedExample] = useState(false);
-  const providerExamples = useProviderExamples();
-  const maintenance = useMaintenanceSimulation();
-  const { preferences, save } = useEditableAppearance(open && !simulation);
-  const appearance = (simulation ? exampleAppearance : preferences.data) ?? defaultAppearance;
-  const presentation = useAppearancePresentation(appearance);
+  const { preferences, save } = useEditableAppearance(open);
+  const appearance = preferences.data ?? defaultAppearance;
   const searchInput = useRef<HTMLInputElement>(null);
   const pageTitle = useRef<HTMLHeadingElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -204,7 +193,6 @@ function SettingsSession({
   const currentPage = (available.find(({ id }) => id === selection.page) ?? pages[0])!;
   const target = scopeTarget(currentPage.scope, checkout);
   const results = showResults ? searchSettings(available, query) : [];
-  const simulate = checkout ? startSimulation : undefined;
 
   useEffect(() => {
     if (!open) return;
@@ -236,87 +224,77 @@ function SettingsSession({
   }
 
   function changeAppearance<Key extends keyof AppearanceSettings>(key: Key, value: AppearanceSettings[Key]) {
-    if (!simulation && save.isPending) return;
-    const updated = { ...appearance, [key]: value };
-    if (simulation) setExampleAppearance(updated);
-    else save.mutate(updated);
+    if (save.isPending) return;
+    save.mutate({ ...appearance, [key]: value });
   }
 
-  function policy(id: keyof typeof policyFields, fieldPage: PageId = id) {
-    return <PolicyForm key={fieldPage}
-      fields={policyFields[id]} stored={disposablePolicies[fieldPage]} simulate={simulate}
-      save={simulation ? (value) => setDisposablePolicies((current) => ({ ...current, [fieldPage]: value })) : undefined} />;
+  function policy(id: keyof typeof policyFields) {
+    return <PolicyForm fields={policyFields[id]} />;
   }
 
   function pageContent() {
     switch (currentPage.id) {
       case "appearance":
         return <>
-          {!simulation && preferences.isError && <p className="settings-result settings-result-error" role="alert">
+          {preferences.isError && <p className="settings-result settings-result-error" role="alert">
             Appearance preferences could not be loaded. <button type="button" onClick={() => void preferences.refetch()}>Retry</button>
           </p>}
-          {!simulation && save.isError && <p className="settings-result settings-result-error" role="alert">
+          {save.isError && <p className="settings-result settings-result-error" role="alert">
             Appearance preference could not be saved. The last saved value was restored.
           </p>}
-          {!simulation && (save.isPending || save.isSuccess) && <p className="settings-result" role="status">
+          {(save.isPending || save.isSuccess) && <p className="settings-result" role="status">
             {save.isPending ? "Saving…" : "Appearance saved"}
           </p>}
-          <fieldset disabled={!simulation && (preferences.isPending || preferences.isError)}>
+          <fieldset disabled={(preferences.isPending || preferences.isError)}>
             <AppearanceControls settings={appearance} update={changeAppearance} />
           </fieldset>
         </>;
       case "providers":
-        return <ProviderProfiles examples={simulation ? providerExamples : undefined} start={simulate} checkoutId={checkout?.checkoutId} />;
+        return <ProviderProfiles checkoutId={checkout?.checkoutId} />;
       case "capacity":
         return <>
-          {simulation ? <CapacityEditor key={exampleCapacity} capacity={exampleCapacity} settings onSave={setExampleCapacity} />
-            : <QueueCapacitySettings key={checkout?.projectId} projectId={checkout?.projectId} />}
+          <QueueCapacitySettings key={checkout?.projectId} projectId={checkout?.projectId} />
           {policy("capacity")}
         </>;
       case "attachments":
-        return simulation ? policy("attachments") : checkout && <ProjectAttachmentSettings key={checkout.projectId} projectId={checkout.projectId} />;
+        return checkout && <ProjectAttachmentSettings key={checkout.projectId} projectId={checkout.projectId} />;
       case "customizations":
-        return simulation
-          ? <CustomizationExample approved={approvedExample} approve={() => setApprovedExample(true)} />
-          : <CustomizationsSettings key={checkout?.checkoutId} checkout={checkout} embedded onOpenSource={(path) => {
+        return <CustomizationsSettings key={checkout?.checkoutId} checkout={checkout} embedded onOpenSource={(path) => {
             onOpenChange(false);
             openWorkspaceFile(openWorkspace, path, undefined, { repeat: true });
           }} />;
       case "system":
         return <>
-          <SystemSettings simulated={simulation ? maintenance : undefined} startSimulation={simulate} />
-          {!simulation && checkout && <WorkflowMaintenanceSettings key={checkout.projectId} checkout={checkout} />}
+          <SystemSettings />
+          {checkout && <WorkflowMaintenanceSettings key={checkout.projectId} checkout={checkout} />}
         </>;
       case "conversation":
-        if (simulation || !checkout) return policy("conversation");
+        if (!checkout) return policy("conversation");
         return <>
           <ConversationModelSettings key={`conversation-model-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
           <ComposerSuggestionSettings />
-          <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context" && id !== "suggestions")} stored={undefined} simulate={simulate} />
+          <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context" && id !== "suggestions")} />
         </>;
       case "execution":
-        if (simulation || !checkout) return policy("execution");
+        if (!checkout) return policy("execution");
         return <>
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
           <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectWorkModeControls key={`modes-${checkout.projectId}`} projectId={checkout.projectId} settings />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait", "branch-strategy", "checklist-mode"].includes(id))}
-            stored={undefined} simulate={simulate} />
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait", "branch-strategy", "checklist-mode"].includes(id))} />
         </>;
       case "git":
-        if (simulation) return <SimulatedDeliveryGitSettings branch={exampleBranch} drift={exampleDrift}
-          onBranchChange={setExampleBranch} onDriftChange={setExampleDrift} />;
         return checkout && <>
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
           <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
           <WorkflowGithubSettings key={`github-${checkout.projectId}`} projectId={checkout.projectId} />
         </>;
       case "automation":
-        if (simulation || !checkout) return policy("automation");
+        if (!checkout) return policy("automation");
         return <>
-          <PolicyForm fields={policyFields.automation.filter(({ id }) => id === "implementation-release")} stored={undefined} simulate={simulate} />
+          <PolicyForm fields={policyFields.automation.filter(({ id }) => id === "implementation-release")} />
           <WorkflowSettingsProposals key={checkout.projectId} checkout={checkout} onOpenRun={(runId) => {
             onOpenChange(false);
             openActivity(runId);
@@ -348,13 +326,11 @@ function SettingsSession({
           }}
         >
           <ResizablePanel className="settings-dialog" edge={["right", "bottom"]} resizeKey="settings" resizeLabel="settings" centered
-            data-show-page={mobilePage} data-app-theme={simulation ? presentation.theme : undefined}
-            data-app-motion={simulation ? presentation.motion : undefined} style={simulation ? presentation.style : undefined}>
+            data-show-page={mobilePage}>
           <header className="settings-header">
             <span className="settings-heading-icon"><Settings2 size={17} aria-hidden="true" /></span>
             <Dialog.Title asChild><h1>Settings</h1></Dialog.Title>
             <Dialog.Description className="sr-only">Edit device, project and checkout preferences.</Dialog.Description>
-            {simulation && <span className="settings-example-label">Simulation</span>}
             <Dialog.Close type="button" className="settings-icon-button" aria-label="Close settings">
               <X size={18} aria-hidden="true" />
             </Dialog.Close>
@@ -479,30 +455,4 @@ function AppearanceControls({
       </blockquote>
     </>
   );
-}
-
-function CustomizationExample({ approved, approve }: { approved: boolean; approve: () => void }) {
-  return <div className="settings-system" data-setting="customization-inventory">
-    <section className="settings-system-group">
-      <h3>Executable entries</h3>
-      <details className="settings-matrix" open>
-        <summary>review-check · Codex · {approved ? "Revision approved" : "Pending review"}</summary>
-        <dl className="settings-facts">
-          <dt>Source</dt><dd><code>.codex/config.toml</code></dd>
-          <dt>Kind</dt><dd>MCP server</dd>
-          <dt>Target</dt><dd><code>scripts/review-check.ps1</code></dd>
-          <dt>Scope</dt><dd>Example checkout · read-only</dd>
-          <dt>Revision</dt><dd><code>2a1f49c608bd</code></dd>
-        </dl>
-        <Button type="button" disabled={approved} onClick={approve}>{approved ? "Approved" : "Approve revision"}</Button>
-      </details>
-    </section>
-    <section className="settings-system-group">
-      <h3>Markdown instructions</h3>
-      <details className="settings-matrix">
-        <summary>AGENTS.md · revision 9b00ad2</summary>
-        <p>Review the exact candidate diff and keep its verification evidence with the task.</p>
-      </details>
-    </section>
-  </div>;
 }

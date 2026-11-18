@@ -80,8 +80,8 @@ const notes = [
 const props: WorkspaceProps = {
   checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\repo\\release" },
   target: source,
-  simulation: null,
-  startSimulation: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
+
+  openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
 };
 
 type LinkQuery = { sourcePath: string; target: string; anchor: string | null };

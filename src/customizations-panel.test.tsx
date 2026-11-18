@@ -53,7 +53,7 @@ function renderSettings() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}>
     <SettingsDialog checkout={checkout} open onOpenChange={onOpenChange} initialPage="customizations"
-      simulation={null} openActivity={unused} openWorkspace={openWorkspace} openChanges={unused} startSimulation={unused} />
+      openActivity={unused} openWorkspace={openWorkspace} openChanges={unused} />
   </QueryClientProvider>);
   return { openWorkspace, onOpenChange, user: userEvent.setup() };
 }

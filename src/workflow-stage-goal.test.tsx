@@ -150,8 +150,8 @@ it("keeps the authored package reference when the graph editor saves the Goal se
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="package" checkout={exampleCheckout} simulation={null}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
+    <WorkflowPackageEditor draftId="package" checkout={exampleCheckout}
+      openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(await screen.findByText("Goal Mode · enabled"));

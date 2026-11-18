@@ -34,8 +34,8 @@ it("reviews changes and pinned dependencies from an exact prior package revision
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
+    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+      openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "Review changes" }));
@@ -70,8 +70,8 @@ it("edits a package member graph through the shared editor and saves the same pa
     }
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
-      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
+    <WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+      openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   await user.clear(await screen.findByRole("textbox", { name: "Pipeline name" }));

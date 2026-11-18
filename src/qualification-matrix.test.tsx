@@ -113,14 +113,3 @@ it("opens and focuses the exact profile's recorded details without triggering va
   expect(other.getByText("No capability assessment recorded.")).toBeTruthy();
   expect(invoke).toHaveBeenCalledExactlyOnceWith("desktop_capability_qualifications", { cursor: null, validationCheckoutId: "active-checkout" });
 });
-
-it("shows the same columns in Simulate without reading the real profile history", async () => {
-  const user = userEvent.setup();
-  render(<QualificationMatrix examples />);
-  await user.click(screen.getByText("Qualification matrix"));
-  const table = screen.getByRole("table", { name: "Qualification matrix" });
-  expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent))
-    .toEqual(["CLI", "Model", "Host", "Runner", "Qualification"]);
-  expect(within(table).getByText("Hyper-V guest")).toBeTruthy();
-  expect(invoke).not.toHaveBeenCalled();
-});

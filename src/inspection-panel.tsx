@@ -1,9 +1,7 @@
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { JobFailurePanel } from "@/job-failure";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { DesktopDiagnostics, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
-import { SimulationFixture } from "@/fixture-panels";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { DownstreamWait } from "@/bindings/DownstreamWait";
@@ -17,8 +15,7 @@ import {
   ConversationActivityAgents, ConversationActivityContext, ConversationActivityTimeline, ConversationExactInput,
   ConversationRequests, StopConversation, conversationRunStatus, isLiveRun, useConversationRun,
 } from "@/conversation-run";
-import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
-import type { DeliveryStep, QuestionFocus, WorkspaceProps } from "@/workbench-contract";
+import type { QuestionFocus, WorkspaceProps } from "@/workbench-contract";
 import { RunArtifactEvidence, RunOrchestrationPanel } from "@/run-orchestration";
 import { RunPlanHistory } from "@/run-plan-history";
 import { RunInspectionLayout } from "@/run-inspection-layout";
@@ -26,52 +23,16 @@ import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { RecordedTextActions } from "@/recorded-text-actions";
 import { SavedRunOutputComparison } from "@/saved-attempt-comparison";
 
-const steps: Record<DeliveryStep, string> = {
-  note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
-  queued: "Queued", running: "Running", review: "In review", verified: "Verified", accepted: "Diff accepted",
-  merged: "Merged", interrupted: "Interrupted", failed: "Failed",
-};
-
 type InspectorProps = WorkspaceProps & {
   runId: string; conversationId?: string; focusQuestion?: QuestionFocus; onClose: () => void;
 };
 
 export function RunInspector({
-  runId, conversationId, focusQuestion, onClose, checkout, simulation, openWorkspace, openChanges, openActivity,
+  runId, conversationId, focusQuestion, onClose, checkout, openWorkspace, openActivity,
 }: InspectorProps) {
-  if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} checkoutId={checkout.checkoutId} runId={runId}
+  return <RecordedExecutionRun projectId={checkout.projectId} checkoutId={checkout.checkoutId} runId={runId}
     conversationId={conversationId} focusQuestion={focusQuestion}
     onClose={onClose} openActivity={openActivity} openWorkspace={openWorkspace} />;
-
-  const step = simulation.delivery;
-  const status = steps[step];
-  const hasResult = ["review", "verified", "accepted", "merged"].includes(step);
-
-  return <RunInspectionLayout title="Release checklist" runId={runId} status={{ label: status }} pages={[
-    { id: "overview", name: "Overview", content: <><h3>Execution</h3><dl>
-      <dt>Provider</dt><dd>Codex</dd><dt>Role</dt><dd>Implementation</dd><dt>Worktree</dt><dd><code>{deliveryBranch}</code></dd>
-      <dt>Result</dt><dd>{hasResult ? "Candidate saved" : status}</dd>
-    </dl><Button variant="outline" onClick={() => openWorkspace("tasks", deliveryTaskId)}>Open task</Button></> },
-    { id: "timeline", name: "Timeline", content: <><h3>Events</h3><ol className="work-timeline">
-      <li><span>Source selected</span><small>{deliveryNotePath} · {deliveryBase}</small></li>
-      {step !== "note" && <li><span>Planning requested</span><small>Read-only profile · Codex</small></li>}
-      <li><span>{status}</span><small>Latest state</small></li>
-    </ol></> },
-    { id: "agents", name: "Agents", content: <><h3>Agent tree</h3><ul className="work-timeline">
-      <li><span>Planning · Codex</span><small>Read-only workspace</small></li>
-      {hasResult && <li className="ml-4"><span>Review · Claude Code</span><small>Independent verification</small></li>}
-    </ul></> },
-    { id: "context", name: "Context", content: <><h3>Context snapshot</h3><p>2,410 input tokens estimated</p>
-      <button type="button" className="work-text-action" onClick={() => openWorkspace("knowledge", deliveryNotePath)}>{deliveryNotePath}</button>
-      <p>Base commit <code>{deliveryBase}</code> · checkout instructions included</p></> },
-    { id: "input", name: "Exact input", content: <><h3>Exact provider input</h3>
-      <pre>Use {deliveryNotePath} at {deliveryBase}. Keep the task scope limited to the approved changes and capture a diff for review.</pre></> },
-    { id: "approvals", name: "Approvals", content: <><h3>Implementation release</h3><p>{["note", "question", "plan"].includes(step) ? "A decision is required for the selected plan." : "Plan revision 1 · approved example scope"}</p>
-      <Button variant="outline" onClick={() => openWorkspace("conversations", "plan")}>Open conversation</Button></> },
-    { id: "artifacts", name: "Artifacts", content: <><h3>Artifacts</h3>{hasResult
-      ? <Button variant="outline" onClick={() => openChanges("saved")}>Open saved diff</Button>
-      : <p>Artifacts appear after the candidate is captured.</p>}</> },
-  ]} />;
 }
 
 type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "focusQuestion" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string; checkoutId: string };
@@ -296,18 +257,4 @@ function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunP
     </Button>}
     {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </section>;
-}
-
-export function SimulationDiagnostics({ openSystem, openActivity, simulation }: WorkspaceProps & { openSystem?: () => void }) {
-  const [view, setView] = useState<DiagnosticView>("desktop");
-  return <DiagnosticsWorkspace active={view} onSelect={setView} fixtures={<SimulationFixture />}
-    desktop={<DesktopDiagnostics openSystem={openSystem} openAttempt={() => openActivity(deliveryRunId)}
-      installation={<dl className="settings-facts">
-        <dt>Runtime</dt><dd>Windows 11 · WebView2</dd>
-        {simulation && <><dt>Recorded attempt</dt><dd>{steps[simulation.delivery]}</dd></>}
-      </dl>}
-      executables={<dl className="settings-facts">
-        <dt>Git for Windows</dt><dd>Available in this scenario</dd>
-        <dt>Codex</dt><dd>Example executable</dd>
-      </dl>} />} />;
 }

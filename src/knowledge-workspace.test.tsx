@@ -9,7 +9,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "@/knowledge-workspace";
 import { getProperties, noteFrontmatter } from "@/knowledge-document";
 import type { NoteRevision } from "@/repository-note-buffers";
-import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import { type WorkspaceProps } from "@/workbench-contract";
 import { readWorkflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -53,7 +53,7 @@ const checklistSource = checklistProperties + "# Launch notes\n\nKeep the saved 
 const checkoutId = "checkout";
 const props: WorkspaceProps = {
   checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\repo" },
-  simulation: null, openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(), startSimulation: vi.fn(),
+  openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(),
 };
 
 const documentAt = (relativePath: string, id: string, markdown: string) => ({
@@ -885,34 +885,6 @@ it("reviews and launches the exact saved note through the published workflow for
     documentRevisionId: saved.revision.id, workId: null, inputs: { Reviewer: "Release team" }, requestId: expect.any(String),
   } });
   expect(screen.queryByRole("dialog")).toBeNull();
-});
-
-it("uses the same link and keyboard search controls with simulated notes", async () => {
-  vi.mocked(invoke).mockImplementation(async (command, args) => {
-    if (command === "analyze_note_markdown") return { bufferRevision: (args as { bufferRevision: string }).bufferRevision, nodes: [] };
-    throw new Error(`Unexpected IPC command ${command}`);
-  });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  const simulated = { scenario: "delivery", epoch: 1, delivery: "note", advanceDelivery: vi.fn() } as const;
-  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} checkout={exampleCheckout} simulation={simulated} /></QueryClientProvider>);
-  const user = userEvent.setup();
-  const workspace = screen.getByRole("region", { name: "Knowledge workspace" });
-  await editor("docs/release.md");
-  if (!screen.queryByRole("button", { name: "Links" })) await user.click(screen.getByRole("button", { name: "Note details" }));
-  await user.click(screen.getByRole("button", { name: "Links" }));
-  const links = within(screen.getByRole("region", { name: "Outgoing links" }));
-  await user.click(links.getByRole("button", { name: "runner diagnostics" }));
-  const runner = await editor("docs/runner.md");
-  await waitFor(() => expect(runner.state.doc.lineAt(runner.state.selection.main.head).text).toBe("## Startup checks"));
-
-  fireEvent.keyDown(workspace, { key: "p", ctrlKey: true });
-  const search = screen.getByRole("combobox", { name: "Find notes and content" });
-  expect(document.activeElement).toBe(search);
-  await user.type(search, "Operations runbook");
-  expect(screen.getByRole("option", { name: /docs\/ops\/runbook.md/ })).toBeTruthy();
-  await user.keyboard("{Enter}");
-  expect((await editor("docs/ops/runbook.md")).state.doc.toString()).toContain("# Operations runbook");
-  expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).not.toContain("search_repository_note_index");
 });
 
 it("reuses canonical tabs, shares edits with Reading, and offers Cancel, Save and Discard on the last editor", async () => {

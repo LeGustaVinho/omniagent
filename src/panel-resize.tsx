@@ -3,7 +3,7 @@ import "./panel-resize.css";
 
 const PanelResizeContext = createContext("");
 
-export function PanelResizeScope({ scope, children }: { scope: "simulation" | "changes-inspector" | null; children: ReactNode }) {
+export function PanelResizeScope({ scope, children }: { scope: "changes-inspector" | null; children: ReactNode }) {
   const parent = useContext(PanelResizeContext);
   return <PanelResizeContext value={scope ? `${parent}${scope}:` : parent}>{children}</PanelResizeContext>;
 }

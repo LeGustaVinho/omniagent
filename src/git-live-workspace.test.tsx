@@ -33,8 +33,8 @@ function openGit(overrides: Partial<WorkspaceProps> = {}) {
   const openActivity = vi.fn();
   render(<QueryClientProvider client={client}><GitWorkspace
     checkout={checkout}
-    simulation={null}
-    startSimulation={() => {}}
+
+
     openWorkspace={() => {}}
     openChanges={() => {}}
     openActivity={openActivity}
@@ -842,7 +842,7 @@ it("loads the active checkout's diff in the Changes side panel and opens its rea
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const openWorkspace = vi.fn();
   render(<QueryClientProvider client={client}><ChangesPanel
-    checkout={checkout} simulation={null} target="working" startSimulation={() => {}}
+    checkout={checkout} target="working"
     openWorkspace={openWorkspace} openChanges={() => {}} openActivity={() => {}}
   /></QueryClientProvider>);
   expect(await screen.findByText("on the real worktree")).toBeDefined();
@@ -927,7 +927,7 @@ it("reports unavailable saved evidence in the side panel for the exact requested
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><ChangesPanel
-    checkout={checkout} simulation={null} target="attempt:unavailable-run" startSimulation={() => {}}
+    checkout={checkout} target="attempt:unavailable-run"
     openWorkspace={() => {}} openChanges={() => {}} openActivity={() => {}}
   /></QueryClientProvider>);
   expect(await screen.findByText("Saved Git evidence is unavailable for this attempt.")).toBeDefined();

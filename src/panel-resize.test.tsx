@@ -9,33 +9,33 @@ afterEach(() => {
   localStorage.clear();
 });
 
-it("persists real and simulated panel sizes independently across remounts", () => {
+it("persists workspace and changes inspector sizes independently across remounts", () => {
   const realKey = "omniagent:panel-size:IDE navigation:width";
-  const simulationKey = "omniagent:panel-size:simulation:IDE navigation:width";
+  const inspectorKey = "omniagent:panel-size:changes-inspector:IDE navigation:width";
   localStorage.setItem(realKey, "280");
 
   const panels = <>
-    <ResizablePanel as="aside" aria-label="Real Explorer" edge="right" resizeKey="IDE navigation" resizeLabel="IDE navigation" />
-    <PanelResizeScope scope="simulation">
-      <ResizablePanel as="aside" aria-label="Simulated Explorer" edge="right" resizeKey="IDE navigation" resizeLabel="IDE navigation" />
+    <ResizablePanel as="aside" aria-label="Workspace Explorer" edge="right" resizeKey="IDE navigation" resizeLabel="IDE navigation" />
+    <PanelResizeScope scope="changes-inspector">
+      <ResizablePanel as="aside" aria-label="Changes Explorer" edge="right" resizeKey="IDE navigation" resizeLabel="IDE navigation" />
     </PanelResizeScope>
   </>;
   const width = (panel: HTMLElement) => panel.style.getPropertyValue("--panel-width");
   const view = render(panels);
-  const real = screen.getByRole("complementary", { name: "Real Explorer" });
-  const simulated = screen.getByRole("complementary", { name: "Simulated Explorer" });
+  const real = screen.getByRole("complementary", { name: "Workspace Explorer" });
+  const inspector = screen.getByRole("complementary", { name: "Changes Explorer" });
   expect(width(real)).toBe("280px");
-  expect(width(simulated)).toBe("");
+  expect(width(inspector)).toBe("");
 
-  vi.spyOn(simulated, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, Number.parseInt(width(simulated), 10) || 248, 400));
-  fireEvent.keyDown(within(simulated).getByRole("separator"), { key: "ArrowRight" });
-  expect(localStorage.getItem(simulationKey)).toBe("264");
+  vi.spyOn(inspector, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, Number.parseInt(width(inspector), 10) || 248, 400));
+  fireEvent.keyDown(within(inspector).getByRole("separator"), { key: "ArrowRight" });
+  expect(localStorage.getItem(inspectorKey)).toBe("264");
   expect(localStorage.getItem(realKey)).toBe("280");
 
   view.unmount();
   render(panels);
-  expect(width(screen.getByRole("complementary", { name: "Real Explorer" }))).toBe("280px");
-  expect(width(screen.getByRole("complementary", { name: "Simulated Explorer" }))).toBe("264px");
+  expect(width(screen.getByRole("complementary", { name: "Workspace Explorer" }))).toBe("280px");
+  expect(width(screen.getByRole("complementary", { name: "Changes Explorer" }))).toBe("264px");
 });
 
 it("keeps the saved width when the current viewport prevents a resize", () => {

@@ -110,8 +110,8 @@ it("opens the saved preset and typed subflow review from the clicked canvas node
     if (command === "derive_workflow_reusable") return { ...sourceDraft, revision: "derived" };
     throw Error(command);
   });
-  mount(<WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout} simulation={null}
-    startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
+  mount(<WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout}
+    openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
   const first = await screen.findByRole("button", { name: "Select graph node verify" });
   const second = screen.getByRole("button", { name: "Select graph node verify-again" });
@@ -173,8 +173,8 @@ it("edits pinned reusable nodes, saves an editable override, and opens a child w
       default: throw Error(name);
     }
   });
-  mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
-    startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
+  mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout}
+    openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
   const parent = await screen.findByRole("region", { name: "Pipeline graph editor" });
   const inspect = within(parent).getByLabelText("Inspect node");

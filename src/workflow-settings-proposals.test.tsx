@@ -149,8 +149,8 @@ it("opens project proposal review through Workflow automation settings", async (
   const openActivity = vi.fn();
   const unused = () => undefined;
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <SettingsDialog checkout={checkout} open initialPage="automation" simulation={null} onOpenChange={onOpenChange}
-      openActivity={openActivity} openChanges={unused} openWorkspace={unused} startSimulation={unused} />
+    <SettingsDialog checkout={checkout} open initialPage="automation" onOpenChange={onOpenChange}
+      openActivity={openActivity} openChanges={unused} openWorkspace={unused} />
   </QueryClientProvider>);
   const user = userEvent.setup();
   const summary = await screen.findByText(/Awaiting review · 2 fields/);

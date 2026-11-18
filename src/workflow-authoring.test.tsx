@@ -132,7 +132,7 @@ it("routes feedback with the loaded draft revision and links the source conversa
   const open = vi.fn();
   const user = userEvent.setup();
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <PipelineAuthoringEditor draftId={draft.id} checkout={exampleCheckout} simulation={null} startSimulation={vi.fn()}
+    <PipelineAuthoringEditor draftId={draft.id} checkout={exampleCheckout}
       openWorkspace={open} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   await user.click(await screen.findByRole("button", { name: "Open source conversation" }));

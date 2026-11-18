@@ -31,7 +31,7 @@ const other: ModelOption = {
   rating: { intelligenceTenths: 763, priceScore: 47, apiReferenceCents: 250 },
 };
 const props = {
-  checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(), openWorkspace: vi.fn(),
+  checkout: exampleCheckout, openWorkspace: vi.fn(),
   openActivity: vi.fn(), openChanges: vi.fn(),
 };
 const definitions: WorkflowDefinition[] = [

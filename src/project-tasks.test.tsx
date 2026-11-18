@@ -78,8 +78,8 @@ it("records manual completion after resolving the checklist and preserves histor
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const user = userEvent.setup();
   render(<QueryClientProvider client={client}>
-    <ProjectTasksWorkspace checkout={exampleCheckout} simulation={null}
-      startSimulation={vi.fn()} openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+    <ProjectTasksWorkspace checkout={exampleCheckout}
+      openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
 
   await user.click(await screen.findByRole("button", { name: task.title }));

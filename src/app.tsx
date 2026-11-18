@@ -135,8 +135,8 @@ export function App() {
           </div>
         </section>
       )}
-      {!checkout && settingsOpen && <Suspense fallback={null}><SettingsDialog checkout={null} simulation={null}
-        startSimulation={noProjectAction} openWorkspace={noProjectAction} openActivity={noProjectAction} openChanges={noProjectAction}
+      {!checkout && settingsOpen && <Suspense fallback={null}><SettingsDialog checkout={null}
+        openWorkspace={noProjectAction} openActivity={noProjectAction} openChanges={noProjectAction}
         open onOpenChange={setSettingsOpen} /></Suspense>}
     </main>
   );

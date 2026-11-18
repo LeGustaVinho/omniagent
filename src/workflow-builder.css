@@ -62,8 +62,6 @@
 .workflow-review-card > :is(h3, summary) svg { color: var(--primary); }
 .workflow-review-card > summary { cursor: pointer; }
 .workflow-review-card > summary + div { margin-block-start: .6rem; }
-.workflow-trace-subflows > summary { cursor: pointer; }
-.workflow-trace-subflows > div { padding-block: .45rem; }
 .workflow-builder-dialog .react-flow__minimap {
   border: 1px solid var(--border); border-radius: .55rem; overflow: hidden;
   --xy-minimap-background-color: var(--card);

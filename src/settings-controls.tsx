@@ -1,18 +1,12 @@
 import { Info } from "lucide-react";
 import type { ReactNode } from "react";
-import { Button } from "@/components/ui/button";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
-import type { ScenarioId, WorkspaceProps } from "@/workbench-contract";
 
 export function IntegrationNotice({
   children,
-  start,
-  scenario,
   title = "Integration pending",
 }: {
   children: ReactNode;
-  start?: WorkspaceProps["startSimulation"];
-  scenario?: ScenarioId;
   title?: string;
 }) {
   return (
@@ -21,9 +15,7 @@ export function IntegrationNotice({
       <div>
         <strong>{title}</strong>
         <p>{children}</p>
-        {!start && <p>Open a repository to try this workflow.</p>}
       </div>
-      {start && <Button variant="outline" type="button" onClick={() => start(scenario)}>Simulate</Button>}
     </div>
   );
 }

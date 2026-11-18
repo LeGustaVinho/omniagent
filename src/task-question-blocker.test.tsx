@@ -70,8 +70,8 @@ it.each([
       inspect({ runId, conversationId, focusQuestion: questionRequestId === undefined ? undefined : { requestId: questionRequestId } });
     };
     const props: WorkspaceProps = {
-      checkout: exampleCheckout, simulation: null, openActivity,
-      startSimulation: vi.fn(), openWorkspace: vi.fn(), openChanges: vi.fn(),
+      checkout: exampleCheckout, openActivity,
+      openWorkspace: vi.fn(), openChanges: vi.fn(),
     };
     return <>
       <ProjectTasksWorkspace {...props} />

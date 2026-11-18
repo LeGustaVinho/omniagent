@@ -18,7 +18,7 @@ it("reveals the active file once without enabling automatic reveal", async () =>
   const client = new QueryClient();
   const tree = (active: string) => <QueryClientProvider client={client}>
     <FileTree paths={["src/first.txt", "docs/other.md"]} folders={["src", "docs"]} active={active} onOpen={vi.fn()}
-      actions={() => []} checkoutId="reveal-worktree" workspace="ide" simulated={true} />
+      actions={() => []} checkoutId="reveal-worktree" workspace="ide" simulated={false} />
   </QueryClientProvider>;
   const { rerender } = render(tree("src/first.txt"));
   expect(screen.queryByRole("button", { name: "first.txt" })).toBeNull();

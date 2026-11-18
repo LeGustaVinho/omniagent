@@ -132,7 +132,7 @@ function workspace(checkoutId: string, client: QueryClient) {
   const props: WorkspaceProps = {
     checkout: { projectId, checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: `C:\\worktrees\\${checkoutId}` },
     target: "notes/start.md",
-    simulation: null, startSimulation: vi.fn(), openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(),
+    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(),
   };
   return <QueryClientProvider client={client}><KnowledgeWorkspace {...props} /></QueryClientProvider>;
 }
