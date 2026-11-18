@@ -26,6 +26,7 @@ export function RoleEditor({ roles, onChange }: { roles: Role[]; onChange: (role
   const [selected, setSelected] = useState(roles[0]?.id ?? "");
   const [newRoleName, setNewRoleName] = useState("");
   const role = roles.find((item) => item.id === selected) ?? roles[0];
+  const efforts = exampleModelEfforts(role?.model ?? null);
   function update(patch: Partial<Role>) {
     if (!role) return;
     onChange(roles.map((item) => item.id === role.id ? { ...item, ...patch } : item));
@@ -61,7 +62,7 @@ export function RoleEditor({ roles, onChange }: { roles: Role[]; onChange: (role
             const effort = exampleModelEfforts(model)?.efforts.includes(role.effort) ? role.effort : "";
             update({ model, effort });
           } }} />
-          <label>Effort<EffortSelect capabilities={exampleModelEfforts(role.model)} value={role.effort} onChange={(effort) => update({ effort })} /></label>
+          {!!efforts?.efforts.length && <label>Effort<EffortSelect capabilities={efforts} value={role.effort} onChange={(effort) => update({ effort })} /></label>}
           <label>Instructions<textarea rows={3} value={role.instructions} onChange={(event) => update({ instructions: event.currentTarget.value })} /></label>
           <label>Tool scope<select value={role.tools} onChange={(event) => update({ tools: event.currentTarget.value })}><option>Repository read</option><option>Approved worktree write</option><option>No tools</option></select></label>
           <label>Completion contract<textarea rows={2} value={role.completion} onChange={(event) => update({ completion: event.currentTarget.value })} /></label>

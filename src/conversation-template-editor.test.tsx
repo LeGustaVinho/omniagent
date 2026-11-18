@@ -116,6 +116,7 @@ it("opens Roles from Library, saves with a qualified model, and reopens the exac
   await user.click(within(screen.getByRole("navigation", { name: "Library views" })).getByRole("button", { name: "Roles" }));
   expect(workspace.getByRole("button", { name: "Library" }).getAttribute("aria-current")).toBe("page");
   await user.click(screen.getByRole("button", { name: "New Role" }));
+  expect(screen.queryByRole("combobox", { name: "Effort" })).toBeNull();
   await user.type(screen.getByRole("textbox", { name: "Name" }), first.name);
   await user.selectOptions(screen.getByRole("combobox", { name: "Job role" }), first.role);
   await user.click(await screen.findByRole("button", { name: /^Default CLI and model · / }));

@@ -152,7 +152,9 @@ function RoleOverrides({ projectId, checkoutId, role, inherited, local, disabled
       </select></label>)}
       {field("model", <ModelPicker label="Model" options={live.options} loading={live.loading} disabled={disabled}
         selection={{ mode: "single", selected: role.model, onChange: (model) => { if (model) onChange({ ...local, model, effort: null }); } }} />)}
-      {field("effort", <EffortSelect capabilities={profile} value={role.effort ?? ""} onChange={(effort) => write("effort", effort || null)} />)}
+      {!!profile?.efforts.length
+        ? field("effort", <EffortSelect capabilities={profile} value={role.effort ?? ""} onChange={(effort) => write("effort", effort || null)} />)
+        : (role.effort || Object.hasOwn(local, "effort")) && field("effort", <p>Effort · {role.effort ?? "CLI default"}</p>)}
       {field("instructions", <label>Role instructions<textarea rows={4} value={role.instructions}
         onChange={(event) => write("instructions", event.currentTarget.value)} /></label>)}
       {field("completionContract", <label>Completion contract<textarea rows={3} value={role.completionContract}

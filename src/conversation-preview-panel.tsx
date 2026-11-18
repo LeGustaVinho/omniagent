@@ -131,6 +131,7 @@ export function PreviewConversationPanel(props: PanelProps) {
   const { conversation, simulation, update, onFork, onRewind, openWorkspace, openActivity, openChanges } = props;
   const [mode, setMode] = useState<ConversationMode>("plan");
   const [selection, setSelection] = useState<ModelSelection | null>(demoModels.find(({ selection }) => selection.provider === "codex")?.selection ?? null);
+  const efforts = exampleModelEfforts(selection);
   const [effort, setEffort] = useState("");
   const [deliveryRoute, setDeliveryRoute] = useState("live");
   const [dialog, setDialog] = useState<PanelDialog>();
@@ -416,9 +417,9 @@ export function PreviewConversationPanel(props: PanelProps) {
                 <ModelPicker label="Model" layout="inline" combinedCatalog options={demoModels}
                   selection={{ mode: "single", selected: selection, onChange: chooseModel }} />
                 <ConversationModeSelect mode={mode} onChange={setMode} />
-                <span className="conv-option"><Gauge size={15} aria-hidden />
-                  <EffortSelect capabilities={exampleModelEfforts(selection)} className="conv-select" value={effort} onChange={setEffort} />
-                </span>
+                {!!efforts?.efforts.length && <span className="conv-option"><Gauge size={15} aria-hidden />
+                  <EffortSelect capabilities={efforts} className="conv-select" value={effort} onChange={setEffort} />
+                </span>}
                 {activeRun && !composingGoal && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>
                   <option value="live" disabled={provider !== "codex"}>Send to active turn</option>
                   <option value="queued">Queue for next turn</option>

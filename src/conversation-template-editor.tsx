@@ -293,7 +293,8 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
               disabled={save.isPending} selection={{ mode: "single", selected: draft.model, onChange: (selection) =>
                 setDraft((previous) => ({ ...previous, model: selection, effort: null })) }} />}
           {historical ? <p>Effort · {draft.effort ?? "CLI default"}</p> :
-            <label>Effort<EffortSelect capabilities={model} value={draft.effort ?? ""} onChange={(value) => update("effort", value || null)} /></label>}
+            !!model?.efforts.length && <label>Effort<EffortSelect capabilities={model} value={draft.effort ?? ""}
+              onChange={(value) => update("effort", value || null)} /></label>}
         </div>
         {!historical && draft.model && !liveModel && !live.loading && <p role="alert">The saved CLI, profile, and model are unavailable. Choose an available model to save a revision.</p>}
         {!historical && live.errors.length > 0 && <details><summary>CLI availability</summary>

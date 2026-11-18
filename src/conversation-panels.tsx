@@ -371,6 +371,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
   const efforts = antigravityModel
     ? modelEfforts.data?.find(({ option }) => sameModelSelection(option.selection, selection))
     : selected;
+  const effortLoading = Boolean(antigravityModel && modelEfforts.isPending);
   const jobKey = ["conversation", conversationId, "latest-job"];
   const latestJob = useQuery({
     queryKey: jobKey,
@@ -1161,8 +1162,9 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
                   onClick={() => openPipelineSetup("edit")}>Pipeline inputs</Button>}
               {compactionEnabled && <ConversationCompactionControl compaction={compaction} contextId={history.data?.contextId}
                 disabled={busy || send.isPending || continueSend.isPending} />}
-              <span className="conv-option"><Gauge size={15} aria-hidden /><EffortSelect capabilities={efforts}
-                loading={Boolean(antigravityModel && modelEfforts.isPending)} className={selectorClass} value={effort} onChange={setEffort} /></span>
+              {Boolean(efforts?.efforts.length || effortLoading) && <span className="conv-option"><Gauge size={15} aria-hidden />
+                <EffortSelect capabilities={efforts} loading={effortLoading} className={selectorClass} value={effort} onChange={setEffort} />
+              </span>}
           </ConversationComposerToolbar>
           {sendBlocker && <div className="conv-send-feedback">
             <p id={`send-feedback-${conversationId}`} role="status">{sendBlocker.text}</p>

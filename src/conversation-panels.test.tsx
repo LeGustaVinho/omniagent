@@ -1,15 +1,62 @@
 // @vitest-environment jsdom
+import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import type { Conversation } from "@/bindings/Conversation";
-import { ConversationSidebar } from "@/conversation-panels";
+import { ConversationPanel, ConversationSidebar } from "@/conversation-panels";
 import { SideQuestionPanel } from "@/conversation-side-requests";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-afterEach(() => { cleanup(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
+
+test("shows the composer effort selector only for a selected model that supports it", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  const models = [
+    { name: "Reasoning model", modelId: "reasoning", efforts: ["medium", "high"], defaultEffort: "medium" },
+    { name: "Standard model", modelId: "standard", efforts: [], defaultEffort: null },
+  ].map(({ name, modelId, efforts, defaultEffort }) => ({
+    option: { name, selectable: true, selection: { provider: "codex", profileId: "default", modelId } },
+    efforts, defaultEffort,
+  }));
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "conversation_models": return (args as { provider: string }).provider === "codex" ? models : [];
+      case "conversation_draft": return "";
+      case "conversation_history": return { contextId: "context", messages: [] };
+      case "latest_conversation_job":
+      case "latest_conversation_run": return null;
+      case "pending_conversation_instructions":
+      case "conversation_side_requests":
+      case "saved_conversation_questions": return [];
+      case "composer_suggestion_mode": return "off";
+      default: throw new Error(`Unexpected command: ${command}`);
+    }
+  });
+
+  const props = {
+    params: { conversationId: "effort-chat", title: "Effort conversation" },
+    api: { isVisible: true, renderer: "always", onDidVisibilityChange: () => ({ dispose() {} }) },
+  } as unknown as ComponentProps<typeof ConversationPanel>;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={client}><ConversationPanel {...props} /></QueryClientProvider>);
+
+  const modelPicker = await screen.findByRole("button", { name: "Model · Choose model" });
+  expect(screen.queryByRole("combobox", { name: "Effort" })).toBeNull();
+  await user.click(modelPicker);
+  await user.click(screen.getByRole("menuitemradio", { name: "Reasoning model" }));
+  const effort = screen.getByRole<HTMLSelectElement>("combobox", { name: "Effort" });
+  expect(within(effort).getByRole("option", { name: "Default (Medium)" })).toBeTruthy();
+  await user.selectOptions(effort, "high");
+  expect(effort.value).toBe("high");
+
+  await user.click(screen.getByRole("button", { name: "Model · Reasoning model" }));
+  await user.click(screen.getByRole("menuitemradio", { name: "Standard model" }));
+  expect(screen.queryByRole("combobox", { name: "Effort" })).toBeNull();
+});
 
 test("restores the side question and cancels its own queue attempt", async () => {
   const side = {

@@ -16,6 +16,7 @@ export function EffortSelect({ capabilities, value, onChange, label = "Effort", 
   loading?: boolean;
   className?: string;
 }) {
+  if (!loading && !capabilities?.efforts.length) return null;
   const efforts = [...new Set(capabilities?.efforts)];
   const defaultEffort = capabilities?.defaultEffort;
   const defaultLabel = defaultEffort ? `Default (${effortLabel(defaultEffort)})` : "Default effort";
