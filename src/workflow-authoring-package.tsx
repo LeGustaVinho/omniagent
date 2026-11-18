@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
-import { developmentPipelineName, developmentPipelinePackage } from "@/development-pipeline";
+import { workflowTemplates } from "@/workflow-templates";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview, type SchemaMember } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
@@ -119,6 +119,51 @@ function unconfiguredStageModels(text: string) {
   }
 }
 
+export function WorkflowTemplateChooser({ projectId, onCreated, initialTemplateKey = workflowTemplates[0]?.key ?? "" }: {
+  projectId: string;
+  onCreated: (draft: PackageDraft) => void;
+  initialTemplateKey?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [templateKey, setTemplateKey] = useState(initialTemplateKey);
+  const [model, setModel] = useState<ModelSelection | null>(null);
+  const template = workflowTemplates.find(({ key }) => key === templateKey);
+  const models = useLiveModelOptions(providers, open);
+  const selectedModel = availableModelSelection(models.options, model)
+    ?? (model === null ? models.options.find(({ selectable }) => selectable)?.selection ?? null : null);
+  const create = useMutation({
+    mutationFn: ({ template, model }: { template: typeof workflowTemplates[number]; model: ModelSelection }) =>
+      invoke<PackageDraft>("create_workflow_package", { projectId, conversationId: null, package: template.createPackage(model) }),
+    onSuccess: (draft) => { setOpen(false); onCreated(draft); },
+  });
+  return <Dialog.Root open={open} onOpenChange={(next) => {
+    if (create.isPending) return;
+    if (next) { setTemplateKey(initialTemplateKey); create.reset(); }
+    setOpen(next);
+  }}>
+    <Dialog.Trigger asChild><Button type="button" variant="outline">Use template</Button></Dialog.Trigger>
+    <BuilderLandingDialog title="Choose a template" icon={<Workflow size={20} aria-hidden />}
+      description="Choose a pipeline template and the default model for its Roles." busy={create.isPending}>
+      <form className="pipeline-form pipeline-builder-dialog-form" onSubmit={(event) => {
+        event.preventDefault();
+        if (template && selectedModel && !create.isPending) create.mutate({ template, model: selectedModel });
+      }}>
+        <label>Template<select value={templateKey} onChange={(event) => setTemplateKey(event.currentTarget.value)} disabled={create.isPending}>
+          {workflowTemplates.map(({ key, name }) => <option key={key} value={key}>{name}</option>)}
+        </select></label>
+        <ModelPicker label="Template model" options={models.options} loading={models.loading}
+          disabled={create.isPending} combinedCatalog
+          selection={{ mode: "single", selected: selectedModel, onChange: setModel }} />
+        {(create.error ?? models.errors[0]) && <p role="alert">{String(create.error ?? models.errors[0])}</p>}
+        <div className="pipeline-actions justify-end">
+          <Dialog.Close asChild><Button variant="outline" type="button" disabled={create.isPending}>Cancel</Button></Dialog.Close>
+          <Button type="submit" disabled={!template || !selectedModel || create.isPending}>Create draft</Button>
+        </div>
+      </form>
+    </BuilderLandingDialog>
+  </Dialog.Root>;
+}
+
 export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, authoring }: Pick<WorkspaceProps, "checkout" | "openWorkspace"> & {
   drafts?: ReactNode;
   authoring?: ReactNode;
@@ -137,17 +182,6 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
   }
   const [creatingPipeline, showCreatePipeline] = useState(false);
   const [pipelineName, setPipelineName] = useState("");
-  const [choosingTemplate, showTemplate] = useState(false);
-  const [templateModel, setTemplateModel] = useState<ModelSelection | null>(null);
-  const templateModels = useLiveModelOptions(providers, choosingTemplate);
-  const selectedTemplateModel = availableModelSelection(templateModels.options, templateModel)
-    ?? (templateModel === null ? templateModels.options.find(({ selectable }) => selectable)?.selection ?? null : null);
-  const useTemplate = useMutation({
-    mutationFn: (model: ModelSelection) => invoke<PackageDraft>("create_workflow_package", {
-      projectId, conversationId: null, package: developmentPipelinePackage(model),
-    }),
-    onSuccess: (draft) => { showTemplate(false); openDraft(draft); },
-  });
   const create = useMutation({
     mutationFn: (name: string) => {
       const packageDocument: Package = {
@@ -202,30 +236,8 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
         </article>
         <article className="pipeline-builder-start">
           <span className="pipeline-builder-icon"><PackageIcon size={18} aria-hidden /></span>
-          <div><h3>From template</h3><p>Plan, implement, and validate changes.</p></div>
-          <Dialog.Root open={choosingTemplate} onOpenChange={(open) => {
-            if (useTemplate.isPending) return;
-            if (open) useTemplate.reset();
-            showTemplate(open);
-          }}>
-            <Dialog.Trigger asChild><Button type="button" variant="outline">{developmentPipelineName}</Button></Dialog.Trigger>
-            <BuilderLandingDialog title={developmentPipelineName} icon={<Workflow size={20} aria-hidden />}
-              description="Choose the default model for the template Roles." busy={useTemplate.isPending}>
-              <form className="pipeline-form pipeline-builder-dialog-form" onSubmit={(event) => {
-                event.preventDefault();
-                if (selectedTemplateModel && !useTemplate.isPending) useTemplate.mutate(selectedTemplateModel);
-              }}>
-                <ModelPicker label="Template model" options={templateModels.options} loading={templateModels.loading}
-                  disabled={useTemplate.isPending} combinedCatalog
-                  selection={{ mode: "single", selected: selectedTemplateModel, onChange: setTemplateModel }} />
-                {(useTemplate.error ?? templateModels.errors[0]) && <p role="alert">{String(useTemplate.error ?? templateModels.errors[0])}</p>}
-                <div className="pipeline-actions justify-end">
-                  <Dialog.Close asChild><Button variant="outline" type="button" disabled={useTemplate.isPending}>Cancel</Button></Dialog.Close>
-                  <Button type="submit" disabled={!selectedTemplateModel || useTemplate.isPending}>Create draft</Button>
-                </div>
-              </form>
-            </BuilderLandingDialog>
-          </Dialog.Root>
+          <div><h3>From template</h3><p>Start with a built-in pipeline.</p></div>
+          <WorkflowTemplateChooser projectId={projectId} onCreated={openDraft} />
         </article>
         {authoring && <article className="pipeline-builder-start">
           <span className="pipeline-builder-icon"><Sparkles size={18} aria-hidden /></span>

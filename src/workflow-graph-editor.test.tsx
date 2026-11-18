@@ -100,7 +100,7 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   expect(screen.getByTestId(edge)).toBeTruthy();
 });
 
-it("loads published Library artifacts without loading the Builder node registry", async () => {
+it("shows native template assets in Library with no published project artifacts", async () => {
   const ipc = vi.mocked(invoke);
   ipc.mockClear();
   ipc.mockResolvedValue([]);
@@ -110,6 +110,17 @@ it("loads published Library artifacts without loading the Builder node registry"
   </QueryClientProvider>);
   const library = within(screen.getByRole("region", { name: "Workflow library" }));
   expect(await library.findByText("No published schemas.")).toBeTruthy();
+  const native = within(library.getByRole("article", { name: "Development Pipeline" }));
+  const user = userEvent.setup();
+  for (const [category, asset] of [
+    ["Functions", "Clarify Requirements"], ["Schemas", "Feature Request"],
+    ["Node Prefabs", "Discovery Analyst"], ["Roles", "Delivery Engineer"],
+  ] as const) {
+    await user.click(native.getByText((text) => text.startsWith(category + " (")));
+    expect(within(native.getByRole("list", { name: category })).getByText(asset)).toBeTruthy();
+  }
+  expect(native.getByRole("button", { name: "Use template" })).toBeTruthy();
+  expect(ipc).not.toHaveBeenCalledWith("create_workflow_package", expect.anything());
   expect(library.queryByRole("searchbox")).toBeNull();
   expect(library.queryByText("Import or export workflow packages")).toBeNull();
   expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions", expect.anything());

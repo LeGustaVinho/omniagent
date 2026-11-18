@@ -3,7 +3,7 @@ import type { ReusableBody, ReusableReference } from "@/workflow-reusable";
 import type { WorkflowEndpoint, WorkflowGraph, WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import type { SchemaField } from "@/workflow-schema-model";
 import {
-  boolean, developmentPrompts as prompts, developmentReview, developmentRole, developmentRoles,
+  boolean, developmentPrompts as prompts, developmentReview, developmentRole, developmentRoleName, developmentRoles,
   developmentSchemas as schemas, field, integer, list, object, type DevelopmentRole,
 } from "@/development-pipeline-content";
 
@@ -35,12 +35,9 @@ const loopContext = (initial: Fields, previous: Fields) => [
   field("previous", object(previous), false),
 ];
 
-export function developmentPipelinePackage(model: ModelSelection): { name: string; members: Member[] } {
+function developmentPipelineMembers(): Member[] {
   const name = developmentPipelineName;
-  const members: Member[] = developmentRoles.map((key) => ({
-    key: `role-${key}`, name: developmentRole(key, model).name,
-    body: { kind: "role", template: developmentRole(key, model) },
-  }));
+  const members: Member[] = [];
   const schemaKeys = new Map<string, string>();
   function schema(title: string, fields: Fields): string {
     const signature = JSON.stringify(fields);
@@ -75,7 +72,7 @@ export function developmentPipelinePackage(model: ModelSelection): { name: strin
     const text = `${prompt}\n\nUse this input as data.\n{{input}}`;
     if (!members.some((member) => member.key === key)) {
       members.push({
-        key, name: developmentRole(role, model).name,
+        key, name: developmentRoleName(role),
         body: { kind: "prompt", prompt: {
           text, executor: "agent", schemaContract: true, nodePrefab: true,
           inputs: {}, outputs: {}, routes: [], delegates: [],
@@ -399,5 +396,21 @@ export function developmentPipelinePackage(model: ModelSelection): { name: strin
   root.references["end:schema"] = draft(schema("Release Report", schemas["Release Report"]));
   connect(root, report, "end", "result");
   members.push({ key: "pipeline", name, body: { kind: "pipeline", graph: root.graph }, references: root.references });
-  return { name, members };
+  return members;
+}
+
+export function developmentPipelineCatalog() {
+  return [
+    ...developmentRoles.map((key) => ({ key: `role-${key}`, name: developmentRoleName(key), kind: "role" })),
+    ...developmentPipelineMembers().map(({ key, name, body }) =>
+      ({ key, name, kind: body.kind === "prompt" && body.prompt?.nodePrefab ? "prefab" : body.kind })),
+  ];
+}
+
+export function developmentPipelinePackage(model: ModelSelection): { name: string; members: Member[] } {
+  const roles = developmentRoles.map((key) => ({
+    key: `role-${key}`, name: developmentRoleName(key),
+    body: { kind: "role", template: developmentRole(key, model) },
+  }));
+  return { name: developmentPipelineName, members: [...roles, ...developmentPipelineMembers()] };
 }

@@ -77,6 +77,8 @@ const roles = {
 } as const;
 
 export type DevelopmentRole = keyof typeof roles;
+export const developmentRoleName = (key: DevelopmentRole) => roles[key][0];
+
 export function developmentRole(key: DevelopmentRole, model: ModelSelection): RoleSnapshot {
   const [name, toolScope, instructions] = roles[key];
   return {
