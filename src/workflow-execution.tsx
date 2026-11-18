@@ -8,6 +8,7 @@ import { ContextActions, PositionedContextActions, useContextActionFeedback, typ
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunList, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
 import type { PipelineInspectorView } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { useWorkspaceSize } from "@/workbench-panel";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, isSupportedWorkflowNode, wireKey } from "@/workflow-graph-model";
 import { RecordedInputs, WorkflowNodeEvidence } from "@/workflow-execution-evidence";
@@ -23,7 +24,7 @@ import {
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
 type ExecutionTarget = { kind: "node" | "edge"; id: string };
-type ExecutionLocation = { path: string; selected: string; unit?: string; focus?: string };
+type ExecutionLocation = { path: string; selected: string; unit?: string; focus?: string; scrollTop?: number };
 
 function ExecutionNodeCard({ data, selected }: NodeProps<ExecutionNode>) {
   const node = data.pinned;
@@ -85,8 +86,10 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
   const [selected, setSelected] = useState(() => focus?.nodeId ?? executionCanvasGraph(definition).nodes[0]?.instance.id ?? "");
   const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
   const [history, setHistory] = useState<ExecutionLocation[]>([]);
-  const views = useRef(new Map<string, { viewport?: Viewport; inspector: PipelineInspectorView }>());
+  const views = useRef(new Map<string, { viewport?: Viewport; compactViewport?: Viewport; inspector: PipelineInspectorView }>());
   const workspace = useRef<HTMLElement>(null);
+  const backButton = useRef<HTMLButtonElement>(null);
+  const compact = useWorkspaceSize(workspace).width < 700;
   function viewStage(id: string) {
     const visible = graph.nodes.some(({ instance }) => instance.id === id);
     if (visible) {
@@ -114,17 +117,22 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
   const subflow = definition.subflows?.find(({ path }) => path === subflowPath);
   const graph = useMemo(() => executionCanvasGraph(definition, subflow), [definition, subflow]);
-  function openSubflow(path: string, nodeId?: string) {
+  function openSubflow(path: string, nodeId?: string, fromGraph = false) {
     if (path === subflowPath) {
       if (nodeId) setSelected(nodeId);
       return;
     }
     const active = document.activeElement?.getAttribute("data-run-focus") ?? undefined;
-    setHistory((previous) => path ? [...previous, { path: subflowPath, selected, unit: unit && unitKey(unit), focus: active }] : []);
+    const scrollTop = workspace.current?.scrollTop;
+    setHistory((previous) => path ? [...previous, { path: subflowPath, selected, unit: unit && unitKey(unit), focus: active, scrollTop }] : []);
     const scope = definition.subflows?.find((entry) => entry.path === path);
     setSubflowPath(path);
     setSelected(nodeId ?? executionCanvasGraph(definition, scope).nodes[0]?.instance.id ?? "");
     revealInspector(0);
+    if (path && (fromGraph || compact && active === "scope")) requestAnimationFrame(() => {
+      if (compact && workspace.current) workspace.current.scrollTop = 0;
+      backButton.current?.focus({ preventScroll: true });
+    });
   }
   function goBack() {
     const path = subflowPath.split("::").slice(0, -1).join("::");
@@ -135,13 +143,15 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     if (history.length) setSelectedUnit(previous.unit);
     revealInspector(0);
     requestAnimationFrame(() => {
+      if (workspace.current) workspace.current.scrollTop = previous.scrollTop ?? 0;
       const origin = workspace.current?.querySelector<HTMLElement>(`[data-run-focus="${previous.focus ?? "scope"}"]`)
         ?? workspace.current?.querySelector<HTMLElement>('[data-run-focus="scope"]');
-      origin?.focus({ preventScroll: true });
+      (origin && !origin.closest("details:not([open])") ? origin : backButton.current)?.focus({ preventScroll: true });
     });
   }
   const view = views.current.get(subflowPath) ?? { inspector: {} };
   views.current.set(subflowPath, view);
+  const viewportKey = compact ? "compactViewport" : "viewport";
   const concreteStages = definition.nodes
     .map((node) => {
       const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
@@ -214,7 +224,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
       const path = stage.group.path;
       return { label: stage.node.definition.title, groups: [[
         { label: "Inspect execution", run: () => viewStage(path) },
-        { label: "Open internal graph", run: () => openSubflow(path) },
+        { label: "Open internal graph", run: () => openSubflow(path, undefined, true) },
         { label: "Copy pinned revision", run: () => copy(stage.node.revision) },
       ]] };
     }
@@ -237,10 +247,9 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
     ]] };
   }
   const context = menu && canvasActions(menu.target);
-  return <section ref={workspace} className="pipeline-view" aria-label="Pinned workflow execution">
+  const runDetails = <>
     <PipelineToolbar>
       <div className="workflow-run-selectors">
-        {subflowPath && <Button type="button" variant="outline" onClick={goBack}><ArrowLeft size={15} aria-hidden /> Voltar</Button>}
         {runPicker}
         {!!definition.subflows?.length && <label className="workflow-execution-field">Pinned subflow
           <select data-run-focus="scope" value={subflowPath} onChange={(event) => openSubflow(event.currentTarget.value)}>
@@ -288,6 +297,16 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
         </li>)}</ul>
       </details>}
     </header>
+  </>;
+  return <section ref={workspace} className="pipeline-view workflow-execution-view" aria-label="Pinned workflow execution">
+    {subflowPath && <div className="pipeline-actions workflow-run-scope">
+      <Button ref={backButton} type="button" variant="outline" onClick={goBack}><ArrowLeft size={15} aria-hidden /> Voltar</Button>
+      <strong title={subflow?.name ?? subflowPath}>{subflow?.name ?? subflowPath}</strong>
+    </div>}
+    {compact && subflowPath ? <details key={subflowPath} className="workflow-run-details">
+      <summary>Run details</summary>
+      {runDetails}
+    </details> : runDetails}
     <PipelineCanvasFrame key={subflowPath} className="workflow-run-frame" canvasLabel="Workflow execution graph"
       inspectorLabel="Execution node evidence" inspectorRequest={inspectorRequest} view={view.inspector}
       canvas={<div className="workflow-graph-canvas" onKeyDown={(event) => {
@@ -301,7 +320,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
         const rect = origin.getBoundingClientRect();
         setMenu({ target: { kind: origin.classList.contains("react-flow__edge") ? "edge" : "node", id },
           point: { x: rect.left + 8, y: rect.top + 8 }, origin });
-      }}><PipelineGraphCanvas<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
+      }}><PipelineGraphCanvas<ExecutionNode, Edge> key={viewportKey} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
         nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
         onNodeContextMenu={(event, node) => openMenu(event, { kind: "node", id: node.id })}
         onEdgeContextMenu={(event, edge) => openMenu(event, { kind: "edge", id: edge.id })}
@@ -309,7 +328,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
           const selectedNode = changes.find((change) => change.type === "select" && change.selected);
           if (selectedNode?.type === "select") setSelected(selectedNode.id);
         }} colorMode={theme}
-        fitView={!view.viewport} defaultViewport={view.viewport} onMoveEnd={(_, viewport) => { view.viewport = viewport; }}
+        fitView={!view[viewportKey]} defaultViewport={view[viewportKey]} onMoveEnd={(_, viewport) => { view[viewportKey] = viewport; }}
         fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} /></div>}
       inspector={<>
         <PipelineInspectorHeader detail="Execution details" title={active?.node.definition.title ?? "No stage selected"}>
@@ -323,7 +342,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, runFocus }: 
           <WorkflowExecutionStateBadge status={active.detail.status} />
           {active.group ? <section className="workflow-record-card pipeline-stack" aria-label="Subflow execution">
             {active.detail.reason && <p>{active.detail.reason}</p>}
-            <Button type="button" variant="outline" className="w-fit" data-run-focus="open" onClick={() => openSubflow(active.group!.path)}>
+            <Button type="button" variant="outline" className="w-fit" data-run-focus="open" onClick={() => openSubflow(active.group!.path, undefined, true)}>
               Open internal graph <ArrowUpRight size={14} aria-hidden />
             </Button>
             {active.detail.status === "completed" && Object.entries(active.group.outputs).map(([port, endpoint]) => {

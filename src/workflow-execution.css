@@ -8,6 +8,22 @@
 .workflow-run-summary code { color: var(--foreground); }
 .workflow-run-summary summary { cursor: pointer; font-weight: 500; }
 .workflow-run-frame .pipeline-inspector { min-height: 0; }
+.workflow-run-scope {
+  position: sticky;
+  z-index: 3;
+  inset-block-start: 0;
+  flex: none;
+  padding: .35rem 1rem;
+  border-block-end: 1px solid var(--border);
+  background: var(--background);
+}
+.workflow-run-scope strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-run-scope button { flex: none; height: 1.8rem; }
+.workflow-run-details { flex: none; border-block-end: 1px solid var(--border); }
+.workflow-run-details > summary { cursor: pointer; padding: .35rem 1rem; }
+@container pipelines (width < 700px) {
+  .pipelines-workspace:has(.workflow-execution-view) > .pipeline-workspace-heading { display: none; }
+}
 .workflow-runs-empty { display: grid; flex: 1; place-items: center; min-height: 12rem; padding: 1rem; text-align: center; color: var(--muted-foreground); }
 .workflow-execution-field { display: grid; gap: .25rem; font-weight: 500; }
 .workflow-execution-field select { width: 100%; min-width: 0; padding: .35rem .5rem; border: 1px solid var(--border); border-radius: .4rem; background: var(--background); }

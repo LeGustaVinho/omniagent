@@ -85,6 +85,7 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
   const [create, setCreate] = useState(false);
   const [name, setName] = useState("");
   const [roleEditorKey, setRoleEditorKey] = useState(0);
+  const [roleScope, setRoleScope] = useState<"project" | "shared">("project");
   const list = useRef<HTMLDivElement>(null);
   const scroll = useRef(0);
   const origin = useRef<HTMLElement | null>(null);
@@ -175,8 +176,27 @@ export function WorkflowLibrary({ category, ...props }: WorkspaceProps & { categ
     <div ref={list} hidden={!!screen} className="workflow-library-list" onFocusCapture={(event) => {
       if (event.target instanceof HTMLElement && event.currentTarget.contains(event.target)) origin.current = event.target;
     }}>
-      {category === "roles" && <ConversationTemplateEditor key={roleEditorKey} checkout={checkout} openWorkspace={openWorkspace} />}
-      <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
+      {category === "roles" && <>
+        <div className="workflow-library-navigation workflow-role-scopes" role="group" aria-label="Role collections">
+          <Button variant="ghost" type="button" aria-pressed={roleScope === "project"} onClick={() => {
+            setRoleScope("project");
+            if (list.current) list.current.scrollTop = 0;
+          }}>Project Roles</Button>
+          <Button variant="ghost" type="button" aria-pressed={roleScope === "shared"} onClick={() => {
+            if (roleScope === "shared") return;
+            navigate((discarded) => {
+              if (discarded) setRoleEditorKey((key) => key + 1);
+              setRoleScope("shared");
+              if (list.current) list.current.scrollTop = 0;
+            });
+          }}>Shared Roles &amp; templates</Button>
+        </div>
+        <div hidden={roleScope !== "project"}>
+          <ConversationTemplateEditor key={roleEditorKey} checkout={checkout} openWorkspace={openWorkspace} />
+        </div>
+      </>}
+      <section hidden={category === "roles" && roleScope === "project"}
+        className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
         <header className="pipeline-actions justify-between">
           {heading}
           {creation !== "role" && <WorkflowBuilderDialog title={`New ${section.title}`} description={`Name your ${section.title.toLowerCase()} to open its editor.`}

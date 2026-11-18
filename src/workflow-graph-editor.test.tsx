@@ -124,6 +124,7 @@ it("groups and opens native template artifacts read-only without publishing a dr
     const categoryButton = nav.getByRole("button", { name: category });
     await user.click(categoryButton);
     expect(categoryButton.getAttribute("aria-current")).toBe("page");
+    if (category === "Roles") await user.click(screen.getByRole("button", { name: "Shared Roles & templates" }));
     const native = within(screen.getByRole("article", { name: "Development Pipeline" }));
     await user.click(native.getByRole("button", { name: `View ${asset}` }));
     const viewer = within(screen.getByRole("region", { name: "Artifact preview" }));

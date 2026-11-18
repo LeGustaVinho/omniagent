@@ -226,7 +226,8 @@ async function capture(browser, name) {
   if (!directory) return;
   await mkdir(directory, { recursive: true });
   await browser.execute(async () => {
-    await Promise.allSettled(document.getAnimations().filter((animation) => animation.animationName === "ui-reveal")
+    await Promise.allSettled(document.getAnimations().filter((animation) =>
+      ["ui-reveal", "workflow-builder-dialog-in"].includes(animation.animationName))
       .map((animation) => animation.finished));
   });
   const { data } = await emulateDisplay(browser, "Page.captureScreenshot", { captureBeyondViewport: false, fromSurface: true });

@@ -35,7 +35,7 @@ async function click(element) {
 }
 
 async function select(scope, label, value) {
-  const field = scope.$(`.//label[starts-with(normalize-space(.), '${label}')]/select`);
+  const field = scope.$(`.//label[starts-with(normalize-space(.), '${label}')]/select | .//select[@id = .//ancestor::*//label[normalize-space(.)='${label}']/@for]`);
   await field.waitForEnabled({ timeout });
   await field.selectByAttribute("value", value);
   return field;
@@ -364,6 +364,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const unsaved = browser.$('[role="dialog"]');
   await unsaved.$("h2=Unsaved changes").waitForDisplayed({ timeout });
   await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent.trim() === "Keep editing"), { timeout });
+  await capture?.(browser, "review-unsaved-changes");
   await browser.keys("Enter");
   assert.equal(await draftName.getValue(), "Unsaved pipeline name");
   await click(libraryViews.$("button=Functions"));
@@ -377,6 +378,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await browser.keys([Key.Shift, Key.F10]);
   await click(browser.$("//div[@role='menuitem' and normalize-space(.)='Delete draft']"));
   await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent.trim() === "Cancel"), { timeout });
+  await capture?.(browser, "review-delete-draft");
   await click(browser.$('[role="dialog"]').$("button=Delete draft"));
   await discardMenu.waitForExist({ timeout, reverse: true });
   await assert.rejects(invoke(browser, "inspect_workflow_package", { projectId, draftId: discarded.id }), /unavailable/i);
@@ -878,10 +880,27 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   await select(nodeEvidence, "Inspect execution node", "prompt-2");
   await textIsVisible(browser, nodeEvidence.$('[aria-label="Result on result"]'), "The desktop fixture read the summary.");
   await click(nodeEvidence.$("button=Open internal graph"));
+  await capture?.(browser, "review-run-internal-graph");
   await click(execution.$("button=Voltar"));
-  assert.equal(await nodeEvidence.$(".//label[starts-with(normalize-space(.), 'Inspect execution node')]/select").getValue(), "prompt-2");
-  await select(nodeEvidence, "Inspect execution node", end);
-  await textIsVisible(browser, nodeEvidence, "Selected ports · completed");
+  await setWindow(browser, invoke, 640, 440);
+  await click(browser.$(".workflow-run-frame .pipeline-compact-inspector"));
+  await click(browser.$('[aria-label="Execution node evidence"] [data-run-focus="open"]'));
+  const backInRun = '.workflow-run-scope button';
+  await locate(browser, backInRun);
+  await locate(browser, '[aria-label="Workflow execution graph"] .workflow-node-card');
+  await locate(browser, ".workflow-run-frame .pipeline-compact-inspector");
+  await capture?.(browser, "review-run-internal-graph-compact");
+  await click(execution.$("summary=Run details"));
+  await browser.execute(() => { document.querySelector(".workflow-execution-view").scrollTop += 200; });
+  await locate(browser, backInRun);
+  await click(browser.$(backInRun));
+  await browser.keys("Escape");
+  await setWindow(browser, invoke, 1440, 900);
+  const restoredEvidence = execution.$('[aria-label="Execution node evidence"]');
+  await restoredEvidence.waitForDisplayed({ timeout });
+  assert.equal(await restoredEvidence.$(".//label[starts-with(normalize-space(.), 'Inspect execution node')]/select").getValue(), "prompt-2");
+  await select(restoredEvidence, "Inspect execution node", end);
+  await textIsVisible(browser, restoredEvidence, "Selected ports · completed");
   const runs = await invoke(browser, "list_repository_deliveries", { projectId });
   const launched = runs.find(({ version }) => version.id === pipeline.id && version.revision === pipeline.revision);
   assert.ok(launched, "The published AI pipeline must be launched");
@@ -913,12 +932,26 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   const reuseInspector = reuseEditor.$('[aria-label="Node configuration"]');
   const pinnedPrompt = reuseInspector.$('[aria-label="AI Node Agent settings"] textarea');
   await pinnedPrompt.waitForDisplayed({ timeout });
+  assert.ok(await browser.execute(() => {
+    const node = (id) => document.querySelector(`.react-flow__node[data-id="${id}"] .workflow-node-card`).getBoundingClientRect();
+    const prefab = node("subflow");
+    return ["start", "end"].every((id) => {
+      const boundary = node(id);
+      return prefab.right <= boundary.left || prefab.left >= boundary.right || prefab.bottom <= boundary.top || prefab.top >= boundary.bottom;
+    });
+  }), "Automatically inserting a Node Prefab leaves Start and End clear");
   assert.equal(await pinnedPrompt.getValue(), evaluator);
   await textIsVisible(browser, reuseInspector, "Inherited prompt");
   await click(reuseInspector.$("button=Open pinned Prefab"));
   const prefab = browser.$('[aria-label="Artifact preview"]');
   await prefab.$('[aria-label="AI Node Agent settings"] textarea').waitForDisplayed({ timeout });
+  await textIsVisible(browser, prefab, "Desktop analyst");
+  await textIsVisible(browser, prefab, "Review summary");
+  await capture?.(browser, "review-builder-pinned-prefab");
+  await setWindow(browser, invoke, 640, 440);
+  await capture?.(browser, "review-builder-pinned-prefab-compact");
   await click(prefab.$("button=Voltar"));
+  await setWindow(browser, invoke, 1440, 900);
   assert.equal(await reuseInspector.$('[aria-label="AI Node Agent settings"] textarea').getValue(), evaluator);
   await click(browser.$("button=Save draft revision"));
   let reused;
@@ -948,4 +981,143 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   }), true);
   await capture?.(browser, "review-schema-dialog-compact");
   await click(schemaDialog.$("button=Cancel"));
+  for (const [action, label] of [["Create", "Role"], ["Edit", "Role"], ["Edit", "Output Schema"]]) {
+    await click(browser.$(`button[aria-label="${action} ${label}"]`));
+    const dialog = browser.$('.workflow-builder-dialog[role="dialog"]');
+    await dialog.$(`h2=${action} ${label}`).waitForDisplayed({ timeout });
+    await dialog.$(label === "Role" ? "input[required]" : '[aria-label="Schema editor"] > label input').waitForDisplayed({ timeout });
+    await dialog.$("button=Save and use").waitForDisplayed({ timeout });
+    await capture?.(browser, `review-inspector-${action.toLowerCase()}-${label.toLowerCase().replaceAll(" ", "-")}-compact`);
+    await click(dialog.$("button=Cancel"));
+  }
+  await browser.keys("Escape");
+  await verifyArtifactEditors(browser, invoke, capture, {
+    projectId, checkoutId, title, prefabName, pipeline, role: packageDocument.members.find(({ key }) => key === "fixture-role").body.template,
+  });
+}
+
+async function verifyArtifactEditors(browser, invoke, capture, { projectId, checkoutId, title, prefabName, pipeline, role }) {
+  const functionName = "Check a request against its output contract";
+  const fn = await invoke(browser, "create_workflow_package", { projectId, conversationId: null, package: {
+    name: functionName,
+    members: [{ key: "function", name: functionName, body: {
+      kind: "subflow", graph: { name: functionName, nodes: [
+        { id: "start", kind: "start", configuration: { kind: "subflow_entry", outputs: [
+          { name: "ready", value: { kind: "control" } }, { name: "inputs", value: { kind: "data", artifact: "json_object" } },
+        ] } },
+        { id: "return", kind: "end", configuration: { kind: "end" } },
+      ], wires: [makeWire("start", "ready", "return", "ready"), makeWire("start", "inputs", "return", "result")] },
+      inputs: { ready: { node: "start", port: "ready" }, input: { node: "start", port: "inputs" } },
+      outputs: { completed: { node: "return", port: "completed" }, result: { node: "return", port: "result" } },
+    } }],
+  } });
+  const published = await invoke(browser, "publish_reviewed_workflow_package", { projectId, draftId: fn.id, reviewedRevision: fn.revision });
+  assert.equal(published.status, "published");
+  const sharedRole = "Shared desktop reviewer";
+  await invoke(browser, "publish_workflow_resource", { projectId, member: {
+    key: "role", name: sharedRole, destination: "library", body: { kind: "role", template: { ...role, name: sharedRole } },
+  } });
+
+  await click(browser.$('[aria-label="Pipelines views"]').$("button=Library"));
+  const library = browser.$('[aria-label="Workflow library"]');
+  const categories = browser.$('[aria-label="Library views"]');
+  const preview = browser.$('[aria-label="Artifact preview"]');
+  const draft = browser.$('[aria-label="Workflow package editor"]');
+  const review = async (name, { top, visible } = {}) => {
+    await setWindow(browser, invoke, 1440, 900);
+    await capture?.(browser, `review-${name}-wide`);
+    await setWindow(browser, invoke, 640, 440);
+    if (top) await top.scrollIntoView({ block: "start" });
+    if (visible) await locate(browser, visible);
+    assert.ok(await browser.execute(() => document.documentElement.scrollWidth <= innerWidth + 1),
+      `Horizontal overflow in ${name}`);
+    await capture?.(browser, `review-${name}-compact`);
+  };
+  for (const [category, name, native, surface] of [
+    ["Pipeline", title, "Development Pipeline", 'input[aria-label="Pipeline name"]'],
+    ["Functions", functionName, "Clarify Requirements", 'input[aria-label="Function name"]'],
+    ["Schemas", "Review summary", "Feature Request", '[aria-label="Schema editor"] > label input'],
+    ["Node Prefabs", prefabName, "Discovery Analyst", '[aria-label="AI Node Agent settings"] textarea'],
+    ["Roles", sharedRole, "Delivery Engineer", ".workflow-role-form input[required]"],
+  ]) {
+    const key = category.toLowerCase().replaceAll(" ", "-");
+    await click(categories.$(`button=${category}`));
+    if (category === "Roles") {
+      const projectRole = browser.$('[aria-label="Role library"]');
+      await review("library-roles-project");
+      await click(projectRole.$("button=View saved Role"));
+      await review("library-project-role-view", { top: projectRole.$(".workflow-role-form") });
+      await click(projectRole.$("button=Edit Role"));
+      await review("library-project-role-edit", { top: projectRole.$(".workflow-role-form") });
+      await click(browser.$("button=Shared Roles & templates"));
+    }
+    const view = library.$(`button[aria-label=${JSON.stringify("View " + name)}]`);
+    await view.waitForDisplayed({ timeout });
+    await review(`library-${key}`);
+    await click(view);
+    await preview.$(surface).waitForDisplayed({ timeout });
+    await review(`library-${key}-published`);
+    await click(preview.$("button=Edit"));
+    await draft.$(surface).waitForDisplayed({ timeout });
+    await review(`library-${key}-edit`);
+    await click(draft.$("button=Voltar"));
+    const template = library.$(`button[aria-label=${JSON.stringify("View " + native)}]`);
+    await click(template);
+    await preview.$(surface).waitForDisplayed({ timeout });
+    await review(`library-${key}-template`);
+    await click(preview.$("button=Voltar"));
+  }
+
+  const navigationDraft = "Draft member navigation";
+  const prefabKey = "draft-prefab";
+  const functionKey = "function";
+  const promptNode = { id: "local-prefab", kind: "subflow", configuration: { kind: "none" } };
+  const functionMember = fn.package.members[0];
+  await invoke(browser, "create_workflow_package", { projectId, conversationId: null, package: {
+    name: navigationDraft,
+    members: [{ key: "pipeline", name: navigationDraft, body: { kind: "pipeline", graph: {
+      name: navigationDraft, nodes: [
+        { id: start, kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+        { id: "local-function", kind: "subflow", configuration: { kind: "none" } },
+        { id: end, kind: "end", configuration: { kind: "end" } },
+      ], wires: [],
+    } }, references: { "local-function": { source: "draft", key: functionKey } } },
+    { ...functionMember, references: { [promptNode.id]: { source: "draft", key: prefabKey } },
+      body: { ...functionMember.body, graph: { ...functionMember.body.graph, nodes: [...functionMember.body.graph.nodes, promptNode] } } },
+    { key: prefabKey, name: "Local prompt", body: { kind: "prompt", prompt: {
+      text: "Review the draft requirements.", executor: "agent", schemaContract: true, nodePrefab: true,
+    } } }],
+  } });
+  await setWindow(browser, invoke, 1440, 900);
+  await openBuilder(browser);
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${navigationDraft}']]//button[normalize-space(.)='Open draft']`));
+  const configuration = '[aria-label="Node configuration"]';
+  await select(browser.$(configuration), "Inspect node", "local-function");
+  await click(browser.$(configuration).$("button=Open draft Function"));
+  await browser.$('input[aria-label="Function name"]').waitForDisplayed({ timeout });
+  await select(browser.$(configuration), "Inspect node", promptNode.id);
+  await review("builder-draft-function", { visible: '.react-flow__node[data-id="local-prefab"] .workflow-node-card' });
+  await setWindow(browser, invoke, 1440, 900);
+  await click(browser.$(configuration).$("button=Open draft Prefab"));
+  assert.equal(await browser.$('[aria-label="AI Node Agent settings"] textarea').getValue(), "Review the draft requirements.");
+  await review("builder-draft-prefab");
+  await click(draft.$("button=Voltar"));
+  assert.equal(await browser.$('input[aria-label="Function name"]').getValue(), functionName);
+  await click(draft.$("button=Voltar"));
+  assert.equal(await browser.$('input[aria-label="Pipeline name"]').getValue(), navigationDraft);
+
+  const conversation = await invoke(browser, "create_conversation", { checkoutId, title: "Existing pipeline authoring" });
+  await invoke(browser, "start_workflow_authoring", {
+    conversationId: conversation.id, selection: role.model, effort: null,
+    base: { id: pipeline.id, revision: pipeline.revision }, brief: "Review this existing pipeline draft.",
+  });
+  await click(browser.$('[aria-label="Pipelines views"]').$("button=Library"));
+  await click(categories.$("button=Pipeline"));
+  const requests = browser.$('[aria-label="Authoring requests"]');
+  await click(requests.$("button=Open draft"));
+  const legacyEditor = browser.$('[aria-label="Pipeline draft editor"]');
+  await legacyEditor.$('[aria-label="Pipeline graph canvas"]').waitForDisplayed({ timeout });
+  await review("library-authoring-request");
+  await click(legacyEditor.$("button=Voltar"));
+  await requests.$("button=Open draft").waitForDisplayed({ timeout });
 }

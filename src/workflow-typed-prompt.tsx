@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { CornerDownLeft, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
@@ -16,13 +16,14 @@ export type RoleSnapshot = TemplateDraft;
 export type PromptSlot = "role" | "input_schema" | "output_schema" | "reviewer";
 type SelectionProps = {
   label: string; selected?: ReusableReference; choices: PromptRoleChoice[]; disabled?: boolean;
-  actions?: ReactNode;
+  actions?: ReactNode; status?: string;
   onChange: (reference?: ReusableReference) => void;
 };
 
-export function WorkflowReferenceField({ label, selected, choices, disabled, onChange, actions }: SelectionProps) {
+export function WorkflowReferenceField({ label, selected, choices, disabled, onChange, actions, status }: SelectionProps) {
+  const id = useId();
   const value = promptReferenceValue(selected);
-  const field = <label>{label}<select value={value} disabled={disabled} onChange={(event) =>
+  const field = <select id={id} aria-describedby={status ? id + "-status" : undefined} value={value} disabled={disabled} onChange={(event) =>
     onChange(choices.find(({ reference }) => promptReferenceValue(reference) === event.currentTarget.value)?.reference)}>
     <option value="">Choose {label.toLowerCase()}</option>
     {selected && !choices.some(({ reference }) => promptReferenceValue(reference) === value) && <option value={value}>
@@ -30,8 +31,15 @@ export function WorkflowReferenceField({ label, selected, choices, disabled, onC
         : selected.source === "draft" ? selected.key : selected.name}
     </option>}
     {choices.map(({ name, reference }) => <option key={promptReferenceValue(reference)} value={promptReferenceValue(reference)}>{name}</option>)}
-  </select></label>;
-  return actions ? <div className="workflow-reference-field">{field}{actions}</div> : field;
+  </select>;
+  return <div className="workflow-reference-field">
+    <div className="workflow-reference-heading">
+      <label htmlFor={id}>{label}</label>
+      {status && <small id={id + "-status"}>{status}</small>}
+      {actions}
+    </div>
+    {field}
+  </div>;
 }
 
 function Resettable({ changed, source, reset, children }: {
@@ -68,12 +76,14 @@ export function TypedPromptInspector({ projectId, checkoutId, prompt, defaultPro
   const body = prompt ?? defaultPrompt ?? "";
   const field = (slot: PromptSlot, label: string, choices: PromptRoleChoice[]) => {
     const selected = references[slot] ?? defaults[slot];
+    const inherited = !disabled && !!defaults[slot];
     const picker = <WorkflowReferenceField label={label} selected={selected} choices={choices} disabled={disabled}
+      status={inherited && !references[slot] ? "Inherited" : undefined}
       actions={!disabled && <WorkflowResourceActions projectId={projectId} checkoutId={checkoutId}
         kind={slot === "role" || slot === "reviewer" ? "role" : "schema"} label={label} selected={selected}
         draftResource={draftResource} onSaved={(reference) => (onResource ?? onReference)(slot, reference)} />}
       onChange={(reference) => onReference(slot, reference)} />;
-    return disabled || !defaults[slot] ? picker : <Resettable changed={!!references[slot]}
+    return !inherited || !references[slot] ? picker : <Resettable changed
       source="Inherited" reset={() => onReference(slot)}>{picker}</Resettable>;
   };
   const effectiveRole = role && { ...role, ...defaultRoleOverrides, ...roleOverrides } as RoleSnapshot;

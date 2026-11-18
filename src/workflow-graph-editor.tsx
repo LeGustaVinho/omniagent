@@ -177,7 +177,8 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
   JSON.stringify(Object.entries(bindings ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([id, binding]) =>
     [id, binding.reference, binding.slots]));
 
-export type WorkflowGraphView = { selected?: string; viewport?: Viewport; inspector: PipelineInspectorView };
+type CanvasSize = { width: number; height: number };
+export type WorkflowGraphView = { selected?: string; viewport?: Viewport; viewportSize?: CanvasSize; inspector: PipelineInspectorView };
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, view, readOnly,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
@@ -229,6 +230,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const restoreCanvasAfterInsertion = useRef(false);
   const [clipboard, setClipboard] = useState<GraphSelection>();
   const canvas = useRef<HTMLDivElement>(null);
+  const canvasSize = useRef<CanvasSize | undefined>(view?.viewportSize);
   const dragging = useRef<WorkflowLayout>({});
   const [previewPositions, setPreviewPositions] = useState<WorkflowLayout>({});
   const node = graph.nodes.find(({ id }) => id === selected);
@@ -246,6 +248,25 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const entry = graph.nodes.find(({ kind }) => isStartNode(kind)) ?? graph.nodes[0]!;
     return readableGraphViewport(graph.nodes.map(({ id }) => layout[id] ?? positions[id]!), layout[entry.id] ?? positions[entry.id]);
   });
+  useEffect(() => {
+    const element = canvas.current;
+    if (!fullHeight || !element || !flow || typeof ResizeObserver === "undefined") return;
+    const resize = () => {
+      const size = { width: element.clientWidth, height: element.clientHeight };
+      if (!size.width || !size.height) return;
+      const previous = canvasSize.current;
+      canvasSize.current = size;
+      if (!previous || previous.width === size.width && previous.height === size.height) return;
+      const viewport = flow.getViewport?.();
+      if (viewport) void flow.setViewport({
+        ...viewport, x: viewport.x + (size.width - previous.width) / 2, y: viewport.y + (size.height - previous.height) / 2,
+      });
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [flow, fullHeight]);
   const edges = useMemo<Edge[]>(() => graph.wires.map((wire) => {
     const invalid = incompatibility(definitions, wire);
     const output = outputPort(definitions, wire.from);
@@ -370,14 +391,43 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   function insertNew(kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) {
     const definition = catalog.find((entry) => entry.kind === kind);
     if (!definition || !isSupportedWorkflowNode(kind)) return;
-    const bounds = canvas.current?.getBoundingClientRect();
-    const point = insertion?.position ?? (bounds && flow ? flow.screenToFlowPosition({
-      x: bounds.left + bounds.width / 2,
-      y: bounds.top + bounds.height / 2,
-    }) : { x: 270, y: 120 });
+    const point = insertion?.position ?? placeNewNode(definition);
     insert({ nodes: [{ node: { id: kind.replaceAll("_", "-"), kind,
       configuration: configuration ?? defaultConfiguration(definition.configuration) }, position: { x: 0, y: 0 }, binding }], wires: [] }, point, false);
     revealInspector((request) => request + 1);
+  }
+
+  function placeNewNode(definition: WorkflowDefinition) {
+    const bounds = canvas.current?.getBoundingClientRect();
+    const width = 248;
+    const heightFor = (entry?: WorkflowDefinition) =>
+      Math.max(84, 52 + 36 * Math.max(entry?.inputs.length ?? 0, entry?.outputs.length ?? 0));
+    const height = heightFor(definition);
+    const center = bounds && flow ? flow.screenToFlowPosition({
+      x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2,
+    }) : { x: 394, y: 180 };
+    const anchor = { x: center.x - width / 2, y: center.y - height / 2 };
+    const occupied = graph.nodes.map(({ id }) => {
+      const { x, y } = layout[id] ?? positions[id]!;
+      const measured = flow?.getNode?.(id)?.measured;
+      return { left: x, top: y, right: x + (measured?.width ?? width), bottom: y + (measured?.height ?? heightFor(definitions[id])) };
+    });
+    const gap = 28;
+    const candidates = [anchor, ...occupied.flatMap(({ left, top, right, bottom }) => [
+      { x: anchor.x, y: bottom + gap }, { x: anchor.x, y: top - height - gap },
+      { x: right + gap, y: anchor.y }, { x: left - width - gap, y: anchor.y },
+    ])].filter(({ x, y }) => !occupied.some(({ left, top, right, bottom }) =>
+      x + width + gap > left && x - gap < right && y + height + gap > top && y - gap < bottom));
+    const distance = ({ x, y }: typeof anchor) => Math.hypot(x - anchor.x, y - anchor.y);
+    candidates.sort((a, b) => distance(a) - distance(b));
+    if (!bounds || !flow) return candidates[0] ?? anchor;
+    const start = flow.screenToFlowPosition({ x: bounds.left, y: bounds.top });
+    const end = flow.screenToFlowPosition({ x: bounds.right, y: bounds.bottom });
+    const visible = candidates.find(({ x, y }) => x >= start.x && y >= start.y && x + width <= end.x && y + height <= end.y);
+    if (visible) return visible;
+    const nearest = candidates[0] ?? anchor;
+    void flow.setCenter?.(nearest.x + width / 2, nearest.y + height / 2, { duration: 180 });
+    return nearest;
   }
 
   function isBoundary(kind: string) {
@@ -699,7 +749,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           fitView={!openingViewport} defaultViewport={openingViewport} fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={fullHeight ? 0.025 : 0.08} maxZoom={2}
           compactControls={fullHeight} canvasTools={fullHeight && graph.nodes.length >= 16 ?
             <MiniMap pannable zoomable ariaLabel="Pipeline overview" nodeColor="var(--primary)" /> : undefined}
-          onMoveEnd={view && ((_, viewport) => { view.viewport = viewport; })}
+          onMoveEnd={view && ((_, viewport) => {
+            view.viewport = viewport;
+            view.viewportSize = canvasSize.current;
+          })}
           selectionKeyCode="Shift" multiSelectionKeyCode={["Control", "Meta"]}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}

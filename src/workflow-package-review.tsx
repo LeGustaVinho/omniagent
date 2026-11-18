@@ -69,16 +69,18 @@ function useTypedResources(projectId: string, references: ReusableReference[], d
     reference.source === "published" && ["schema", "role"].includes(reference.version.kind)
       ? [[promptReferenceValue(reference), reference.version] as const] : [])).entries()];
   const loads = useQueries({ queries: versions.map(([, version]) => publishedWorkflowArtifactQuery(projectId, version)) });
-  const loaded = new Map(versions.map(([key], index) => [key, loads[index]?.data?.body]));
+  const loaded = new Map(versions.map(([key], index) => [key, loads[index]?.data]));
+  const artifacts = [...loaded.values()].filter((artifact) => artifact != null);
   return {
+    choices: (kind: string) => referenceChoices(kind, artifacts),
     schema: (reference?: ReusableReference) => {
       const fields = reference?.source === "draft" ? draftSchemas.find(({ key }) => key === reference.key)?.body.fields
-        : loaded.get(promptReferenceValue(reference))?.fields;
+        : loaded.get(promptReferenceValue(reference))?.body.fields;
       return fields && objectSchema(fields);
     },
     role: (reference?: ReusableReference) => reference?.source === "draft"
       ? draftRoles.find((item) => item.reference.source === "draft" && item.reference.key === reference.key)?.template
-      : loaded.get(promptReferenceValue(reference))?.template,
+      : loaded.get(promptReferenceValue(reference))?.body.template,
   };
 }
 
@@ -198,8 +200,9 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         <WorkflowSchemaEditor key={schema.key} name={schema.name} fields={schema.body.fields} disabled={disabled}
           onChange={(name, fields) => editSchema({ ...schema, name, body: { kind: "schema", fields } })} />
       </>}
-      {!role && !schema && prompt && registry.data && preview.isSuccess && editPrompt && <PromptRevisionView>
+      {!role && !schema && prompt && registry.data && preview.isSuccess && editPrompt && <>
         <div className="pipeline-actions">{memberNavigation}</div>
+        <PromptRevisionView>
         {prompt.body.prompt.schemaContract ? <TypedPromptInspector key={prompt.key} projectId={projectId} checkoutId={checkoutId}
           title={prompt.name} onTitle={(name) => editPrompt({ ...prompt, name })}
           prompt={prompt.body.prompt.text} references={prompt.references ?? {}} defaults={{}}
@@ -211,7 +214,8 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
           onReference={(slot, reference) => editPrompt(updatePromptReference(prompt, slot, reference))}
           onRoleOverrides={(roleOverrides) => editPrompt({ ...prompt, body: { ...prompt.body, prompt: { ...prompt.body.prompt, roleOverrides } } })} />
           : <p role="alert">This Prompt uses a retired executor contract. Create a typed AI Node Agent to replace it.</p>}
-      </PromptRevisionView>}
+        </PromptRevisionView>
+      </>}
       {!role && !schema && !prompt && graph && registry.data && preview.isSuccess && <PackageMemberGraph key={graph.key} projectId={projectId} checkoutId={checkoutId}
         graph={graph.graph} references={graph.references ?? {}} draftPresets={draftPresets}
         canvas={canvasByMember[graph.key] ?? { layout: layouts[graph.key] ?? {}, updateDefinitions: {} }}
@@ -360,7 +364,8 @@ function ArtifactView({ projectId, checkoutId, artifact, view, members = [], lay
       : body?.prompt && artifact ? <PromptRevisionView>
         <TypedPromptInspector projectId={projectId} checkoutId={checkoutId} title={artifact.name} onTitle={ignoreEdit}
           prompt={body.prompt.text} references={references} defaults={{}} role={resources.role(references.role)}
-          defaultRoleOverrides={{}} roleOverrides={body.prompt.roleOverrides ?? {}} roleChoices={roles} schemaChoices={names(schemas)}
+          defaultRoleOverrides={{}} roleOverrides={body.prompt.roleOverrides ?? {}}
+          roleChoices={[...roles, ...resources.choices("role")]} schemaChoices={[...names(schemas), ...resources.choices("schema")]}
           inputSchema={resources.schema(references.input_schema)} disabled onPrompt={ignoreEdit} onReference={ignoreEdit} onRoleOverrides={ignoreEdit} />
       </PromptRevisionView>
       : <p role="alert">This artifact is unavailable in the visual editor.</p>}
