@@ -5,7 +5,6 @@ use omniagent::workflows::authoring::package::{
     PackageArtifactVersion, PromptCard, PromptSuggestionStatus, PublishedPackageArtifact,
     WorkflowAuthoringOutput, WorkflowPackage, WorkflowPackageCatalogEntry, WorkflowPackageDraft,
     WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
-    WorkflowSimulation, WorkflowSimulationScenario,
     derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
     exchange::{ExchangeBinding, WorkflowExchange, WorkflowExchangePreview},
 };
@@ -158,21 +157,6 @@ pub async fn preview_workflow_package_revision(
 ) -> Result<WorkflowPackagePreview, String> {
     store
         .preview_workflow_package_revision(project_id, draft_id, revision)
-        .await
-        .map_err(report)
-}
-
-#[tauri::command]
-pub async fn simulate_workflow_package_revision(
-    store: State<'_, Store>,
-    project_id: String,
-    draft_id: String,
-    revision: String,
-    member_key: String,
-    scenario: WorkflowSimulationScenario,
-) -> Result<WorkflowSimulation, String> {
-    store
-        .simulate_workflow_package_revision(project_id, draft_id, revision, member_key, scenario)
         .await
         .map_err(report)
 }

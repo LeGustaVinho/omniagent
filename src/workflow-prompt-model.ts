@@ -42,13 +42,6 @@ export type PromptExpansion = {
   outputs: Record<string, WorkflowEndpoint>;
 };
 export type PromptProposal = Pick<PromptContract, "inputs" | "outputs" | "routes" | "outputSchema">;
-export type PromptSample = {
-  title: string;
-  routes: string[];
-  delegates: PromptContract["delegates"];
-  outputs: Record<string, string>;
-};
-
 export const PROMPT_OUTPUTS = ["json_object", "json_list", "rendered_text"] as const;
 export const defaultPromptContract = (): PromptContract => ({
   text: "", executor: "agent", inputs: {}, outputs: {}, routes: ["concluido"], delegates: [],
@@ -105,14 +98,6 @@ export function promptDataOptions(ports: readonly WorkflowPort[] | undefined) {
   return ports?.flatMap<{ name: string; kind?: string }>(({ name, value }) =>
     value.kind === "data" ? [{ name, kind: value.artifact }]
       : value.kind === "evidence" ? [{ name, kind: undefined }] : []) ?? [];
-}
-
-export function initialPromptSample(kind: string): unknown {
-  switch (kind) {
-    case "json_list": return [];
-    case "json_object": return {};
-    default: return "";
-  }
 }
 
 export function promptReferenceValue(reference?: ReusableReference) {

@@ -1,28 +1,24 @@
 import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import type { Viewport } from "@xyflow/react";
-import { FileDiff, FlaskConical, Workflow } from "lucide-react";
-import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { FileDiff, Workflow } from "lucide-react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
 import { Button } from "@/components/ui/button";
-import { WorkflowSimulationCanvas, type WorkflowSimulationGraph } from "@/workflow-simulation-canvas";
-import { WorkflowStartValueField, initialWorkflowStartFields, initialWorkflowStartValue,
-  type WorkflowStartSchema } from "@/workflow-launch-fields";
-import { StructuredValueField } from "@/workflow-structured-fields";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { PromptInspector, PromptRevisionView } from "@/workflow-prompt";
 import { PromptContractSuggestion } from "@/workflow-prompt-suggestion";
 import { WorkflowSchemaEditor } from "@/workflow-schema-editor";
-import { objectSchema, schemaValueProblem, type JsonSchema, type SchemaField } from "@/workflow-schema-model";
+import { objectSchema, type JsonSchema, type SchemaField } from "@/workflow-schema-model";
 import type { InputField } from "@/workflow-decision-editor";
 import { builderNodeKinds, WorkflowNodePicker, type WorkflowCatalogItem } from "@/workflow-node-picker";
 import { TypedPromptInspector, WorkflowReferenceField, type PromptSlot, type RoleSnapshot } from "@/workflow-typed-prompt";
-import { PROMPT_EXECUTORS, promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename, type PromptRoleChoice,
-  initialPromptSample, type PromptSample } from "@/workflow-prompt-model";
+import { PROMPT_EXECUTORS, promptNodeDefinition, promptReferenceValue, type PromptMember, type PromptPortRename,
+  type PromptRoleChoice } from "@/workflow-prompt-model";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { configuredBranches, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowNodeConfiguration,
-  type WorkflowEndpoint, type WorkflowGraph, type WorkflowGraphNode, type WorkflowLayout, type WorkflowPortType, type WorkflowReuseSelection } from "@/workflow-graph-model";
+  type WorkflowEndpoint, type WorkflowGraph, type WorkflowGraphNode, type WorkflowLayout, type WorkflowReuseSelection } from "@/workflow-graph-model";
 import { PublishedSubflow, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
   type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 
@@ -34,24 +30,10 @@ type Member = {
   changes: { path: string; change: "added" | "removed" | "changed"; before: unknown; after: unknown }[];
   changesTruncated: boolean; dependencies: Record<string, Reference>;
   affectedUses: { consumer: Version; name: string; slot: string; pinnedRevision: string }[];
-  diagnostics: string[]; requirements: string[]; simulatable: boolean;
-  sampleInputs: string[]; startSchema?: WorkflowStartSchema;
-  sampleNodes: { nodeId: string; title: string; outputs: string[]; failurePorts?: string[]; prompt?: PromptSample }[];
+  diagnostics: string[]; requirements: string[];
   graphDefinitions?: WorkflowDefinitions;
 };
 type Preview = { revision: string; revisions: string[]; members: Member[] };
-type TraceState = "completed" | "failed" | "waiting" | "skipped";
-type TraceSignal = { from: WorkflowEndpoint; state: "selected" | "waiting" | "skipped" };
-type TraceExports = Record<string, TraceSignal>;
-type Trace = {
-  graph?: WorkflowSimulationGraph;
-  revision: string; memberKey: string; inputs: Record<string, unknown>;
-  steps: { nodeId: string; title: string; state: TraceState; reason: string | null;
-    inputs: (TraceSignal & { port: string })[]; outputs: Record<string, { portType: WorkflowPortType; value: unknown }> }[];
-  subflows: { path: string; name: string; revision: string; nodes: string[]; outputs: TraceExports }[];
-  outputs: TraceExports;
-};
-
 const kindName = (kind: string) => kind.replaceAll("_", " ");
 const jsonClass = "max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 text-xs";
 
@@ -649,262 +631,18 @@ export function PackagePublicationPreview({ preview }: { preview: Preview }) {
   </ul>;
 }
 
-function Outputs({ values }: { values: TraceExports }) {
-  return <ul aria-label="Forwarded outputs">{Object.entries(values).map(([port, { from, state }]) => <li key={port} className="break-all">
-    {port} · {state} · <code>{from.node}.{from.port}</code>
-  </li>)}</ul>;
-}
-
-function SimulationTrace({ trace }: { trace: Trace }) {
-  const byNode = new Map(trace.steps.map((step) => [step.nodeId, step]));
-  function renderStep({ inputs, outputs, reason }: Trace["steps"][number]) {
-    return <div className="pipeline-stack">
-        {reason && <p>{reason}</p>}
-        {!!inputs.length && <ul aria-label="Stage inputs">{inputs.map(({ port, from, state: signal }) => {
-          const value = byNode.get(from.node)?.outputs[from.port];
-          return <li key={`${port}:${from.node}:${from.port}`}>
-            {port} · {signal} · <code>{from.node}.{from.port}</code>
-            {value && value.portType.kind !== "control" && <details><summary>Show sample input</summary><JsonValue value={value.value} /></details>}
-          </li>;
-        })}</ul>}
-        {!!Object.keys(outputs).length && <ul aria-label="Stage outputs">{Object.entries(outputs).map(([port, output]) => <li key={port}>
-          {port} · {output.portType.kind === "data" ? kindName(output.portType.artifact) : output.portType.kind}
-          {output.portType.kind !== "control" && <JsonValue value={output.value} />}
-        </li>)}</ul>}
-    </div>;
-  }
-  const ledger = <ol className="pipeline-stack" aria-label="Simulated stages">{trace.steps.map((step) => <li key={step.nodeId} className="pipeline-evidence">
-    <details>
-      <summary><strong>{step.title}</strong> · <code>{step.nodeId}</code> · <span className="capitalize">{step.state}</span></summary>
-      {renderStep(step)}
-    </details>
-  </li>)}</ol>;
-  return <section className="pipeline-stack" aria-label="Simulation trace">
-    <p className="break-all">Simulated revision <code>{trace.revision}</code></p>
-    <details><summary>Sample inputs used</summary><JsonValue value={trace.inputs} /></details>
-    {!!trace.subflows.length && <details aria-label="Simulated subflows" className="workflow-trace-subflows">
-      <summary>Simulated subflows ({trace.subflows.length})</summary>
-      <div className="pipeline-stack">
-      {trace.subflows.map(({ path, name, revision, nodes, outputs }) => <details key={path}>
-        <summary>{name} · <code>{path}</code></summary>
-        <p className="break-all">Pinned revision <code>{revision}</code></p>
-        <ul>{nodes.map((node) => <li key={node}><code>{node}</code> · {byNode.get(node)?.state}</li>)}</ul>
-        {Object.keys(outputs).length > 0 && <Outputs values={outputs} />}
-      </details>)}
-      </div>
-    </details>}
-    {trace.graph && <WorkflowSimulationCanvas graph={trace.graph} steps={trace.steps} renderStep={(nodeId) => {
-      const step = byNode.get(nodeId);
-      return step && renderStep(step);
-    }} />}
-    {trace.graph ? <details><summary>All simulated stages</summary>{ledger}</details> : ledger}
-    {Object.keys(trace.outputs).length > 0 && <Outputs values={trace.outputs} />}
-  </section>;
-}
-
-type SampleOutcome = {
-  state: "completed" | "failed" | "waiting";
-  outputs?: Record<string, unknown>;
-  reason?: string;
-  failurePort?: string;
-};
-
-type PromptSampleResponse = {
-  route: string;
-  reason: string;
-  outputs: Record<string, unknown>;
-  delegations: { role: string; focus: string }[];
-};
-
-function PromptSampleForm({ nodeId, prompt, outcome, disabled, change }: {
-  nodeId: string; prompt: PromptSample; outcome?: SampleOutcome; disabled: boolean; change: (outcome?: SampleOutcome) => void;
-}) {
-  const response = outcome?.outputs?.response as PromptSampleResponse | undefined;
-  function update(next: PromptSampleResponse) {
-    change({ state: "completed", outputs: { response: next } });
-  }
-  return <fieldset className="pipeline-form pipeline-stack" disabled={disabled}>
-    <legend>{prompt.title}</legend>
-    <label>Sample route
-      <select aria-label={`Sample route for ${nodeId}`} value={outcome?.state === "failed" ? "falhou" : response?.route ?? ""}
-        onChange={(event) => {
-          const route = event.currentTarget.value;
-          if (!route) change();
-          else if (route === "falhou") change({ state: "failed", reason: "Sample Prompt failure" });
-          else update(response ? { ...response, route } : {
-            route, reason: "Sample route selection",
-            outputs: Object.fromEntries(Object.entries(prompt.outputs).map(([name, kind]) => [name, initialPromptSample(kind)])),
-            delegations: [],
-          });
-        }}>
-        <option value="">Use default wait</option>
-        {prompt.routes.map((route) => <option key={route} value={route}>{route === "concluido" ? "Completed" : kindName(route)}</option>)}
-        <option value="falhou">Failed</option>
-      </select>
-    </label>
-    {response && <>
-      <label>Justification<input value={response.reason} onChange={(event) => update({ ...response, reason: event.currentTarget.value })} /></label>
-      {prompt.delegates.length > 0 && <h4>Invited Roles</h4>}
-      {prompt.delegates.map(({ alias, required }) => {
-        const call = response.delegations.find(({ role }) => role === alias);
-        const drop = () => response.delegations.filter(({ role }) => role !== alias);
-        return <div key={alias} className="pipeline-stack">
-          {required ? <p>{alias} · Required</p> : <label className="workflow-check">
-            <input type="checkbox" checked={!!call} onChange={(event) => update({ ...response, delegations: event.currentTarget.checked
-              ? [...response.delegations, { role: alias, focus: "Review the saved subject." }] : drop() })} /> Call {alias}
-          </label>}
-          {(required || call) && <label>Focus for {alias}<input value={call?.focus ?? ""} placeholder={required ? "Use the Role's required focus" : ""}
-            onChange={(event) => {
-              const focus = event.currentTarget.value;
-              update({ ...response, delegations: required && !focus.trim() ? drop() : [...drop(), { role: alias, focus }] });
-            }} /></label>}
-        </div>;
-      })}
-      {Object.keys(prompt.outputs).map((name) => <StructuredValueField key={name} label={name} value={response.outputs[name]} disabled={disabled}
-        onChange={(value) => update({ ...response, outputs: { ...response.outputs, [name]: value } })} />)}
-    </>}
-    {outcome?.state === "failed" && <label>Failure diagnosis<input value={outcome.reason ?? ""}
-      onChange={(event) => change({ ...outcome, reason: event.currentTarget.value })} /></label>}
-  </fieldset>;
-}
-
-function SimulateMember({ projectId, draftId, revision, member }: { projectId: string; draftId: string; revision: string; member: Member }) {
-  const [inputs, setInputs] = useState<Record<string, unknown>>(() => Object.fromEntries(member.sampleInputs.map((name) =>
-    [name, name === "document" && member.kind === "pipeline" ? { relativePath: "sample.md" }
-      : name === "inputs" && member.startSchema ? initialWorkflowStartFields(member.startSchema)
-      : name === "inputs" ? {} : ""])));
-  const [outcomes, setOutcomes] = useState<Record<string, SampleOutcome>>({});
-  const [source, setSource] = useState<"prompt" | "markdown">("prompt");
-  const [sampleRequest, setSampleRequest] = useState("");
-  const values = (inputs.inputs as Record<string, unknown> | undefined) ?? {};
-  const requestMode = member.startSchema?.promptOrMarkdown === true;
-  const run = useMutation({ mutationFn: () => invoke<Trace>("simulate_workflow_package_revision", {
-    projectId, draftId, revision, memberKey: member.key, scenario: {
-      inputs: requestMode ? {
-        ...inputs,
-        ...(source === "prompt"
-          ? { inputs: { ...values, prompt: sampleRequest } }
-          : { document: sampleRequest }),
-      } : inputs,
-      outcomes,
-    },
-  }) });
-  const stale = run.data && (run.data.revision !== revision || run.data.memberKey !== member.key);
-  const promptSamples = member.sampleNodes.filter(({ prompt }) => prompt);
-  const nativeSamples = member.sampleNodes.filter(({ prompt }) => !prompt);
-  const missingStartField = member.startSchema?.fields.some(({ name, required }) => required && !Object.hasOwn(values, name))
-    || !!(member.startSchema?.jsonSchema && schemaValueProblem(member.startSchema.jsonSchema, values, "Sample inputs"));
-  function setStartValue(name: string, value: unknown) {
-    const updated = { ...values };
-    if (value === undefined) delete updated[name];
-    else updated[name] = value;
-    setInput("inputs", updated);
-  }
-  function setInput(name: string, value: unknown) {
-    run.reset();
-    setInputs((previous) => ({ ...previous, [name]: value }));
-  }
-  function setOutcome(id: string, outcome?: SampleOutcome) {
-    run.reset();
-    setOutcomes((previous) => {
-      if (outcome) return { ...previous, [id]: outcome };
-      const next = { ...previous };
-      delete next[id];
-      return next;
-    });
-  }
-  return <section className="pipeline-stack workflow-review-card" aria-label="Simulate selected artifact">
-    <h3><FlaskConical size={16} aria-hidden /> Simulation</h3>
-    {(member.sampleInputs.length > 0 || requestMode) && <fieldset className="pipeline-form grid gap-2" disabled={run.isPending}>
-      <legend>Sample inputs</legend>
-      {requestMode && <>
-        <label>Sample request source<select value={source} onChange={(event) => {
-          setSource(event.currentTarget.value === "markdown" ? "markdown" : "prompt");
-          run.reset();
-        }}>
-          <option value="prompt">Prompt</option>
-          <option value="markdown">Markdown</option>
-        </select></label>
-        <label>{source === "prompt" ? "Sample prompt" : "Sample Markdown"}<textarea value={sampleRequest}
-          onChange={(event) => { setSampleRequest(event.currentTarget.value); run.reset(); }} /></label>
-      </>}
-      {member.sampleInputs.map((name) => name === "inputs" && member.startSchema
-        ? member.startSchema.fields.map((field) => <div key={field.name} className="pipeline-stack">
-          {!field.required && <label className="pipeline-inline-field">
-            <input type="checkbox" checked={Object.hasOwn(values, field.name)} onChange={(event) =>
-              setStartValue(field.name, event.currentTarget.checked ? initialWorkflowStartValue(field.valueType) : undefined)} />
-            Include {field.name}
-          </label>}
-          {(field.required || Object.hasOwn(values, field.name)) && <WorkflowStartValueField field={field}
-            schema={member.startSchema?.jsonSchema?.properties?.[field.name]}
-            value={values[field.name]} disabled={run.isPending} onChange={(value) => setStartValue(field.name, value)} />}
-        </div>)
-        : name === "document" && member.kind === "pipeline"
-        ? <label key={name}>Sample Markdown path<input value={(inputs.document as { relativePath: string }).relativePath}
-          onChange={(event) => setInput(name, { relativePath: event.currentTarget.value })} /></label>
-        : <StructuredValueField key={name} label={name} value={inputs[name]} disabled={run.isPending}
-          onChange={(value) => setInput(name, value)} />)}
-    </fieldset>}
-    {promptSamples.length > 0 && <details className="pipeline-evidence"><summary>Prompt responses</summary>
-      <div className="pipeline-stack pt-2">
-        {promptSamples.map(({ nodeId, prompt }) => prompt && <PromptSampleForm key={nodeId} nodeId={nodeId} prompt={prompt}
-          outcome={outcomes[nodeId]} disabled={run.isPending} change={(outcome) => setOutcome(nodeId, outcome)} />)}
-      </div>
-    </details>}
-    {nativeSamples.length > 0 && <details className="pipeline-evidence"><summary>Sample outcomes</summary>
-      <div className="pipeline-stack pt-2">
-        {nativeSamples.map(({ nodeId, title, outputs, failurePorts = [] }) => {
-          const outcome = outcomes[nodeId];
-          return <fieldset key={nodeId} className="pipeline-form grid gap-2" disabled={run.isPending}>
-            <legend>{title} · {nodeId}</legend>
-            <label>Outcome for {nodeId}<select value={outcome?.state ?? ""}
-              onChange={(event) => {
-                const state = event.currentTarget.value as "" | SampleOutcome["state"];
-                setOutcome(nodeId, state === "" ? undefined : { state, ...(state === "completed" && {
-                  outputs: Object.fromEntries(outputs.map((name) => [name, ""])),
-                }) });
-              }}>
-              <option value="">Use default wait</option>
-              <option value="completed">Completed</option>
-              <option value="failed">Failed</option>
-              <option value="waiting">Waiting</option>
-            </select></label>
-            {outcome?.state === "failed" && failurePorts.length > 1 && <label>Failure branch
-              <select value={outcome.failurePort ?? "failed"} onChange={(event) =>
-                setOutcome(nodeId, { ...outcome, failurePort: event.currentTarget.value })}>
-                {failurePorts.map((port) => <option key={port} value={port}>{kindName(port)}</option>)}
-              </select>
-            </label>}
-            {outcome && <label>Reason for {nodeId}<input value={outcome.reason ?? ""}
-              onChange={(event) => setOutcome(nodeId, { ...outcome, reason: event.currentTarget.value })} /></label>}
-            {outcome?.state === "completed" && outputs.map((name) =>
-              <StructuredValueField key={name} label={name} value={outcome.outputs?.[name]} disabled={run.isPending}
-                onChange={(value) => setOutcome(nodeId, { ...outcome, outputs: { ...outcome.outputs, [name]: value } })} />)}
-          </fieldset>;
-        })}
-      </div>
-    </details>}
-    <Button type="button" variant="outline" className="w-fit"
-      disabled={run.isPending || missingStartField || (requestMode && !sampleRequest.trim())}
-      onClick={() => run.mutate()}>Simulate</Button>
-    {run.isPending && <p role="status">Simulating saved revision…</p>}
-    {run.error && <p role="alert">{String(run.error)}</p>}
-    {run.data && !stale && <SimulationTrace trace={run.data} />}
-  </section>;
-}
-
 export function WorkflowPackageReview({ projectId, draftId, savedRevision }: { projectId: string; draftId: string; savedRevision: string }) {
   const [open, setOpen] = useState(false);
   const [revision, setRevision] = useState(savedRevision);
   const [selection, select] = useState("");
   const preview = usePackagePreview(projectId, draftId, revision, open);
   const member = preview.data?.members.find(({ key }) => key === selection) ?? preview.data?.members[0];
-  return <WorkflowBuilderDialog title="Review workflow package" description="Inspect a saved revision and try its stages with sample inputs."
+  return <WorkflowBuilderDialog title="Review workflow package" description="Inspect the changes, dependencies, and requirements of a saved revision."
     wide open={open} onOpenChange={(next) => {
       if (next) setRevision(savedRevision);
       setOpen(next);
     }} trigger={<Button type="button" variant="outline">
-      <FlaskConical size={15} aria-hidden /> Review changes and simulate
+      <FileDiff size={15} aria-hidden /> Review changes
     </Button>}>
     {open && <section className="pipeline-stack pipeline-form" aria-label="Review workflow package">
       <div className="workflow-review-filters">
@@ -918,13 +656,12 @@ export function WorkflowPackageReview({ projectId, draftId, savedRevision }: { p
       {preview.isPending && <p role="status">Loading revision preview…</p>}
       {preview.error && <p role="alert">{String(preview.error)}</p>}
       {preview.data?.members.length === 0 && <p>This saved revision has no package members.</p>}
-      {member && <>
-        <details className="workflow-review-card" key={member.key} open={!member.simulatable || Boolean(member.diagnostics.length)}>
+      {member && (
+        <details className="workflow-review-card" key={member.key} open>
           <summary><FileDiff size={16} aria-hidden /> Changes and dependencies</summary>
           <MemberReview member={member} />
         </details>
-        {member.simulatable && <SimulateMember key={`${revision}:${member.key}`} projectId={projectId} draftId={draftId} revision={revision} member={member} />}
-      </>}
+      )}
     </section>}
   </WorkflowBuilderDialog>;
 }

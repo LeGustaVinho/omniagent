@@ -39,13 +39,7 @@ const savedPrompt = {
   references: { role: { source: "published", version: { kind: "role", destination: "project", id: "role-id", revision: "role-v1" } } },
 };
 
-const sampleNode = {
-  nodeId: "prompt::execute", title: "Agent", outputs: ["response"],
-  prompt: { title: "Evaluate candidate", routes: ["review", "deliver"], outputs: { summary: "rendered_text" },
-    delegates: [{ alias: "tests", required: false }, { alias: "correctness", required: true }] },
-};
-
-function mountPromptEditor(sampleNodes = [sampleNode], opened = draft) {
+function mountPromptEditor(opened: typeof draft) {
   vi.mocked(invoke).mockImplementation(async (name, payload) => {
     switch (name) {
       case "inspect_workflow_package": return opened;
@@ -58,12 +52,11 @@ function mountPromptEditor(sampleNodes = [sampleNode], opened = draft) {
         ? [{ option: { name: "Fixture model", selectable: true, selection: model, rating: null } }] : [];
       case "preview_workflow_package_revision": return { revision: draft.revision, revisions: [draft.revision], members: [
         { key: pipeline.key, name: pipeline.name, kind: "pipeline", changes: [], diagnostics: [], requirements: [],
-          dependencies: {}, affectedUses: [], simulatable: true, sampleInputs: [], sampleNodes, graphDefinitions: { start } },
+          dependencies: {}, affectedUses: [], graphDefinitions: { start } },
       ] };
       case "request_prompt_contract_suggestion": return "fixture-job";
       case "prompt_contract_suggestion": return { state: "ready", proposal };
       case "save_workflow_package": return draft;
-      case "simulate_workflow_package_revision": return { revision: draft.revision, memberKey: pipeline.key, inputs: {}, steps: [], subflows: [], outputs: {} };
       default: throw Error(`Unexpected ${name}`);
     }
   });
@@ -81,7 +74,7 @@ it("edits a saved Prompt and applies proposed ports only to the matching card sn
   const linked = { ...pipeline, body: { ...pipeline.body, graph: { ...pipeline.body.graph,
     nodes: [...pipeline.body.graph.nodes, { id: "prompt", kind: "subflow", configuration: { kind: "none" } }] } },
     references: { prompt: { source: "draft", key: member.key } } };
-  const user = mountPromptEditor([], { ...draft, package: { ...draft.package, members: [linked, role, member] } });
+  const user = mountPromptEditor({ ...draft, package: { ...draft.package, members: [linked, role, member] } });
   await user.selectOptions(await screen.findByRole("combobox", { name: "Inspect node" }), "prompt");
   const prompt = screen.getByRole("textbox", { name: "Prompt" });
   await user.type(prompt, "Review candidate");
@@ -146,33 +139,11 @@ it("edits a saved Prompt and applies proposed ports only to the matching card sn
   }));
 });
 
-it("simulates alternate routes and optional invited Roles by the matching native sample ID", async () => {
-  const user = mountPromptEditor();
-  await user.click(await screen.findByRole("button", { name: "Review changes and simulate" }));
-  await user.click(await screen.findByText("Prompt responses"));
-  const route = screen.getByRole("combobox", { name: "Sample route for prompt::execute" });
-  await user.selectOptions(route, "review");
-  await user.click(screen.getByRole("checkbox", { name: "Call tests" }));
-  await user.type(screen.getByRole("textbox", { name: "summary" }), "Sample evidence");
-  await user.click(screen.getByRole("button", { name: "Simulate" }));
-  await screen.findByRole("region", { name: "Simulation trace" });
-  const sample = (route: string) => ({ ...scope, revision: draft.revision, memberKey: pipeline.key, scenario: { inputs: {},
-    outcomes: { "prompt::execute": { state: "completed", outputs: { response: {
-      route, reason: "Sample route selection", outputs: { summary: "Sample evidence" },
-      delegations: [{ role: "tests", focus: "Review the saved subject." }],
-    } } } },
-  } });
-  expect(invoke).toHaveBeenCalledWith("simulate_workflow_package_revision", sample("review"));
-  await user.selectOptions(route, "deliver");
-  await user.click(screen.getByRole("button", { name: "Simulate" }));
-  expect(invoke).toHaveBeenCalledWith("simulate_workflow_package_revision", sample("deliver"));
-});
-
 it("shows a pinned published Prompt's read-only contract", async () => {
   const linked = { ...pipeline, body: { ...pipeline.body, graph: { ...pipeline.body.graph,
     nodes: [...pipeline.body.graph.nodes, { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } }] } },
     references: { "reusable-subflow": { source: "published", version: savedPrompt.version } } };
-  const user = mountPromptEditor([], { ...draft, package: { ...draft.package, members: [linked, role] } });
+  const user = mountPromptEditor({ ...draft, package: { ...draft.package, members: [linked, role] } });
   await user.selectOptions(await screen.findByRole("combobox", { name: "Inspect node" }), "reusable-subflow");
   const prompt = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Prompt" });
   expect(prompt.value).toBe("Evaluate carefully.");
