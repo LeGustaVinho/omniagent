@@ -103,3 +103,20 @@ it("sorts one catalog across services and preserves the exact model selection an
   expect(screen.getByRole("menuitemradio", { name: "Price, lowest first" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemradio", { name: "Gemini Pro" }).getAttribute("aria-checked")).toBe("true");
 });
+
+it("sorts and displays a confirmed price while intelligence is pending", async () => {
+  const sol: ModelOption = {
+    ...luna, selection: { ...luna.selection, modelId: "gpt-6.2-sol" }, name: "GPT-6.2 Sol",
+    rating: { intelligenceTenths: null, apiReferenceCents: 400, priceScore: 65 },
+  };
+  render(<ModelPicker label="Model" options={[unknown, luna, sol]} combinedCatalog
+    selection={{ mode: "single", selected: sol.selection, onChange: () => undefined }} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Model · GPT-6.2 Sol" }));
+  expect(screen.getByText("Intelligence pending")).toBeDefined();
+  expect(screen.getByText("API reference $4.00 / 1M tokens")).toBeDefined();
+  await user.click(screen.getByRole("menuitemradio", { name: "Price, lowest first" }));
+  const list = within(document.querySelector<HTMLElement>(".model-picker-list")!);
+  expect(list.getAllByRole("menuitemradio").map((row) => row.getAttribute("aria-label")))
+    .toEqual(["GPT‑6 Luna", "GPT-6.2 Sol", "Other model"]);
+});

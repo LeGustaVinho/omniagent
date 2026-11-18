@@ -27,6 +27,7 @@ mod ide_source_runtime;
 mod ipc;
 mod manual_terminal;
 mod markdown_analysis_ipc;
+mod model_catalog_ipc;
 mod model_defaults_runtime;
 mod note_index_runtime;
 mod note_runtime;
@@ -286,6 +287,7 @@ fn main() {
                 app.state::<InstallationLayout>().inner().clone(),
             );
             app.manage(store);
+            app.manage(omniagent::model_catalog::refresh::CatalogRefresh::default());
             app.manage(monitor);
             app.manage(conversation_attachment_ipc::AttachmentDropReceipts::default());
             app.manage(scheduler);
@@ -372,6 +374,8 @@ fn main() {
             task_assignment_ipc::project_task_assignments,
             task_assignment_ipc::set_project_task_assignment,
             task_assignment_ipc::catalog_model_ratings,
+            model_catalog_ipc::model_catalog_status,
+            model_catalog_ipc::refresh_model_catalog,
             workflow_ipc::launch::launch_workflow_manual,
             workflow_ipc::conversation_turns::conversation_pipeline_schema,
             workflow_ipc::conversation_turns::enqueue_conversation_pipeline_turn,

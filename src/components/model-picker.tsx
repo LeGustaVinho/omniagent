@@ -46,12 +46,12 @@ function preferredModelOrder(fallback: ModelOrder = "intelligence"): ModelOrder 
 }
 
 function compareModels(left: ModelOption, right: ModelOption, order: ModelOrder) {
-  if (left.rating && right.rating) {
-    const difference = order === "price" ? left.rating.apiReferenceCents - right.rating.apiReferenceCents
-      : right.rating.intelligenceTenths - left.rating.intelligenceTenths;
-    if (difference) return difference;
-  }
-  return Number(Boolean(right.rating)) - Number(Boolean(left.rating)) || left.name.localeCompare(right.name)
+  const leftValue = order === "price" ? left.rating?.apiReferenceCents : left.rating?.intelligenceTenths;
+  const rightValue = order === "price" ? right.rating?.apiReferenceCents : right.rating?.intelligenceTenths;
+  const difference = leftValue != null && rightValue != null
+    ? (order === "price" ? leftValue - rightValue : rightValue - leftValue)
+    : Number(leftValue == null) - Number(rightValue == null);
+  return difference || left.name.localeCompare(right.name)
     || left.selection.provider.localeCompare(right.selection.provider) || left.selection.profileId.localeCompare(right.selection.profileId);
 }
 
@@ -82,14 +82,15 @@ export function ModelRatingMeters({ rating }: { rating: ModelRating | null }) {
     return <span className="text-xs text-muted-foreground">Unrated</span>;
   }
 
-  const intelligence = rating.intelligenceTenths / 10;
+  const intelligence = rating.intelligenceTenths === null ? null : rating.intelligenceTenths / 10;
   return (
     <span className="mt-1 grid gap-1.5 text-muted-foreground">
-      <ScoreMeter label="Intelligence" score={intelligence} displayed={intelligence.toFixed(1)} />
-      <ScoreMeter label="Price score" score={rating.priceScore} displayed={String(rating.priceScore)} price />
-      <span className="text-xs">
+      {intelligence !== null ? <ScoreMeter label="Intelligence" score={intelligence} displayed={intelligence.toFixed(1)} />
+        : <span className="text-xs">Intelligence pending</span>}
+      {rating.priceScore !== null && <ScoreMeter label="Price score" score={rating.priceScore} displayed={String(rating.priceScore)} price />}
+      {rating.apiReferenceCents !== null ? <span className="text-xs">
         API reference {apiPrice.format(rating.apiReferenceCents / 100)} / 1M tokens
-      </span>
+      </span> : <span className="text-xs">API reference price pending</span>}
     </span>
   );
 }
@@ -168,10 +169,11 @@ export function ModelPicker({ label, options, selection, layout = "field", loadi
                 {orderedOptions.map((option) => {
                   const key = modelKey(option.selection);
                   const { detail, label: accessibleName } = optionLabel(option);
+                  const value = order === "price" ? option.rating?.apiReferenceCents : option.rating?.intelligenceTenths;
                   return <DropdownMenu.RadioItem key={key} value={key} {...itemProps(option, () => setInspected(key), accessibleName)}>
                     <ModelCheck /><ModelOptionLabel option={option} detail={detail} />
-                    {combinedCatalog && option.rating && <span className="model-picker-sort-value">{order === "price"
-                      ? apiPrice.format(option.rating.apiReferenceCents / 100) : `${(option.rating.intelligenceTenths / 10).toFixed(1)}/100`}</span>}
+                    {combinedCatalog && value != null && <span className="model-picker-sort-value">{order === "price"
+                      ? apiPrice.format(value / 100) : `${(value / 10).toFixed(1)}/100`}</span>}
                   </DropdownMenu.RadioItem>;
                 })}
               </DropdownMenu.RadioGroup>

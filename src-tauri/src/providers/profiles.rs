@@ -95,6 +95,8 @@ pub struct CliProbe {
 #[serde(rename_all = "camelCase")]
 pub struct DesktopModel {
     pub option: ModelOption,
+    #[serde(skip)]
+    pub(crate) canonical_id: Option<String>,
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
     pub input_modalities: Option<Vec<String>>,
@@ -108,6 +110,8 @@ pub struct DesktopProfile {
     pub version: String,
     pub models: Vec<DesktopModel>,
     pub account_binding: Option<String>,
+    pub(crate) session_model: Option<String>,
+    pub(crate) subscription_auth: bool,
 }
 
 #[derive(Default, Serialize)]
@@ -174,16 +178,53 @@ pub struct DesktopProviderSkills {
     catalog: SkillCatalog,
 }
 
-pub fn desktop_provider_inventory(
-    configured: ConfiguredExecutable,
-) -> Result<DesktopProviderInventory> {
-    let (profile, transport_report) = inspect_desktop_profile(configured, None)?;
-    Ok(DesktopProviderInventory {
+fn project_ratings(profile: &mut DesktopProfile, catalog: &crate::model_catalog::ModelCatalog) {
+    for model in &mut profile.models {
+        let selection = &model.option.selection;
+        let key = model.canonical_id.as_deref().unwrap_or(&selection.model_id);
+        model.option.rating = catalog
+            .lookup(selection.provider, key)
+            .map(|entry| &entry.rating)
+            .filter(|rating| rating.available())
+            .cloned();
+        model.option.catalog_version = catalog.version;
+    }
+}
+
+impl Store {
+    pub async fn rated_desktop_profile(
+        &self,
+        configured: ConfiguredExecutable,
+        model_id: Option<String>,
+    ) -> Result<DesktopProfile> {
+        let mut profile =
+            tokio::task::spawn_blocking(move || desktop_profile(configured, model_id)).await??;
+        project_ratings(&mut profile, &self.active_model_catalog().await?);
+        Ok(profile)
+    }
+
+    pub async fn rated_desktop_inventory(
+        &self,
+        configured: ConfiguredExecutable,
+    ) -> Result<DesktopProviderInventory> {
+        let (mut profile, transport_report) =
+            tokio::task::spawn_blocking(move || inspect_desktop_profile(configured, None))
+                .await??;
+        project_ratings(&mut profile, &self.active_model_catalog().await?);
+        Ok(provider_inventory(profile, transport_report))
+    }
+}
+
+fn provider_inventory(
+    profile: DesktopProfile,
+    transport_report: DesktopCapabilityReport,
+) -> DesktopProviderInventory {
+    DesktopProviderInventory {
         executable: profile.executable,
         version: profile.version,
         models: profile.models,
         transport_report,
-    })
+    }
 }
 
 /// Query the CLI in a neutral directory with no prompt or project customizations.
@@ -285,6 +326,7 @@ fn inspect_desktop_profile(
                         .into_iter()
                         .zip(models)
                         .map(|(option, reported)| {
+                            let canonical_id = reported.canonical_id.clone();
                             let input_modalities = reported.input_modalities.clone();
                             let output_modalities = reported.output_modalities.clone();
                             let (efforts, default_effort) = model_effort_levels(
@@ -294,6 +336,7 @@ fn inspect_desktop_profile(
                             );
                             DesktopModel {
                                 option,
+                                canonical_id,
                                 efforts,
                                 default_effort,
                                 input_modalities,
@@ -306,14 +349,18 @@ fn inspect_desktop_profile(
             }
         },
     )?;
-    let account_binding = match provider {
-        Provider::Codex => account::codex_binding(
+    let (account_binding, subscription_auth) = match provider {
+        Provider::Codex => account::codex_identity(
             |request| DirectWindowsRunner.launch(request),
             &executable,
             &cwd,
         )
         .unwrap_or_default(),
-        _ => check.account_binding,
+        Provider::Claude => {
+            let subscription_auth = check.account_binding.is_some();
+            (check.account_binding, subscription_auth)
+        }
+        Provider::Antigravity => (None, false),
     };
     Ok((
         DesktopProfile {
@@ -321,6 +368,8 @@ fn inspect_desktop_profile(
             version,
             models,
             account_binding,
+            session_model: transport_report.session_model.clone(),
+            subscription_auth,
         },
         transport_report,
     ))

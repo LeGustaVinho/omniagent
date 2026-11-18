@@ -14,6 +14,7 @@ import { CustomizationsSettings } from "@/customizations-panel";
 import { DesktopNotificationSettings, desktopNotificationSetting } from "@/desktop-notification-settings";
 import { openWorkspaceFile } from "@/file-context-actions";
 import { ConversationModelSettings, conversationModelSetting } from "@/model-default-settings";
+import { modelCatalogSetting } from "@/model-catalog-settings";
 import { ProjectWorkModeControls } from "@/project-agile-settings";
 import { ResizablePanel } from "@/panel-resize";
 import { ProjectAttachmentSettings } from "@/provider-settings";
@@ -58,6 +59,7 @@ const pages: readonly Page[] = [
   { id: "appearance", scope: "device", title: "Appearance", icon: Monitor, entries: Object.values(appearanceEntries) },
   { id: "providers", scope: "device", title: "Providers", icon: Bot, entries: [
     { id: "provider-paths", label: "Executable paths", description: "Codex, Claude Code, Gemini, Antigravity, PATH, authentication, CLI protocol and plugin inventory" },
+    modelCatalogSetting,
     { id: "runner", label: "Runners and capabilities", description: "Direct Windows host, Hyper-V guest, sandbox, verified capability profile" },
   ] },
   { id: "capacity", scope: "device", title: "Execution capacity", icon: Cpu, entries: [managedCapacitySetting, desktopNotificationSetting] },

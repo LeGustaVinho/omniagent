@@ -317,3 +317,41 @@ it("opens the backup section from its settings link", () => {
   expect(screen.getByRole("heading", { name: "System" })).toBeTruthy();
   expect(document.activeElement).toBe(screen.getByRole("button", { name: "Create backup" }));
 });
+
+it("refreshes the model catalog from device settings and invalidates live choices", async () => {
+  const initial = { revision: 1, updatedAt: null, checkedAt: null, modelCount: 14, running: false, issues: [], pending: [] };
+  const result = {
+    ...initial, revision: 2, updatedAt: 1794931200, modelCount: 15,
+    pending: [{ id: "gpt-6.2-sol", provider: "codex", name: "GPT-6.2 Sol", sources: 1, price: true, intelligence: false, reused: false }],
+  };
+  let finish!: (status: typeof result) => void;
+  const refresh = new Promise<typeof result>((resolve) => { finish = resolve; });
+  invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "cli_executables": return [];
+      case "desktop_cli_prerequisites": return { git: {}, providers: [] };
+      case "model_catalog_status": return initial;
+      case "refresh_model_catalog": return refresh;
+      default: throw new Error("Unexpected command " + command);
+    }
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["conversation-models", "codex"], []);
+  render(<QueryClientProvider client={client}>
+    <SettingsDialog checkout={null} open initialPage="providers" onOpenChange={unusedAction}
+      openActivity={unusedAction} openChanges={unusedAction} openWorkspace={unusedAction} />
+  </QueryClientProvider>);
+  await screen.findByText("Using the bundled catalog.");
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Update model catalog" }));
+  const updating = await screen.findByRole("button", { name: "Updating model catalog…" }) as HTMLButtonElement;
+  expect(updating.disabled).toBe(true);
+  await user.click(updating);
+  expect(invoke.mock.calls.filter(([name]) => name === "refresh_model_catalog")).toHaveLength(1);
+  finish(result);
+  await screen.findByText(/15 models · Updated/);
+  await user.click(screen.getByText("1 model with pending or earlier data"));
+  expect(screen.getByText(/GPT-6.2 Sol.*Intelligence pending/)).toBeDefined();
+  expect(client.getQueryState(["conversation-models", "codex"])?.isInvalidated).toBe(true);
+});

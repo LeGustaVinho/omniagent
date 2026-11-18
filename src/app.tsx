@@ -6,6 +6,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { CheckoutSelector } from "@/checkout-selector";
 import { fileLinkEvent, type FileLinkTarget } from "@/file-links";
+import { useModelCatalogEvents } from "@/model-catalog-query";
 import "@/launch-workspace.css";
 import { useAppAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
@@ -17,6 +18,7 @@ const noProjectAction = () => undefined;
 
 export function App() {
   useAppAppearance();
+  useModelCatalogEvents();
   const { checkout, selectCheckout } = useWorkspace();
   const [choosing, setChoosing] = useState(false);
   const [restoring, setRestoring] = useState(true);

@@ -16,7 +16,7 @@ use omniagent::{
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
         configuration::InstructionInventory,
-        profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile, desktop_profile},
+        profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile},
         questions::{QuestionOrigin, QuestionReply},
         side::OutputFixture,
     },
@@ -36,10 +36,7 @@ async fn profile(
 ) -> Result<DesktopProfile> {
     let configured = store.configured_executable(provider).await?;
     let model_id = model_id.filter(|_| provider == Provider::Antigravity);
-    Ok(
-        tauri::async_runtime::spawn_blocking(move || desktop_profile(configured, model_id))
-            .await??,
-    )
+    store.rated_desktop_profile(configured, model_id).await
 }
 
 fn ui_error(error: anyhow::Error) -> String {
@@ -218,6 +215,7 @@ pub(crate) async fn selected_scope_with_model_option(
         version,
         models,
         account_binding,
+        ..
     } = profile(store, selection.provider, Some(selection.model_id.clone())).await?;
     let selected = choose_live_model(&models, &selection)?;
     ensure!(

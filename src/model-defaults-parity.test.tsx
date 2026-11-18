@@ -87,6 +87,7 @@ async function chooseAndMeasure(user: ReturnType<typeof userEvent.setup>, label:
   await user.hover(row);
   const ratings = within(await screen.findByLabelText(`Ratings for ${option.name}`));
   const values = option.rating!;
+  if (values.intelligenceTenths === null) throw new Error("Expected a rated model fixture");
   expect(ratings.getByLabelText("Intelligence").getAttribute("value")).toBe(String(values.intelligenceTenths / 10));
   expect(ratings.getByLabelText("Price score").getAttribute("value")).toBe(String(values.priceScore));
   expect(ratings.getByText(`API reference ${price} / 1M tokens`)).toBeTruthy();

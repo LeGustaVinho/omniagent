@@ -258,6 +258,7 @@ async fn codex_managed_conversation_compacts_its_authentic_session_without_rewri
         version,
         account_binding,
         models,
+        ..
     } = profile;
     let model = models
         .into_iter()

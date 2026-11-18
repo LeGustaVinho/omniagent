@@ -6,23 +6,30 @@ use ts_rs::TS;
 use crate::providers::Provider;
 
 pub mod defaults;
+pub mod refresh;
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ModelRating {
-    pub intelligence_tenths: u16,
-    pub api_reference_cents: u16,
-    pub price_score: u8,
+    pub intelligence_tenths: Option<u16>,
+    pub api_reference_cents: Option<u32>,
+    pub price_score: Option<u8>,
 }
 
-#[derive(Debug, Deserialize)]
+impl ModelRating {
+    pub(crate) fn available(&self) -> bool {
+        self.intelligence_tenths.is_some() || self.api_reference_cents.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 struct ModelKey {
     provider: Provider,
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RatedModel {
     #[serde(flatten)]
     canonical: ModelKey,
@@ -33,7 +40,7 @@ pub struct RatedModel {
     aliases: Vec<ModelKey>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelCatalog {
     pub version: u16,
     models: Vec<RatedModel>,
@@ -125,7 +132,11 @@ impl ModelCatalog {
                 name: option.model.name.clone(),
                 selectable: option.model.selectable,
                 unavailable_reason: option.model.unavailable_reason.clone(),
-                rating: option.reference.map(|reference| reference.rating.clone()),
+                rating: option
+                    .reference
+                    .map(|reference| &reference.rating)
+                    .filter(|rating| rating.available())
+                    .cloned(),
                 catalog_version: self.version,
             })
             .collect()
@@ -144,8 +155,8 @@ mod tests {
         assert_eq!(MODEL_CATALOG.models.len(), 14);
         let mut seen = HashSet::new();
         for model in &MODEL_CATALOG.models {
-            assert!(model.rating.intelligence_tenths <= 1000);
-            assert!(model.rating.price_score <= 100);
+            assert!(model.rating.intelligence_tenths.unwrap() <= 1000);
+            assert!(model.rating.price_score.unwrap() <= 100);
             for key in std::iter::once(&model.canonical).chain(&model.aliases) {
                 assert!(seen.insert((key.provider, key.id.as_str())));
             }
@@ -189,17 +200,26 @@ mod tests {
             .map(|model| {
                 (
                     model.name.as_str(),
-                    model.rating.intelligence_tenths,
-                    model.rating.api_reference_cents,
-                    model.rating.price_score,
+                    model.rating.intelligence_tenths.unwrap(),
+                    model.rating.api_reference_cents.unwrap(),
+                    model.rating.price_score.unwrap(),
                 )
             })
             .collect();
         assert_eq!(rows, expected);
         let sol = |id| MODEL_CATALOG.lookup(Provider::Codex, id);
-        assert_eq!(sol("gpt-5.6-sol").unwrap().rating.intelligence_tenths, 537);
-        assert_eq!(sol("gpt-6-sol").unwrap().rating.intelligence_tenths, 525);
-        assert_eq!(sol("gpt-6.1-sol").unwrap().rating.intelligence_tenths, 738);
+        assert_eq!(
+            sol("gpt-5.6-sol").unwrap().rating.intelligence_tenths,
+            Some(537)
+        );
+        assert_eq!(
+            sol("gpt-6-sol").unwrap().rating.intelligence_tenths,
+            Some(525)
+        );
+        assert_eq!(
+            sol("gpt-6.1-sol").unwrap().rating.intelligence_tenths,
+            Some(738)
+        );
         assert!(sol("gpt-6.1-sol-preview").is_none());
     }
 
@@ -231,7 +251,7 @@ mod tests {
             MODEL_CATALOG.project_options(Provider::Antigravity, "workspace-profile", &inventory);
         assert_eq!(projected[0].selection.model_id, "gemini-4-argon-high");
         assert_eq!(projected[0].selection.profile_id, "workspace-profile");
-        assert_eq!(projected[0].rating.as_ref().unwrap().price_score, 65);
+        assert_eq!(projected[0].rating.as_ref().unwrap().price_score, Some(65));
         assert!(!projected[0].selectable);
         assert_eq!(projected[1].rating, None);
     }

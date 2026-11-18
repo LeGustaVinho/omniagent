@@ -81,6 +81,14 @@ pub(super) fn codex_binding(
     executable: &Path,
     cwd: &Path,
 ) -> Result<Option<String>> {
+    Ok(codex_identity(launch, executable, cwd)?.0)
+}
+
+pub(super) fn codex_identity(
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
+    executable: &Path,
+    cwd: &Path,
+) -> Result<(Option<String>, bool)> {
     let args = ["app-server"].map(OsString::from);
     run_probe(
         launch,
@@ -98,7 +106,7 @@ pub(super) fn codex_binding(
             )?;
             let result = response(&process, deadline, 1)?;
             if result.is_null() {
-                return Ok(None);
+                return Ok((None, false));
             }
             bounded_write(
                 &mut process,
@@ -109,7 +117,10 @@ pub(super) fn codex_binding(
                     )?,
                 ],
             )?;
-            codex_response_binding(&response(&process, deadline, 2)?)
+            let account = response(&process, deadline, 2)?;
+            let subscription =
+                account["requiresOpenaiAuth"] == true && account["account"]["type"] == "chatgpt";
+            Ok((codex_response_binding(&account)?, subscription))
         },
     )
 }

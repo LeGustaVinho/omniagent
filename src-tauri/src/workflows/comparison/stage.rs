@@ -14,10 +14,7 @@ use crate::{
     jobs::{PipelineDispatch, insert_workflow_comparison_candidate},
     model_catalog::ModelSelection,
     protection,
-    providers::{
-        SessionMode,
-        profiles::{DESKTOP_PERMISSION_REVISION, desktop_profile},
-    },
+    providers::{SessionMode, profiles::DESKTOP_PERMISSION_REVISION},
     store::Store,
     workflows::{
         ArtifactKind, ArtifactValue, NodeConfiguration, NodeInputs, PinnedNode, WorkflowArtifact,
@@ -484,9 +481,9 @@ impl PendingWorkflowComparison {
         for selection in configuration.selections {
             let configured = store.configured_executable(selection.provider).await?;
             let model_id = selection.model_id.clone();
-            let profile =
-                tokio::task::spawn_blocking(move || desktop_profile(configured, Some(model_id)))
-                    .await??;
+            let profile = store
+                .rated_desktop_profile(configured, Some(model_id))
+                .await?;
             let option = profile
                 .models
                 .into_iter()

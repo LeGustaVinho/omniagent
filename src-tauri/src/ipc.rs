@@ -31,7 +31,7 @@ use omniagent::{
         },
         profiles::{
             CliProbe, ConfiguredExecutable, DesktopProviderInventory, DesktopProviderSkills,
-            desktop_provider_inventory, probe_cli,
+            probe_cli,
         },
     },
     repository::ProjectCheckout,
@@ -607,9 +607,9 @@ pub async fn provider_model_inventory(
         .configured_executable(provider)
         .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))?;
-    tauri::async_runtime::spawn_blocking(move || desktop_provider_inventory(configured))
+    store
+        .rated_desktop_inventory(configured)
         .await
-        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))?
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 

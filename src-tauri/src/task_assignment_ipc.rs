@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use omniagent::{
     diagnostics,
-    model_catalog::{MODEL_CATALOG, ModelRating, ModelSelection},
+    model_catalog::{ModelRating, ModelSelection},
     providers::Provider,
     store::Store,
     tasks::PlannedAssignment,
@@ -73,15 +73,18 @@ pub async fn set_project_task_assignment(
 }
 
 #[tauri::command]
-pub fn catalog_model_ratings(
+pub async fn catalog_model_ratings(
+    store: State<'_, Store>,
     provider: Provider,
     model_ids: Vec<String>,
-) -> BTreeMap<String, ModelRating> {
-    model_ids
+) -> Result<BTreeMap<String, ModelRating>, String> {
+    let catalog = store.active_model_catalog().await.map_err(report)?;
+    Ok(model_ids
         .into_iter()
         .filter_map(|id| {
-            let rating = MODEL_CATALOG.lookup(provider, &id)?.rating.clone();
-            Some((id, rating))
+            let rating = &catalog.lookup(provider, &id)?.rating;
+            (rating.intelligence_tenths.is_some() || rating.api_reference_cents.is_some())
+                .then(|| (id, rating.clone()))
         })
-        .collect()
+        .collect())
 }

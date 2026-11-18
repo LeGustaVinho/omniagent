@@ -1,0 +1,17 @@
+[
+  {"provider":"claude","id":"claude-fable-5-2","name":"Claude Fable 5.2","input":8,"output":40,"scores":[65,173,null,65.15]},
+  {"provider":"claude","id":"claude-opus-5-5","name":"Claude Opus 5.5","input":4,"output":20,"scores":[59,169,1507,65.15]},
+  {"provider":"claude","id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","input":2,"output":10,"scores":[55,167,1473,64.14]},
+  {"provider":"claude","id":"claude-haiku-5-5","name":"Claude Haiku 5.5","input":0.1,"output":0.5,"scores":[36,160,1421,36.36]},
+  {"provider":"antigravity","id":"gemini-4-argon","name":"Gemini 4 Argon","input":2,"output":10,"scores":[50,166,1522,57.58]},
+  {"provider":"antigravity","id":"gemini-4-hydrogen","name":"Gemini 4 Hydrogen","input":1.5,"output":7.5,"scores":[51,null,1490,54.04]},
+  {"provider":"antigravity","id":"gemini-3.8-flash","name":"Gemini 3.8 Flash","input":0.75,"output":3.75,"scores":[31,159,1497,19.7]},
+  {"provider":"antigravity","id":"gemini-3.1-pro","name":"Gemini 3.1 Pro","input":2,"output":12,"scores":[null,156,1487,2.52]},
+  {"provider":"antigravity","id":"gemini-3.5-flash-lite","name":"Gemini 3.5 Flash-Lite","input":0.3,"output":2.5,"scores":[12,null,null,null]},
+  {"provider":"codex","id":"gpt-6-astra","name":"GPT-6 Astra","input":10,"output":50,"scores":[57,169,1474,59.6]},
+  {"provider":"codex","id":"gpt-6.1-sol","name":"GPT-6.1 Sol","input":2,"output":10,"scores":[55,168,1481,55.05]},
+  {"provider":"codex","id":"gpt-6.1-terra","name":"GPT-6.1 Terra","input":1,"output":5,"scores":[51,168,null,49.49]},
+  {"provider":"codex","id":"gpt-6-sol","name":"GPT-6 Sol","input":2,"output":10,"scores":[44,164,1457,44.44]},
+  {"provider":"codex","id":"gpt-6-luna","name":"GPT-6 Luna","input":0.1,"output":0.5,"scores":[28,156,1441,13.64]},
+  {"provider":"codex","id":"gpt-5.6-sol","name":"GPT-5.6 Sol","input":4,"output":20,"scores":[null,163,1485,37.88]}
+]
