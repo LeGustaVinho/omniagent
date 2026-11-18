@@ -49,6 +49,7 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
         const { templateId, version, template } = head;
         return [{ templateId, version, name: template.name, displayLabel: displayLabel.value }];
       }
+      case "workflow_package_catalog": case "list_workflow_packages": return [];
       case "template_display_label": return { templateRevision: revisions[0]?.version.revision, displayLabel };
       case "set_template_display_label": {
         const { label } = input as { label: string | null };
@@ -94,9 +95,9 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
   return userEvent.setup();
 }
 
-it("saves a display label against exact revisions without replacing the template definition", async () => {
+it("saves a display label against exact revisions without replacing the Role definition", async () => {
   const user = setup({ conflict: true });
-  await user.click(await screen.findByText("Template display label"));
+  await user.click(await screen.findByText("Role display label"));
   await user.type(await screen.findByRole("textbox", { name: "Display label" }), "Audit reviewer");
   await user.click(screen.getByRole("button", { name: "Save display label" }));
   await screen.findByRole("button", { name: /Audit reviewer.*Revision 1/ });
@@ -107,12 +108,16 @@ it("saves a display label against exact revisions without replacing the template
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_conversation_template")).toBe(false);
 });
 
-it("saves all template fields with a qualified model and reopens the exact prior revision", async () => {
+it("opens Roles from Library, saves with a qualified model, and reopens the exact prior revision", async () => {
   const user = setup({ workspace: true });
-  await user.click(screen.getByRole("button", { name: "Roles" }));
-  await user.click(screen.getByRole("button", { name: "New conversation template" }));
+  const workspace = within(screen.getByRole("navigation", { name: "Pipelines views" }));
+  expect(workspace.queryByRole("button", { name: "Roles" })).toBeNull();
+  await user.click(workspace.getByRole("button", { name: "Library" }));
+  await user.click(within(screen.getByRole("navigation", { name: "Library views" })).getByRole("button", { name: "Roles" }));
+  expect(workspace.getByRole("button", { name: "Library" }).getAttribute("aria-current")).toBe("page");
+  await user.click(screen.getByRole("button", { name: "New Role" }));
   await user.type(screen.getByRole("textbox", { name: "Name" }), first.name);
-  await user.selectOptions(screen.getByRole("combobox", { name: "Role" }), first.role);
+  await user.selectOptions(screen.getByRole("combobox", { name: "Job role" }), first.role);
   await user.click(await screen.findByRole("button", { name: /^Default CLI and model · / }));
   const row = await screen.findByRole("menuitemradio", { name: option.name });
   await user.hover(row);
@@ -125,12 +130,12 @@ it("saves all template fields with a qualified model and reopens the exact prior
   await user.click(await screen.findByText("Capability matrix"));
   expect(screen.getByText("workspace write · blocked")).toBeTruthy();
   expect(screen.getByRole<HTMLOptionElement>("option", { name: "Approved worktree write (unavailable)" }).disabled).toBe(true);
-  await user.click(screen.getByRole("button", { name: "Save template revision" }));
+  await user.click(screen.getByRole("button", { name: "Save Role revision" }));
   expect(invoke).toHaveBeenCalledWith("save_conversation_template", { ...scope, base: null, template: first });
-  await screen.findByRole("heading", { name: "Edit conversation template" });
+  await screen.findByRole("heading", { name: "Edit Role" });
   await user.clear(screen.getByRole("textbox", { name: "Instructions" }));
   await user.type(screen.getByRole("textbox", { name: "Instructions" }), "Read the later evidence.");
-  await user.click(screen.getByRole("button", { name: "Save template revision" }));
+  await user.click(screen.getByRole("button", { name: "Save Role revision" }));
   expect(invoke).toHaveBeenCalledWith("save_conversation_template", {
     ...scope, base: { templateId: "stable-template", expectedRevision: firstVersion.revision },
     template: { ...first, instructions: "Read the later evidence." },
@@ -139,7 +144,7 @@ it("saves all template fields with a qualified model and reopens the exact prior
   await user.selectOptions(screen.getByRole("combobox", { name: "Saved revision" }), firstVersion.revision);
   await screen.findByRole("heading", { name: "Revision 1" });
   expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Instructions" }).value).toBe(first.instructions);
-  expect(screen.queryByRole("button", { name: "Save template revision" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Save Role revision" })).toBeNull();
 });
 
 it("keeps competing local edits while offering to open the newly saved head", async () => {
@@ -147,12 +152,12 @@ it("keeps competing local edits while offering to open the newly saved head", as
   const instructions = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Instructions" });
   await user.clear(instructions);
   await user.type(instructions, "Local draft instructions.");
-  const save = screen.getByRole<HTMLButtonElement>("button", { name: "Save template revision" });
+  const save = screen.getByRole<HTMLButtonElement>("button", { name: "Save Role revision" });
   await waitFor(() => expect(save.disabled).toBe(false));
   await user.click(save);
   expect(await screen.findByText("Revision 2 was saved elsewhere. Your edits are still here.")).toBeTruthy();
   expect(instructions.value).toBe("Local draft instructions.");
   await user.click(screen.getByRole("button", { name: "Discard edits and open latest revision" }));
   await waitFor(() => expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Instructions" }).value).toBe("Edited in a different window."));
-  expect(screen.getByRole("heading", { name: "Edit conversation template" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Edit Role" })).toBeTruthy();
 });

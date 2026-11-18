@@ -112,14 +112,14 @@ it("persists the same shared model through template, stage, and ordered comparis
     }
   });
   let view = mount(<ConversationTemplateEditor checkout={props.checkout} />);
-  await user.click(await screen.findByRole("button", { name: "New conversation template" }));
+  await user.click(await screen.findByRole("button", { name: "New Role" }));
   await user.type(screen.getByRole("textbox", { name: "Name" }), "Saved review role");
   await user.type(screen.getByRole("textbox", { name: "Instructions" }), "Review this exact input");
   await user.type(screen.getByRole("textbox", { name: "Completion contract" }), "Record findings");
   await user.click(await screen.findByRole("button", { name: /^Default CLI and model ·/ }));
   await user.click(await assertPickerMeters(user, "menuitemradio"));
-  await user.click(await screen.findByRole("button", { name: "Save template revision" }));
-  await screen.findByRole("heading", { name: "Edit conversation template" });
+  await user.click(await screen.findByRole("button", { name: "Save Role revision" }));
+  await screen.findByRole("heading", { name: "Edit Role" });
   expect(template?.model).toEqual(shared.selection);
   view.unmount();
 

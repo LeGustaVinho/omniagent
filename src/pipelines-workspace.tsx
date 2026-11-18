@@ -30,20 +30,29 @@ import {
 import type { PipelineRun, Stage, StageEdge, StageStatus, WorkflowRevision } from "./pipelines-model";
 import { ComparisonView, PendingPipeline, PipelineMaintenance, RoleEditor, DraftRevisionHistory } from "./pipelines-secondary";
 
-const panels = ["Builder", "Runs", "Roles", "Library", "Compare", "Maintenance"] as const;
+const panels = ["Builder", "Runs", "Library", "Compare", "Maintenance"] as const;
 type View = typeof panels[number];
 const previewTabs = panels.map((id) => ({ id, label: id }));
 const productionTabs = [
   { id: "drafts", label: "Builder" },
   { id: "runs", label: "Runs" },
-  { id: "templates", label: "Roles" },
   { id: "library", label: "Library" },
   { id: "compare", label: "Compare models" },
   { id: "automations", label: "Automation rules" },
   { id: "maintenance", label: "Maintenance" },
 ] as const;
 type ProductionView = (typeof productionTabs)[number]["id"];
+type LibraryView = "library" | "library:roles";
 type RenderNode = Node<Stage & { status?: StageStatus; inputSide?: Position; outputSide?: Position }, "stage">;
+
+function LibraryNavigation({ active, onSelect }: { active: LibraryView; onSelect: (view: LibraryView) => void }) {
+  return <nav className="workflow-library-navigation" aria-label="Library views">
+    <Button type="button" variant="ghost" aria-current={active === "library" ? "page" : undefined}
+      onClick={() => onSelect("library")}>Artifacts</Button>
+    <Button type="button" variant="ghost" aria-current={active === "library:roles" ? "page" : undefined}
+      onClick={() => onSelect("library:roles")}>Roles</Button>
+  </nav>;
+}
 
 function StageCard({ id, data, selected }: NodeProps<RenderNode>) {
   const update = useUpdateNodeInternals();
@@ -71,9 +80,10 @@ function handleSide(node: Pick<Node, "position">, other: Pick<Node, "position"> 
   return y < 0 ? Position.Top : Position.Bottom;
 }
 
-const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles", builder: "Builder", library: "Library" };
+const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", builder: "Builder", library: "Library" };
+const isRolesTarget = (target?: string) => target === "library:roles" || target === "templates" || target === "roles";
 
-function productionRoute(target = ""): { view: ProductionView; draftId?: string; runId?: string; runFocus?: WorkflowExecutionFocus } {
+function productionRoute(target = ""): { view: ProductionView; libraryView?: LibraryView; draftId?: string; runId?: string; runFocus?: WorkflowExecutionFocus } {
   if (target.startsWith("run:")) {
     const [runId, search] = target.slice("run:".length).split("?", 2);
     const params = new URLSearchParams(search);
@@ -82,6 +92,7 @@ function productionRoute(target = ""): { view: ProductionView; draftId?: string;
   }
   if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
   if (target.startsWith("compare-note:")) return { view: "compare" };
+  if (isRolesTarget(target)) return { view: "library", libraryView: "library:roles" };
   const tab = productionTabs.find(({ id }) => id === target);
   if (tab) return { view: tab.id };
   if (!target || target === "builder" || target === "delivery") return { view: "drafts" };
@@ -226,22 +237,26 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
   useEffect(() => {
     setHandoff((current) => current && workflowRunTarget(current.runId) === props.target ? current : undefined);
   }, [props.target]);
-  const { view, draftId, runId, runFocus } = productionRoute(props.target);
+  const { view, libraryView = "library", draftId, runId, runFocus } = productionRoute(props.target);
   return <PipelineWorkspaceFrame>
     <PipelineTabs views={productionTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
-      {view === "templates" ? <ConversationTemplateEditor checkout={props.checkout} openWorkspace={props.openWorkspace} />
-        : view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} onUseInPipeline={(destination) => {
-          setHandoff(destination);
-          props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
-        }} />
-          : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
-          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus}
-            comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
-          : view === "library" ? <WorkflowLibrary projectId={props.checkout.projectId} openWorkspace={props.openWorkspace} />
-          : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
-          : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
-            : <ProjectPipelineDrafts {...props} />}
+      {view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} onUseInPipeline={(destination) => {
+        setHandoff(destination);
+        props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
+      }} />
+        : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
+        : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus}
+          comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
+        : view === "library" ? <>
+          <LibraryNavigation active={libraryView} onSelect={(target) => props.openWorkspace("pipelines", target)} />
+          {libraryView === "library:roles"
+            ? <ConversationTemplateEditor checkout={props.checkout} openWorkspace={props.openWorkspace} />
+            : <WorkflowLibrary projectId={props.checkout.projectId} openWorkspace={props.openWorkspace} />}
+        </>
+        : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
+        : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
+          : <ProjectPipelineDrafts {...props} />}
     </div>
   </PipelineWorkspaceFrame>;
 }
@@ -250,6 +265,7 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
   const { simulation, target, startSimulation } = props;
   const git = useGitSimulation();
   const [view, setView] = useState<View>("Builder");
+  const [libraryView, setLibraryView] = useState<LibraryView>("library");
   const [draft, setDraft] = useState<WorkflowRevision | null>({ label: "Untitled pipeline", revision: 1, nodes: [], edges: [], roles: [] });
   const [revisions, setRevisions] = useState<WorkflowRevision[]>([]);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
@@ -282,7 +298,13 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
   }, []);
 
   useEffect(() => {
-    if (target && viewTargets[target]) setView(viewTargets[target]);
+    if (isRolesTarget(target)) {
+      setView("Library");
+      setLibraryView("library:roles");
+    } else if (target && viewTargets[target]) {
+      setView(viewTargets[target]);
+      if (target === "library") setLibraryView("library");
+    }
   }, [target]);
 
   useEffect(() => {
@@ -485,23 +507,23 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
             ) : <p className="pipeline-note">Stage properties appear here when a workflow is open.</p>}
           </>} />}
       </div>
-      <div className="pipeline-view pipeline-view-content" hidden={view !== "Roles"}>
-        <PipelineRolesHeading />
-        {draft ? <div className="pipeline-stack">
-          <div className="pipeline-actions"><Button variant="outline" onClick={() => {
-            setDraft({ label: "Untitled workflow", revision: revisions.at(-1)?.revision ?? draft.revision, nodes: [], edges: [], roles: draft.roles });
-            setStatus("New pipeline draft.");
-            setView("Builder");
-          }}><Plus size={15} /> New draft</Button><Button variant="outline" onClick={save}><Save size={15} /> Save revision</Button></div>
-          <DraftRevisionHistory revisions={revisions} onLoad={(revision) => { setDraft(revision); setSelectedId(revision.nodes[0]?.id ?? ""); setView("Builder"); setStatus("Opened saved revision " + revision.revision + "."); }} />
-          <RoleEditor roles={draft.roles} onChange={(roles) => setDraft({ ...draft, roles })} />
-        </div> : <PendingPipeline label="No roles" onSimulate={simulate} />}
+      <div className="pipeline-view" hidden={view !== "Library"}>
+        <LibraryNavigation active={libraryView} onSelect={setLibraryView} />
+        {libraryView === "library" ? <PipelineLibrary /> : <div className="pipeline-view-content pipeline-stack">
+          <PipelineRolesHeading />
+          {draft ? <div className="pipeline-stack">
+            <div className="pipeline-actions"><Button variant="outline" onClick={() => {
+              setDraft({ label: "Untitled workflow", revision: revisions.at(-1)?.revision ?? draft.revision, nodes: [], edges: [], roles: draft.roles });
+              setStatus("New pipeline draft.");
+              setView("Builder");
+            }}><Plus size={15} /> New draft</Button><Button variant="outline" onClick={save}><Save size={15} /> Save revision</Button></div>
+            <DraftRevisionHistory revisions={revisions} onLoad={(revision) => { setDraft(revision); setSelectedId(revision.nodes[0]?.id ?? ""); setView("Builder"); setStatus("Opened saved revision " + revision.revision + "."); }} />
+            <RoleEditor roles={draft.roles} onChange={(roles) => setDraft({ ...draft, roles })} />
+          </div> : <PendingPipeline label="No roles" onSimulate={simulate} />}
+        </div>}
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Compare"}>
         <ComparisonView simulated={Boolean(simulation)} onSimulate={simulate} onUse={(ids) => { setDraft((document) => document && { ...document, comparisonRuns: ids }); setView("Builder"); setStatus("Selected comparison responses linked to the workflow draft."); }} />
-      </div>
-      <div className="pipeline-view pipeline-view-content" hidden={view !== "Library"}>
-        <PipelineLibrary />
       </div>
       <div className="pipeline-view" hidden={view !== "Maintenance"}>
         <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />

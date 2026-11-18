@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { GitSimulationProvider } from "@/git-simulation";
@@ -31,6 +31,7 @@ it("opens a clean simulation canvas without any starter nodes or templates", () 
   expect(screen.getByRole("textbox", { name: "Pipeline name" })).toHaveProperty("value", "Untitled pipeline");
   expect(screen.getByRole("region", { name: "Simulation graph canvas" })).toBeTruthy();
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "Run pipeline" }).disabled).toBe(true);
-  fireEvent.click(screen.getByRole("button", { name: "Roles" }));
+  fireEvent.click(screen.getByRole("button", { name: "Library" }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Library views" })).getByRole("button", { name: "Roles" }));
   expect(screen.queryByText("Saved templates")).toBeNull();
 });

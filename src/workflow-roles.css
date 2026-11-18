@@ -1,0 +1,102 @@
+.workflow-library-navigation {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.5rem 1.25rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.workflow-library-navigation button {
+  height: 1.9rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.workflow-library-navigation button[aria-current="page"] {
+  background: color-mix(in srgb, var(--primary) 13%, var(--background));
+  color: var(--foreground);
+}
+
+.workflow-roles-toolbar,
+.workflow-role-tools,
+.workflow-role-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.workflow-roles-toolbar { justify-content: space-between; }
+.workflow-roles-toolbar .pipeline-section-heading > svg {
+  order: -1;
+  width: 2.1rem;
+  height: 2.1rem;
+  padding: 0.38rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--muted);
+  color: var(--primary);
+}
+
+.workflow-roles-layout {
+  display: grid;
+  grid-template-columns: minmax(11rem, 15rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.workflow-roles-list .pipeline-select-list { margin-block-start: 0; }
+.workflow-roles-list .pipeline-select-item { border: 1px solid transparent; }
+.workflow-roles-list .pipeline-select-item[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--primary) 36%, var(--border));
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+}
+
+.workflow-role-icon { flex: none; color: var(--muted-foreground); }
+.workflow-roles-list [aria-pressed="true"] .workflow-role-icon { color: var(--primary); }
+
+.workflow-roles-search { position: relative; }
+.workflow-roles-search svg {
+  position: absolute;
+  inset-inline-start: 0.55rem;
+  inset-block-start: 50%;
+  translate: 0 -50%;
+  pointer-events: none;
+  color: var(--muted-foreground);
+}
+.workflow-roles-list .workflow-roles-search input[type="search"] { width: 100%; padding-inline-start: 1.9rem; }
+
+.workflow-role-details { gap: 0.75rem; }
+.workflow-role-tools { justify-content: space-between; align-items: end; }
+.workflow-role-tools label { flex: 0 1 13rem; }
+.workflow-role-tools > button:only-child { margin-inline-start: auto; }
+.workflow-role-form { gap: 0.7rem; }
+.workflow-role-form h3 { font-size: 0.95rem; font-weight: 630; }
+.workflow-role-form .workflow-role-fields { min-width: 0; border: 0; padding: 0; gap: 0.65rem; }
+.workflow-role-group { padding: 0.8rem; gap: 0.7rem; }
+.workflow-role-group h4 { font-size: 0.75rem; font-weight: 630; }
+
+.workflow-role-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.workflow-role-footer { justify-content: end; }
+
+@container pipelines (width < 720px) {
+  .workflow-roles-layout { grid-template-columns: minmax(0, 1fr); }
+  .workflow-library-navigation { padding-inline: 0.85rem; }
+}
+
+@container pipelines (width < 480px) {
+  .workflow-role-pair { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (forced-colors: active) {
+  .workflow-library-navigation button[aria-current="page"],
+  .workflow-roles-list .pipeline-select-item[aria-pressed="true"] { outline: 2px solid Highlight; }
+}
