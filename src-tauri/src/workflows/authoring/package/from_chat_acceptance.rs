@@ -242,6 +242,138 @@ fn artifact<'a>(
 }
 
 #[tokio::test]
+async fn standalone_agent_submits_a_typed_pipeline_and_its_library_artifacts() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let store = Store::open(temporary.path().join("standalone-authoring.sqlite"))?;
+    let repo = approved_delivery_repository(&store, temporary.path()).await?;
+    let project = &repo.project_id;
+    let checkout = Path::new(&repo.checkout_root);
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "standalone-fixture".into(),
+        account_binding: None,
+        executable: checkout.join("codex.exe"),
+        checkout: checkout.into(),
+        cli_version: "fixture".into(),
+        runner: "standalone-fixture".into(),
+        permission_revision: "fixture-read-only".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some("author-model".into()),
+        effort: None,
+    };
+    let brief = "Build a typed Pipeline with a Function Node, Node Prefab, Role, and Schema.";
+    let initial = store
+        .start_workflow_editor_authoring(
+            project.clone(),
+            repo.checkout_id.clone(),
+            scope.clone(),
+            None,
+            brief.into(),
+            Some(WorkflowAuthoringOutput::Package),
+        )
+        .await?;
+    assert!(initial.conversation_id.is_none());
+    assert!(initial.package.members.is_empty());
+    let (bridge, run) = start_dispatch(&store, &scope, &initial, brief).await?;
+    let definitions = invoke_test_mcp_tool(
+        &bridge,
+        "read_authoring_catalog",
+        json!({"view":"node_definitions","kind":"typed_start"}),
+    )
+    .await?;
+    assert_eq!(
+        definitions["result"]["structuredContent"]["result"]["items"][0]["kind"],
+        "typed_start"
+    );
+
+    let reference = |key| json!({"source":"draft","key":key});
+    let start = |configuration| json!({"id":"start","kind":"start","configuration":configuration});
+    let end = json!({"id":"end","kind":"end","configuration":{"kind":"end"}});
+    let member = |key, name, body, references| {
+        json!({
+            "key":key,"name":name,"body":body,"references":references,
+        })
+    };
+    let members: Vec<PackageMember> = serde_json::from_value(json!([
+        member(
+            "schema",
+            "Reply Schema",
+            json!({
+                "kind":"schema","fields":[{"name":"reply","type":"string","required":true}]
+            }),
+            json!({})
+        ),
+        member(
+            "role",
+            "Reply Role",
+            json!({"kind":"role","template":{
+                "name":"Reply Role","role":"agent","model":{"provider":"codex","profileId":"standalone-fixture","modelId":"author-model"},
+                "instructions":"Write one reply.","toolScope":"read_only","completionContract":"Return the reply.","reviewPolicy":"independent"
+            }}),
+            json!({})
+        ),
+        member(
+            "prefab",
+            "Reply Prefab",
+            json!({
+                "kind":"prompt","prompt":{"text":"Review {{input.reply}}","executor":"agent","schemaContract":true,"nodePrefab":true}
+            }),
+            json!({"role": reference("role"),"input_schema":reference("schema"),"output_schema":reference("schema")})
+        ),
+        member(
+            "function",
+            "Reply Function",
+            json!({
+                "kind":"subflow",
+                "graph":{"name":"Reply Function","nodes":[
+                    start(json!({"kind":"subflow_entry","outputs":[
+                        {"name":"ready","value":{"kind":"control"}},
+                        {"name":"inputs","value":{"kind":"data","artifact":"json_object"}}
+                    ]})),
+                    {"id":"reply","kind":"subflow","configuration":{"kind":"none"}}, end
+                ],"wires":[
+                    wire(("start","ready"),("reply","ready")), wire(("start","inputs"),("reply","input")),
+                    wire(("reply","completed"),("end","ready")), wire(("reply","result"),("end","result"))
+                ]},
+                "inputs":{"ready":endpoint("start","ready"),"input":endpoint("start","inputs")},
+                "outputs":{"completed":endpoint("end","completed"),"result":endpoint("end","result")}
+            }),
+            json!({"start:schema":reference("schema"),"reply":reference("prefab"),"end:schema":reference("schema")})
+        ),
+        member(
+            "pipeline",
+            "Reply Pipeline",
+            json!({
+                "kind":"pipeline","graph":{"name":"Reply Pipeline","nodes":[
+                    {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+                    {"id":"reply","kind":"subflow","configuration":{"kind":"none"}}, end
+                ],"wires":[
+                    wire(("start","start"),("reply","ready")), wire(("start","inputs"),("reply","input")),
+                    wire(("reply","completed"),("end","ready")), wire(("reply","result"),("end","result"))
+                ]}
+            }),
+            json!({"start:schema":reference("schema"),"reply":reference("function"),"end:schema":reference("schema")})
+        )
+    ]))?;
+    let submitted =
+        submit_for_review(&bridge, &initial.revision, "Reply workflow", &members).await?;
+    store
+        .finish_agent_attempt(run, RunStatus::Succeeded, None)
+        .await?;
+    drop(bridge);
+    let authored = store.workflow_package(project.clone(), initial.id).await?;
+    assert_eq!(authored.revision, submitted);
+    assert_eq!(authored.package.members, members);
+    assert!(authored.publication.is_none());
+    assert!(authored.conversation_id.is_none());
+    assert!(store.list_conversations(repo.checkout_id).await?.is_empty());
+    let published = publish(&store, project, authored).await?;
+    assert_eq!(published.members.len(), 5);
+    assert!(artifact(&published, "prefab")?.prompt_expansion.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn chat_authorship_editor_changes_and_revision_publish_exact_project_and_library_references()
 -> Result<()> {
     let temporary = tempfile::tempdir()?;

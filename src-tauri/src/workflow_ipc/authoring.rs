@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
-    PackageArtifactVersion, PromptCard, PromptSuggestionStatus, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
-    WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome,
-    WorkflowPackageSummary, WorkflowSimulation, WorkflowSimulationScenario,
+    PackageArtifactVersion, PromptCard, PromptSuggestionStatus, PublishedPackageArtifact,
+    WorkflowAuthoringOutput, WorkflowPackage, WorkflowPackageCatalogEntry, WorkflowPackageDraft,
+    WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
+    WorkflowSimulation, WorkflowSimulationScenario,
     derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
     exchange::{ExchangeBinding, WorkflowExchange, WorkflowExchangePreview},
 };
@@ -316,6 +317,7 @@ pub async fn start_workflow_editor_authoring(
     effort: Option<String>,
     base: Option<PackageArtifactVersion>,
     brief: String,
+    output: Option<WorkflowAuthoringOutput>,
 ) -> Result<WorkflowPackageDraft, String> {
     async {
         anyhow::ensure!(
@@ -331,7 +333,7 @@ pub async fn start_workflow_editor_authoring(
         )
         .await?;
         store
-            .start_workflow_editor_authoring(project_id, checkout_id, scope, base, brief)
+            .start_workflow_editor_authoring(project_id, checkout_id, scope, base, brief, output)
             .await
     }
     .await

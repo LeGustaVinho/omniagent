@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::workflows::{NodeInstance, Wire};
+use crate::workflows::{BuiltinNode, NodeInstance, Wire};
 
 use super::*;
 
@@ -17,6 +17,11 @@ pub(crate) enum ReadCatalog {
         offset: usize,
     },
     DraftNodeDefinitions {
+        #[serde(default)]
+        offset: usize,
+    },
+    NodeDefinitions {
+        kind: Option<BuiltinNode>,
         #[serde(default)]
         offset: usize,
     },

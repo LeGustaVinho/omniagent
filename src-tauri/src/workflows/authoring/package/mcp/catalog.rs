@@ -34,6 +34,13 @@ pub(super) fn read(
                 offset,
             )?
         }
+        ReadCatalog::NodeDefinitions { kind, offset } => page(
+            builtin_registry()
+                .into_iter()
+                .filter(|definition| kind.is_none_or(|kind| definition.kind == kind))
+                .map(|definition| json!(definition)),
+            offset,
+        )?,
         ReadCatalog::Published { offset } => published_page(db, &session.project, offset)?,
         ReadCatalog::DraftMember {
             key,

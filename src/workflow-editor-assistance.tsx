@@ -48,7 +48,7 @@ function EditorAssistanceDialog({ projectId, checkoutId, artifact, openWorkspace
   const selection = availableModelSelection(models.options, selected);
   const model = models.models.find(({ option }) => sameModelSelection(option.selection, selection));
   const request = useMutation({
-    mutationFn: () => invoke<{ id: string; conversationId: string }>("start_workflow_editor_authoring", {
+    mutationFn: () => invoke<{ id: string }>("start_workflow_editor_authoring", {
       projectId, checkoutId, selection, effort: model?.efforts.includes(effort) ? effort : null,
       base: artifact?.version ?? null, brief: brief.trim(),
     }),
@@ -56,7 +56,6 @@ function EditorAssistanceDialog({ projectId, checkoutId, artifact, openWorkspace
     onError: () => onBusy(false),
     onSuccess: (draft) => {
       onBusy(false);
-      void client.invalidateQueries({ queryKey: ["conversations"] });
       void client.invalidateQueries({ queryKey: ["workflow-packages", projectId] });
       onDone();
       openWorkspace("pipelines", `authoring:package:${draft.id}`);
@@ -71,7 +70,7 @@ function EditorAssistanceDialog({ projectId, checkoutId, artifact, openWorkspace
     <Dialog.Overlay className="conv-dialog-scrim" />
     <Dialog.Content className="conv-dialog">
       <Dialog.Title>Assist with AI</Dialog.Title>
-      <Dialog.Description>Start an authoring request in a linked project conversation.</Dialog.Description>
+      <Dialog.Description>Ask Codex or Claude to prepare a draft in this worktree for your review.</Dialog.Description>
       {artifact && <div className="break-all">
         <strong>{artifact.name}</strong> · {artifact.version.kind.replaceAll("_", " ")}
         <p>Base revision <code>{artifact.version.revision}</code></p>

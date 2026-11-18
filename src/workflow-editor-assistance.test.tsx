@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
 import PipelinesWorkspace from "@/pipelines-workspace";
-import { BuilderAuthoring, PipelineAuthoringEditor } from "@/workflow-authoring";
+import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
 import type { WorkflowPublication } from "@/workflow-publication";
 import { exampleCheckout } from "@/workbench-contract";
@@ -22,7 +22,7 @@ const option: ModelOption = { selection, name: "Qualified Claude", selectable: t
 const checkout = exampleCheckout;
 const args = { projectId: checkout.projectId, checkoutId: checkout.checkoutId, selection, effort: "high", brief: "Preserve existing references." };
 const result = {
-  id: "linked-draft", revision: "draft-revision", conversationId: "editor-source-chat", publication: null,
+  id: "agent-draft", revision: "draft-revision", conversationId: null, publication: null,
   package: { name: "Editor package", members: [] }, request: { state: "queued", runId: null, jobId: "editor-job", diagnostic: null },
 };
 
@@ -56,7 +56,7 @@ async function submit(user: ReturnType<typeof userEvent.setup>, revision: string
   await user.click(dialog.getByRole("button", { name: "Start authoring request" }));
 }
 
-it("uses the role revision selected in the live editor and links the resulting draft and chat in both directions", async () => {
+it("uses the selected Role revision and exposes the queued authoring job from the standalone draft", async () => {
   const current = { revision: "latest-role", ordinal: 2, baseRevision: "older-role" };
   const older = { revision: "older-role", ordinal: 1, baseRevision: null };
   const templateId = "saved-role";
@@ -69,12 +69,7 @@ it("uses the role revision selected in the live editor and links the resulting d
           completionContract: "Finish review", reviewPolicy: "human_approval" } } };
       case "conversation_template_profile": return { cliVersion: "fixture", transport: "claude", toolScopes: [], capabilities: [] };
       case "inspect_workflow_package": return result;
-      case "list_conversations": return [{ id: result.conversationId, checkoutId: checkout.checkoutId, title: "Editor source" }];
-      case "workflow_authoring_bases": case "conversation_workflow_authoring": return [];
-      case "list_workflow_packages": {
-        expect(input).toEqual({ projectId: checkout.projectId, conversationId: result.conversationId });
-        return [{ id: result.id, revision: result.revision, name: result.package.name, memberCount: 0, standalonePipeline: true, published: false }];
-      }
+      case "workflow_package_catalog": case "list_workflow_packages": return [];
       default: throw Error(command);
     }
   });
@@ -89,17 +84,10 @@ it("uses the role revision selected in the live editor and links the resulting d
   editor.unmount();
   const draft = mount(<WorkflowPackageEditor {...props} draftId={result.id} />);
   await user.click(await screen.findByRole("button", { name: "Draft artifacts" }));
-  await user.click(await screen.findByRole("button", { name: "Open source conversation" }));
-  expect(props.openWorkspace).toHaveBeenCalledWith("conversations", result.conversationId);
+  expect(screen.queryByRole("button", { name: "Open source conversation" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Open queued authoring job" }));
   expect(props.openQueueJob).toHaveBeenCalledWith(result.request.jobId);
   draft.unmount();
-  mount(<BuilderAuthoring checkout={checkout} openWorkspace={props.openWorkspace} />);
-  await user.click(screen.getByRole("button", { name: "Create or edit with AI" }));
-  await user.selectOptions(screen.getByRole("combobox", { name: "Source conversation" }), await screen.findByRole("option", { name: "Editor source" }));
-  props.openWorkspace.mockClear();
-  await user.click(await screen.findByRole("button", { name: "Open linked visual draft" }));
-  expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:${result.id}`);
 });
 
 it("preserves selected revisions and omits legacy presets from published artifact choices", async () => {

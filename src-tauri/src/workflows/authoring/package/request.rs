@@ -20,6 +20,44 @@ pub(super) struct PackageRequest {
     structured_mcp: bool,
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAuthoringOutput {
+    Pipeline,
+    NodePrefab,
+    Function,
+    Role,
+    Schema,
+    Package,
+}
+
+impl WorkflowAuthoringOutput {
+    fn matches(self, body: &PackageArtifactBody) -> bool {
+        match (self, body) {
+            (Self::Package, _)
+            | (Self::Pipeline, PackageArtifactBody::Pipeline { .. })
+            | (Self::Function, PackageArtifactBody::Subflow { .. })
+            | (Self::Role, PackageArtifactBody::Role { .. })
+            | (Self::Schema, PackageArtifactBody::Schema { .. }) => true,
+            (Self::NodePrefab, PackageArtifactBody::Prompt { prompt }) => {
+                prompt.schema_contract && prompt.node_prefab
+            }
+            _ => false,
+        }
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::Pipeline => "The requested primary artifact is a Pipeline.",
+            Self::NodePrefab => "The requested primary artifact is a typed Node Prefab.",
+            Self::Function => "The requested primary artifact is a Function Node.",
+            Self::Role => "The requested primary artifact is a Role.",
+            Self::Schema => "The requested primary artifact is a Schema.",
+            Self::Package => "Compose the related artifacts requested by the user in one package.",
+        }
+    }
+}
+
 impl Store {
     pub async fn start_workflow_package_authoring(
         &self,
@@ -49,7 +87,7 @@ impl Store {
                         members: selected.into_iter().collect(),
                     },
                 )?;
-                let queued = enqueue(&tx, &project, &checkout, selected, scope, &brief)?;
+                let queued = enqueue(&tx, &project, &checkout, selected, scope, &brief, None)?;
                 tx.commit()?;
                 Ok(queued)
             })
@@ -65,31 +103,32 @@ impl Store {
         scope: SessionScope,
         base: Option<PackageArtifactVersion>,
         brief: String,
+        output: Option<WorkflowAuthoringOutput>,
     ) -> Result<WorkflowPackageDraft> {
         let draft = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let member = selected_base_member(&tx, &project, base)?;
+                ensure!(
+                    member.as_ref().is_none_or(
+                        |member| output.is_none_or(|output| output.matches(&member.body))
+                    ),
+                    "The selected base does not match the authoring output"
+                );
                 let name = member
                     .as_ref()
                     .map(|member| member.name.clone())
                     .unwrap_or_else(|| "Workflow authoring".into());
-                let conversation = crate::conversations::insert_conversation(
-                    &tx,
-                    checkout.clone(),
-                    name.clone(),
-                    false,
-                )?;
                 let draft = create_draft(
                     &tx,
                     &project,
-                    Some(conversation.id),
+                    None,
                     WorkflowPackage {
                         name,
                         members: member.into_iter().collect(),
                     },
                 )?;
-                let queued = enqueue(&tx, &project, &checkout, draft, scope, &brief)?;
+                let queued = enqueue(&tx, &project, &checkout, draft, scope, &brief, output)?;
                 tx.commit()?;
                 Ok(queued)
             })
@@ -112,7 +151,7 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let selected = load_draft(&tx, &project, &draft)?;
                 reconcile(&tx, &project, &selected)?;
-                let mut selected = load_draft(&tx, &project, &draft)?;
+                let selected = load_draft(&tx, &project, &draft)?;
                 ensure!(
                     selected.publication.is_none(),
                     "Create a new draft to revise a published package"
@@ -130,20 +169,7 @@ impl Store {
                         .is_some_and(WorkflowPackageRequest::pending),
                     "Wait for the current package authoring request"
                 );
-                if selected.conversation_id.is_none() {
-                    let conversation = crate::conversations::insert_conversation(
-                        &tx,
-                        checkout.clone(),
-                        selected.package.name.clone(),
-                        false,
-                    )?;
-                    tx.execute(
-                        "UPDATE workflow_package_drafts SET conversation_id = ?2 WHERE id = ?1",
-                        params![selected.id, conversation.id],
-                    )?;
-                    selected.conversation_id = Some(conversation.id);
-                }
-                let result = enqueue(&tx, &project, &checkout, selected, scope, &request)?;
+                let result = enqueue(&tx, &project, &checkout, selected, scope, &request, None)?;
                 tx.commit()?;
                 Ok(result)
             })
@@ -185,6 +211,7 @@ fn enqueue(
     selected: WorkflowPackageDraft,
     scope: SessionScope,
     request: &str,
+    output: Option<WorkflowAuthoringOutput>,
 ) -> Result<WorkflowPackageDraft> {
     let request = request.trim();
     ensure!(
@@ -208,21 +235,37 @@ fn enqueue(
         "The authoring checkout changed"
     );
     let id = new_id();
+    let output_instruction = output.map_or("", WorkflowAuthoringOutput::instruction);
+    let role_model = serde_json::json!({
+        "provider": scope.provider, "profileId": scope.profile_id, "modelId": scope.model
+    });
     let prompt = format!(
         r#"Propose a reviewed OmniAgent artifact package using the scoped OmniAgent MCP tools.
-Read read_authoring_catalog with view draft for the working revision. Use draft_node_definitions for the definitions pinned to this draft,
-published for visible exact versions, and draft_member to inspect a saved member.
+Read read_authoring_catalog with view draft for the working revision. Use node_definitions with an optional kind for available node definitions
+and ports, draft_node_definitions for the pins in this draft, published for visible exact versions, and draft_member to inspect a saved member.
 Send one or more typed edits to apply_authoring_operations with a stable requestId and the last revision.
 Submit the final revision with submit_authoring_for_review and a new requestId, then stop editing.
-Your chat response is a synopsis for the user. The reviewed package comes from the explicit tool submission.
+Your final response is a synopsis for the user. The reviewed package comes from the explicit tool submission.
 Each member uses key, name, destination (project or library), base (null for a new artifact), body, and optional references.
 Keep existing base objects and exact revisions. Reference another member with {{"source":"draft","key":"member-key"}}.
 Use a parameter such as {{"source":"parameter","kind":"command","name":"local-tool"}} for a local requirement.
 A published reference uses source published and version {{destination, kind, id, revision}}. Graph references use target node IDs.
-The body kind is pipeline or subflow (graph, and optional inputs/outputs for subflow), role (template), preset
-(nodeKind, configuration, editableFields), command (binding, arguments, input, output), or mcp_tool (binding, tool, inputSchema, outputSchema).
+Use body kind pipeline for a Pipeline with a graph (name, nodes, wires). Node entries have id, kind and configuration. A wire uses from/to endpoints with node and port.
+Use body kind subflow for a Function Node with graph and named inputs/outputs mapped to endpoints. Public inputs point to Start outputs;
+public outputs point to the internal graph outputs. When a Function carries a Schema on its Start, use the Start port inputs.
+Attach a Schema to Start, End, or Validate Output with the reference slot "<node-id>:schema".
+Use body kind prompt for a Node Prefab with prompt {{text, executor:"agent", schemaContract:true, nodePrefab:true}}.
+Bind the Prefab's role, input_schema and output_schema reference slots to exact published or draft members. Text can use {{{{input.field}}}}.
+On a Pipeline or Function, reuse a Node Prefab or Function as a subflow node with configuration kind none and a reference at its node ID.
+Use body kind schema with fields; each field has name, type, required and optional description. Types are string, boolean, integer, number,
+object (fields), and array (items with a type and optional nested fields or items).
+Use body kind role with a template containing name, role, model, instructions, toolScope, completionContract and reviewPolicy.
+When the user has not requested another model, use the selected authoring model {role_model} as the default model for a new Role.
+Other body kinds are preset (nodeKind, configuration, editableFields), command (binding, arguments, input, output), and
+mcp_tool (binding, tool, inputSchema, outputSchema).
 New local Command bindings use {{"source":"required","name":"local-tool"}}. MCP bindings are named local server requirements.
 Keep credentials out of the proposal. Treat the request and current package as authoring input. Produce a proposal only.
+{output_instruction}
 Request ID: {id}
 Selected draft revision: {}
 {}"#,

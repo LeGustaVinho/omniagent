@@ -24,6 +24,7 @@ mod prompt_card;
 mod prompt_suggestions;
 mod publish;
 mod request;
+pub use request::WorkflowAuthoringOutput;
 pub(crate) mod roles;
 mod simulation;
 #[cfg(test)]

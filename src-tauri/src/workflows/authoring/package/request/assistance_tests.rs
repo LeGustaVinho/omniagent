@@ -80,8 +80,7 @@ async fn publish(
 }
 
 #[tokio::test]
-async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a_visible_chat()
--> Result<()> {
+async fn editor_assistance_retains_exact_bases_and_runs_without_a_visible_chat() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let database = temporary.path().join("editor-assistance.sqlite");
     let store = Store::open(database.clone())?;
@@ -145,26 +144,20 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
                 scope(&repo),
                 Some(version.clone()),
                 "Propose an explicit editor change".into(),
+                None,
             )
             .await?;
         assert_eq!(draft.package.members[0].base.as_ref(), Some(&version));
         assert_eq!(draft.package.members[0].body, member.artifact.body);
-        let conversation_id = draft
-            .conversation_id
-            .clone()
-            .context("Missing source conversation")?;
+        assert!(draft.conversation_id.is_none());
         assert!(
             store
                 .list_conversations(repo.checkout_id.clone())
                 .await?
-                .iter()
-                .any(|chat| chat.id == conversation_id)
+                .is_empty()
         );
         assert_eq!(
-            store
-                .workflow_packages(project.clone(), Some(conversation_id.clone()))
-                .await?[0]
-                .id,
+            store.workflow_packages(project.clone(), None).await?[0].id,
             draft.id
         );
         let request = draft
@@ -203,7 +196,7 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
                 .run_id,
             attempt_id
         );
-        retained.push((draft.id, conversation_id, request.id, version, attempt_id));
+        retained.push((draft.id, request.id, version, attempt_id));
     }
 
     let mut unsupported = scope(&repo);
@@ -220,7 +213,8 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
                 repo.checkout_id.clone(),
                 unsupported,
                 Some(original.artifact.version.clone()),
-                "Unsupported request".into()
+                "Unsupported request".into(),
+                None,
             )
             .await
             .is_err()
@@ -232,7 +226,8 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
                 repo.checkout_id.clone(),
                 scope(&repo),
                 None,
-                "Foreign checkout".into()
+                "Foreign checkout".into(),
+                None,
             )
             .await
             .is_err()
@@ -261,16 +256,8 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
             "Revise this saved package".into(),
         )
         .await?;
-    let linked_chat = linked
-        .conversation_id
-        .context("An editor request needs a source conversation")?;
-    assert_eq!(
-        store
-            .workflow_packages(project.clone(), Some(linked_chat))
-            .await?[0]
-            .id,
-        manual.id
-    );
+    assert!(linked.conversation_id.is_none());
+    assert_eq!(linked.id, manual.id);
     assert!(
         store
             .request_workflow_package_changes(
@@ -289,17 +276,14 @@ async fn editor_assistance_links_exact_pipeline_role_and_reusable_revisions_to_a
             .list_conversations(repo.checkout_id.clone())
             .await?
             .len(),
-        count + 1
+        count
     );
     drop(store);
 
     let reopened = Store::open(database)?;
-    for (id, conversation_id, request_id, version, attempt_id) in retained {
+    for (id, request_id, version, attempt_id) in retained {
         let saved = reopened.workflow_package(project.clone(), id).await?;
-        assert_eq!(
-            saved.conversation_id.as_deref(),
-            Some(conversation_id.as_str())
-        );
+        assert!(saved.conversation_id.is_none());
         assert_eq!(saved.package.members[0].base.as_ref(), Some(&version));
         let request = saved.request.context("Missing reopened request")?;
         assert_eq!(request.id, request_id);

@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, FilePenLine, Sparkles } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useId, useState, type FormEvent } from "react";
-import type { Conversation } from "@/bindings/Conversation";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
@@ -13,14 +12,14 @@ import { availableModelSelection, liveModelsQuery, sameModelSelection, useLiveMo
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
 import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
-import { PipelineBuilderLanding, WorkflowPackageEditor, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
+import { PipelineBuilderLanding, WorkflowPackageEditor, type PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
 import { workflowNodeDefinitionsQuery } from "@/workflow-definition-query";
-import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import { WorkflowEditorAssistance, type WorkflowAssistanceVersion } from "@/workflow-editor-assistance";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Version = { id: string; revision: string };
-type AuthoringBase = { version: Version; name: string };
+type AuthoringBase = { version: WorkflowAssistanceVersion; name: string; prompt?: boolean; typedPrompt?: boolean; nodePrefab?: boolean };
 type Revision = { id: string; runId: string | null; graph: WorkflowGraph; layout?: WorkflowLayout; definitions?: WorkflowDefinitions };
 type ProjectDraft = { id: string; name: string | null; revision: string | null };
 type Draft = {
@@ -48,6 +47,27 @@ function RequestState({ draft }: { draft: Draft }) {
 }
 
 const authoringProviders = ["codex", "claude"] as const;
+const authoringOutputs = {
+  pipeline: "Pipeline",
+  node_prefab: "Node Prefab",
+  function: "Function Node",
+  role: "Role",
+  schema: "Schema",
+  package: "Artifact package",
+} as const;
+type AuthoringOutput = keyof typeof authoringOutputs;
+
+function artifactOutput({ version, nodePrefab, typedPrompt, prompt }: AuthoringBase): AuthoringOutput | undefined {
+  switch (version.kind) {
+    case "pipeline":
+    case "role":
+    case "schema":
+      return version.kind;
+    case "subflow":
+      if (nodePrefab) return "node_prefab";
+      if (!typedPrompt && !prompt) return "function";
+  }
+}
 
 export function BuilderAuthoring({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const [open, setOpen] = useState(false);
@@ -67,67 +87,37 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const formId = useId();
-  const [output, setOutput] = useState<"pipeline" | "package">("package");
-  const [conversationId, setConversationId] = useState("");
+  const [output, setOutput] = useState<AuthoringOutput>("pipeline");
   const [selected, setSelected] = useState<ModelSelection | null>(null);
   const [effort, setEffort] = useState("");
   const [brief, setBrief] = useState("");
   const [base, setBase] = useState("");
-  const conversations = useQuery({
-    queryKey: ["conversations", checkoutId],
-    queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-    select: (items) => items.filter((conversation) => conversation.checkoutId === checkoutId),
-  });
-  const source = conversations.data?.find(({ id }) => id === conversationId);
   const models = useLiveModelOptions(authoringProviders);
   const selection = availableModelSelection(models.options, selected);
   const model = models.models.find(({ option }) => sameModelSelection(option.selection, selection));
   const bases = useQuery({
-    queryKey: ["workflow-authoring-bases", projectId],
-    queryFn: () => invoke<AuthoringBase[]>("workflow_authoring_bases", { projectId }),
+    queryKey: ["workflow-package-catalog", projectId],
+    queryFn: () => invoke<AuthoringBase[]>("workflow_package_catalog", { projectId }),
   });
-  const drafts = useQuery({
-    queryKey: chatKey(conversationId),
-    queryFn: () => invoke<Draft[]>("conversation_workflow_authoring", { conversationId }),
-    enabled: Boolean(source),
-    refetchInterval: (query) => query.state.data?.some(pending) ? 1200 : false,
+  const choices = (bases.data ?? []).filter((item) => {
+    const type = artifactOutput(item);
+    return type && (output === "package" || output === type);
   });
-  const packages = useQuery({
-    queryKey: ["workflow-packages", projectId, "conversation", conversationId],
-    queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId, conversationId }),
-    enabled: Boolean(source),
-    select: (items) => items.filter(({ standalonePipeline, published }) => standalonePipeline && !published),
-  });
-  const selectedBase = bases.data?.find((item) => baseKey(item.version) === base)?.version ?? null;
-  const sourceReady = Boolean(source || (!conversationId && output === "package"));
-  const ready = Boolean(selection && sourceReady && (!base || selectedBase) && brief.trim());
+  const selectedBase = choices.find((item) => baseKey(item.version) === base)?.version ?? null;
+  const ready = Boolean(selection && (!base || selectedBase) && brief.trim());
   const request = useMutation({
-    mutationFn: async () => {
-      const settings = { selection, effort: model?.efforts.includes(effort) ? effort : null, brief: brief.trim() };
+    mutationFn: () => {
       if (!ready) throw new Error("Review the authoring request before starting.");
-      if (output === "pipeline" && source) {
-        const draft = await invoke<Draft>("start_workflow_authoring", { ...settings, conversationId: source.id, base: selectedBase });
-        return { output, draft };
-      }
-      const draft = source
-        ? await invoke<PackageDraft>("start_workflow_package_authoring", { ...settings, projectId, conversationId: source.id, base: selectedBase })
-        : await invoke<PackageDraft>("start_workflow_editor_authoring", { ...settings, projectId, checkoutId,
-          base: selectedBase && { ...selectedBase, kind: "pipeline", destination: "project" } });
-      return { output: "package" as const, draft };
+      return invoke<PackageDraft>("start_workflow_editor_authoring", {
+        projectId, checkoutId, output, base: selectedBase, selection,
+        effort: model?.efforts.includes(effort) ? effort : null, brief: brief.trim(),
+      });
     },
     onMutate: () => onBusy(true),
     onSettled: () => onBusy(false),
-    onSuccess: (result) => {
-      if (result.output === "pipeline") {
-        void client.invalidateQueries({ queryKey: chatKey(result.draft.conversationId) });
-        void client.invalidateQueries({ queryKey: draftsKey(projectId) });
-        onOpenDraft(result.draft.id);
-      } else {
-        void client.invalidateQueries({ queryKey: ["conversations"] });
-        void client.invalidateQueries({ queryKey: ["conversation-library"] });
-        void client.invalidateQueries({ queryKey: ["workflow-packages", projectId] });
-        onOpenDraft(`package:${result.draft.id}`);
-      }
+    onSuccess: (draft) => {
+      void client.invalidateQueries({ queryKey: ["workflow-packages", projectId] });
+      onOpenDraft(`package:${draft.id}`);
     },
   });
   const busy = request.isPending;
@@ -137,7 +127,7 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
       <header className="conv-dialog-header">
         <span className="conv-dialog-mark"><Sparkles size={19} aria-hidden /></span>
         <div><Dialog.Title>Create or edit with AI</Dialog.Title>
-          <Dialog.Description>Ask a Codex or Claude model to create a draft for your review.</Dialog.Description>
+          <Dialog.Description>Ask Codex or Claude to prepare a draft in this worktree for your review.</Dialog.Description>
         </div>
       </header>
       <div className="conv-dialog-body grid gap-4">
@@ -145,21 +135,15 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
           event.preventDefault();
           if (ready && !busy) request.mutate();
         }}>
-          <label>Output<select value={output} onChange={(event) => setOutput(event.currentTarget.value === "pipeline" ? "pipeline" : "package")} disabled={busy}>
-            <option value="package">Visual pipeline draft</option>
-            <option value="pipeline">Pipeline draft</option>
+          <label>Output<select value={output} onChange={(event) => {
+            setOutput(event.currentTarget.value as AuthoringOutput);
+            setBase("");
+          }} disabled={busy}>
+            {Object.entries(authoringOutputs).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
           </select></label>
-          <label>Source conversation<select value={conversationId} onChange={(event) => setConversationId(event.currentTarget.value)} disabled={busy}>
-            <option value="" disabled={output === "pipeline"}>{output === "pipeline" ? "Choose a conversation" : "New linked conversation"}</option>
-            {conversationId && !source && <option value={conversationId} disabled>Conversation unavailable</option>}
-            {conversations.data?.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
-          </select></label>
-          {conversations.isPending && <p role="status">Loading conversations in this worktree…</p>}
-          {output === "pipeline" && conversations.data?.length === 0 && <p>Open a conversation in this worktree to start a pipeline draft.</p>}
-          {conversations.error && <p role="alert">{String(conversations.error)}</p>}
           <label>Starting point<select value={base} title={selectedBase?.revision} onChange={(event) => setBase(event.currentTarget.value)} disabled={busy}>
             <option value="">No base revision</option>
-            {bases.data?.map(({ version, name }) => <option key={baseKey(version)} value={baseKey(version)}>
+            {choices.map(({ version, name }) => <option key={baseKey(version)} value={baseKey(version)}>
               {name} · {version.revision.slice(0, 12)}
             </option>)}
           </select></label>
@@ -173,22 +157,6 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
           {bases.error && <p role="alert">{String(bases.error)}</p>}
           {request.error && <p role="alert">{String(request.error)}</p>}
         </form>
-        {drafts.error && <p role="alert">{String(drafts.error)}</p>}
-        {!!drafts.data?.length && <section aria-label="Authoring drafts" className="grid gap-2">
-          {drafts.data.map((draft) => <div key={draft.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2">
-            <div><strong>{draft.head?.graph.name ?? "New pipeline"}</strong><RequestState draft={draft} /></div>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenDraft(draft.id)}>
-              {draft.head ? "Open draft" : "Open authoring request"}
-            </Button>
-          </div>)}
-        </section>}
-        {packages.error && <p role="alert">{String(packages.error)}</p>}
-        {!!packages.data?.length && <section aria-label="Linked visual pipeline drafts" className="grid gap-2">
-          {packages.data.map((draft) => <div key={draft.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2">
-            <div><strong>{draft.name}</strong></div>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenDraft(`package:${draft.id}`)}>Open linked visual draft</Button>
-          </div>)}
-        </section>}
       </div>
       <footer className="conv-dialog-actions">
         <Dialog.Close asChild><Button variant="outline" type="button" disabled={busy}>Close</Button></Dialog.Close>
@@ -200,7 +168,9 @@ function BuilderAuthoringDialog({ checkout, onBusy, onOpenDraft }: {
   </Dialog.Portal>;
 }
 
-function baseKey(version: Version) { return JSON.stringify([version.id, version.revision]); }
+function baseKey({ kind, destination, id, revision }: WorkflowAssistanceVersion) {
+  return JSON.stringify([kind, destination, id, revision]);
+}
 
 export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const projectId = checkout.projectId;
