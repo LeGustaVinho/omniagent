@@ -254,7 +254,7 @@ function WorktreeTable({ review, project, select, createFrom, createBranch, open
         const selected = tree.checkoutId === review.checkoutId;
         const { checkoutId, branch, head } = tree;
         const actions = fileContextActions({ checkout: { ...project, checkoutId: checkoutId ?? "", checkoutRoot: tree.root },
-          simulated: false, status: setStatus, report: (message) => { setStatus(""); setError(message); } });
+          status: setStatus, report: (message) => { setStatus(""); setError(message); } });
         return <tr key={tree.root} className={selected ? "bg-muted" : undefined}>
           <td className="wrap-anywhere font-mono"><ContextActions label={tree.root} groups={[[
             ...(checkoutId ? [

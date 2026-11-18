@@ -15,9 +15,8 @@ const taskTemplate = { kind: "note", label: "Markdown task notes", name: "task-n
   contents: "# Task notes\n\n## Tasks\n\n- [ ] \n\n## Notes\n" } as const;
 const jsonTemplate = { kind: "file", label: "JSON object", name: "data.json", contents: "{\n  \n}\n" } as const;
 
-export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refresh, onCreated, report }: {
+export function useCheckoutTreeActions({ checkoutId, knowledge, refresh, onCreated, report }: {
   checkoutId: string;
-  simulated: boolean;
   knowledge?: boolean;
   refresh: () => Promise<unknown>;
   onCreated: (path: string, kind: Kind, copiedFromDisk: boolean) => void;
@@ -27,7 +26,6 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   const folders = useQuery({
     queryKey: ["checkout-folders", checkoutId],
     queryFn: () => invoke<string[]>("list_checkout_folders", { checkoutId }),
-    enabled: !simulated,
     retry: false,
   });
   const [request, setRequest] = useState<{ path: string; kind: Kind; contents?: string; copy?: boolean; source?: string }>();
@@ -44,7 +42,6 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   }
 
   function saveCopy(path: string, contents?: string) {
-    if (simulated) return;
     const original = fileName(path);
     const extension = original.lastIndexOf(".");
     const suggested = extension > 0 ? `${original.slice(0, extension)} copy${original.slice(extension)}` : `${original} copy`;
@@ -53,7 +50,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   }
 
   function actions(item: FileTreeTarget): MenuGroups {
-    if (simulated || item.kind === "file") return [];
+    if (item.kind === "file") return [];
     const kinds: Kind[] = knowledge ? ["note", "folder"] : ["file", "note", "folder"];
     const templates = [noteTemplate, taskTemplate, ...(knowledge ? [] : [jsonTemplate])];
     return [[...kinds.map((kind) => ({ label: `${labels[kind]}…`, run: () => start({ path: item.path, kind }) })), {

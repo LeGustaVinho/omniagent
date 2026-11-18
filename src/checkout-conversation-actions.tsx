@@ -26,7 +26,7 @@ const fileRequests = [
   ["Propose a refactor…", "Read the selected checkout files and propose a behavior-preserving refactor, including how to verify it."],
 ] as const;
 
-export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
+export function useCheckoutConversationActions(checkoutId: string, disabled: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
   const [targets, setTargets] = useState<readonly FileTreeTarget[]>();
   const [excerpt, setExcerpt] = useState<{ selection: ContextText; instruction?: string }>();
@@ -43,13 +43,13 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   const conversations = useQuery({
     queryKey: conversationKey,
     queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-    enabled: !simulated && Boolean(targets || excerpt || recordedFile),
+    enabled: !disabled && Boolean(targets || excerpt || recordedFile),
     retry: false,
   });
   const pipelines = useQuery({
     queryKey: ["conversation-pipeline-options", checkoutId],
     queryFn: () => invoke<ConversationPipelineOption[]>("conversation_pipeline_options", { checkoutId }),
-    enabled: !simulated && Boolean(excerpt) && destination === newConversation,
+    enabled: !disabled && Boolean(excerpt) && destination === newConversation,
     retry: false,
   });
   const options = excerpt ? pipelines.data ?? [directConversationChoice] : [directConversationChoice];
@@ -59,7 +59,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   const files = useQuery({
     queryKey: ["checkout-context-file-list", checkoutId],
     queryFn: () => invoke<string[]>("list_repository_source_files", { checkoutId }),
-    enabled: !simulated && folders.length > 0,
+    enabled: !disabled && folders.length > 0,
     retry: false,
   });
   const matches = folders.length > 0
@@ -79,7 +79,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   }
 
   function startContextText(selection: ContextText, instruction?: string) {
-    if (simulated || (!selection.text.trim() && !(selection.text && instruction?.trim()))) return;
+    if (disabled || (!selection.text.trim() && !(selection.text && instruction?.trim()))) return;
     setTargets(undefined);
     setRecordedFile(undefined);
     setFileRequest(undefined);
@@ -94,7 +94,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   }
 
   function startRecordedFile(file: RecordedFile) {
-    if (simulated) return;
+    if (disabled) return;
     setTargets(undefined);
     setExcerpt(undefined);
     setFileRequest(undefined);
@@ -111,7 +111,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   }
 
   function actions(item: FileTreeTarget, selection?: readonly FileTreeTarget[]): MenuGroups {
-    if (simulated || item.kind === "root") return [];
+    if (disabled || item.kind === "root") return [];
     const items = selection ?? [item];
     return [[
       { label: !selection && item.kind === "file" ? "Add to conversation…" : "Add files to conversation…", run: () => start(items, false) },

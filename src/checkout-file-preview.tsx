@@ -21,9 +21,8 @@ async function readPreview(checkoutId: string, path: string): Promise<Preview> {
   return result.status === "text" ? { kind: "text", text: result.text } : { kind: "unavailable" };
 }
 
-export function useCheckoutFilePreview({ checkoutId, simulated, currentText, open }: {
+export function useCheckoutFilePreview({ checkoutId, currentText, open }: {
   checkoutId: string;
-  simulated: boolean;
   currentText: (path: string) => string | undefined;
   open: (path: string) => void;
 }) {
@@ -32,17 +31,16 @@ export function useCheckoutFilePreview({ checkoutId, simulated, currentText, ope
   return {
     action: (path: string) => ({
       label: "Preview…",
-      run: () => setSelection({ path, liveText: checkoutFileLiveText(checkoutId, path, simulated, currentText) }),
+      run: () => setSelection({ path, liveText: checkoutFileLiveText(checkoutId, path, currentText) }),
     }),
     dialog: selection && <CheckoutFilePreview key={selection.path} checkoutId={checkoutId} request={selection}
-      simulated={simulated} close={close} open={() => { close(); open(selection.path); }} />,
+      close={close} open={() => { close(); open(selection.path); }} />,
   };
 }
 
-function CheckoutFilePreview({ checkoutId, request, simulated, close, open }: {
+function CheckoutFilePreview({ checkoutId, request, close, open }: {
   checkoutId: string;
   request: Request;
-  simulated: boolean;
   close: () => void;
   open: () => void;
 }) {
@@ -51,7 +49,7 @@ function CheckoutFilePreview({ checkoutId, request, simulated, close, open }: {
   const query = useQuery({
     queryKey: ["checkout-file-preview", checkoutId, path],
     queryFn: () => readPreview(checkoutId, path),
-    enabled: liveText === undefined && !simulated,
+    enabled: liveText === undefined,
     retry: false,
     networkMode: "always",
     gcTime: 0,
@@ -64,7 +62,7 @@ function CheckoutFilePreview({ checkoutId, request, simulated, close, open }: {
     onSuccess: close,
   });
   const preview: Preview | undefined = liveText !== undefined ? { kind: "text", text: liveText }
-    : simulated ? { kind: "unavailable" } : query.isFetching || query.error ? undefined : query.data;
+    : query.isFetching || query.error ? undefined : query.data;
   const text = preview?.kind === "text" ? preview.text : undefined;
   const shortened = text !== undefined && text.length > previewTextLimit;
   const visibleText = shortened ? text.slice(0, previewTextLimit).replace(/[\uD800-\uDBFF]$/, "") : text;
@@ -90,7 +88,7 @@ function CheckoutFilePreview({ checkoutId, request, simulated, close, open }: {
       {preview?.kind === "media" && <button type="button" className="fw-btn"
         onClick={() => void run(async () => downloadRepositoryAttachment(preview.file))}>Save a copy</button>}
       {preview?.kind === "text" && <button type="button" className="fw-btn fw-primary" onClick={open}>Open in editor</button>}
-      {!simulated && preview && preview.kind !== "text" && <button type="button" className="fw-btn fw-primary"
+      {preview && preview.kind !== "text" && <button type="button" className="fw-btn fw-primary"
         disabled={launch.isPending} onClick={() => launch.mutate()}>Open in default application</button>}
     </div>
   </FileDialog>;

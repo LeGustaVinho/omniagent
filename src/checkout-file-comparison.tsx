@@ -12,9 +12,8 @@ type Comparison = { labels: [string, string]; ownerPanel?: FilePanelApi; file?: 
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 const FileRevisionComparison = lazy(() => import("@/git-file-history").then(({ FileRevisionComparison }) => ({ default: FileRevisionComparison })));
 
-export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, openHistory, restoreLocalText, canRestore }: {
+export function useCheckoutFileComparison({ checkoutId, bufferAt, openHistory, restoreLocalText, canRestore }: {
   checkoutId: string;
-  simulated: boolean;
   bufferAt: (path: string) => TextState | undefined;
   openHistory?: (path: string) => void;
   restoreLocalText?: (path: string, text: string) => Promise<void>;
@@ -28,7 +27,6 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
   const request = useRef(0);
 
   async function readDisk(path: string) {
-    if (simulated) throw new Error(`No text is available for ${path}.`);
     const note = /\.(?:md|markdown)$/i.test(path);
     const open = await invoke<{ status: string; document?: { markdown: string } }>(note ? "open_repository_document" : "open_repository_source_file", { checkoutId, path });
     if (open.status !== "document" || !open.document) throw new Error(`Could not read ${path} as text.`);
@@ -76,7 +74,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
       ...(local?.external !== undefined ? [{ label: "Compare editor with file on disk", run: () => {
         void compare([`${path} · Disk`, `${path} · Editor`], [Promise.resolve(local.external!), Promise.resolve(local.content)], path, ownerPanel);
       } }] : []),
-      ...(!simulated ? [{ label: "Compare Git versions", items: [
+      { label: "Compare Git versions", items: [
         { label: "HEAD with staged index", run: () => compareDisk(path, { kind: "head" }, { kind: "index" }, ["HEAD", "Git index"], ownerPanel) },
         { label: "HEAD with file on disk", run: () => compareDisk(path, { kind: "head" }, { kind: "worktree" }, ["HEAD", `${path} · Disk`], ownerPanel) },
         { label: "Staged index with file on disk", run: () => compareDisk(path, { kind: "index" }, { kind: "worktree" }, ["Git index", `${path} · Disk`], ownerPanel) },
@@ -86,9 +84,9 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
           { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content, ownerPanel) },
           { label: "Compare editor with branch or commit…", run: () => selectRevision({ path, target: { kind: "editor", text: local.content }, ownerPanel }) },
         ] : []),
-      ] }] : []),
-      ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
-      ...(!simulated ? [{ label: "Show local history", run: () => showHistory({ path, ownerPanel }) }] : []),
+      ] },
+      ...(openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
+      { label: "Show local history", run: () => showHistory({ path, ownerPanel }) },
     ];
   }
 

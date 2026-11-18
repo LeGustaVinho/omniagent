@@ -21,7 +21,7 @@ it("shows Quick Fix only for supported diagnostics and keeps actions on the sele
   const quickFix = vi.fn();
   const copy = vi.fn();
   const onContext = vi.fn();
-  render(<IdeProblems issues={issues} open={open} reveal={vi.fn()} quickFix={quickFix} copy={copy} onContext={onContext} simulated={false} />);
+  render(<IdeProblems issues={issues} open={open} reveal={vi.fn()} quickFix={quickFix} copy={copy} onContext={onContext} />);
   const user = userEvent.setup();
   fireEvent.contextMenu(screen.getByText(/Missing name/));
   await user.click(screen.getByRole("menuitem", { name: "Quick Fix…" }));

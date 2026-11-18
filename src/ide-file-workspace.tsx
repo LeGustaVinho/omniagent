@@ -174,10 +174,9 @@ export function keepOnlyCleanClose(dock: DockviewApi, path: string, api: FilePan
   }).length > 0 || (dock.getPanel(api.id)?.params as FilePanelParams | undefined)?.view === "reading";
 }
 
-export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
+export function useFileDock({ checkoutId, workspace, initialPath }: {
   checkoutId: string;
   workspace: "ide" | "knowledge";
-  simulated: boolean;
   initialPath?: string;
 }) {
   const [api, setApi] = useState<DockviewApi>();
@@ -217,7 +216,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       void writes.catch((failure: unknown) => { if (active) setError(String(failure)); });
     };
     const save = () => {
-      if (simulated || !loaded) return;
+      if (!loaded) return;
       window.clearTimeout(timer);
       pending = serialize();
       timer = window.setTimeout(flush, 80);
@@ -247,7 +246,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
 
     const restore = async () => {
       try {
-        const stored = simulated ? undefined : await invoke<string | null>("workbench_layout", scope);
+        const stored = await invoke<string | null>("workbench_layout", scope);
         if (!active) return;
         if (stored) api.fromJSON(dockviewLayoutInMain(JSON.parse(stored) as SerializedDockview));
       } catch (failure) {
@@ -276,7 +275,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       closePopout.dispose();
       for (const cleanup of cleanupPopouts.values()) cleanup();
     };
-  }, [api, checkoutId, simulated, workspace]);
+  }, [api, checkoutId, workspace]);
 
   const open = useCallback((file: string, groupId?: string) => {
     if (!api || !ready) return;
@@ -612,18 +611,17 @@ type FileTreeProps = {
   reveal?: TreeReveal;
   checkoutId: string;
   workspace: "ide" | "knowledge";
-  simulated: boolean;
 };
 
 type FavoriteGroupEdit = { group?: CheckoutFavoriteGroup; items?: readonly CheckoutFavorite[] };
 
 export function FileTree(props: FileTreeProps) {
-  const { checkoutId, workspace, simulated } = props;
-  const storageKey = `omniagent:file-tree:${workspace}:${simulated ? "example" : encodeURIComponent(checkoutId)}`;
+  const { checkoutId, workspace } = props;
+  const storageKey = `omniagent:file-tree:${workspace}:${encodeURIComponent(checkoutId)}`;
   return <PersistentFolderTree key={storageKey} {...props} storageKey={storageKey} />;
 }
 
-function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteFavorite, actions, reveal, storageKey, checkoutId, workspace, simulated }:
+function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteFavorite, actions, reveal, storageKey, checkoutId, workspace }:
   FileTreeProps & { storageKey: string }) {
   const preferencesKey = `${storageKey}:preferences`;
   const [preferences, setPreferences] = useState(() => readTreePreferences(preferencesKey));
@@ -642,8 +640,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number }>();
   const selectionAnchor = useRef<string>(undefined);
   const lastAutoReveal = useRef<string>(undefined);
-  const favoritesId = simulated ? "example" : checkoutId;
-  const { favorites, groups: favoriteGroups } = useCheckoutFavorites(favoritesId);
+  const { favorites, groups: favoriteGroups } = useCheckoutFavorites(checkoutId);
   const [favoriteGroupEdit, editFavoriteGroup] = useState<FavoriteGroupEdit>();
   const [collapsedFavoriteGroups, setCollapsedFavoriteGroups] = useState(new Set<string>());
   const newFavoriteGroup = { label: "New favorite group…", run: () => editFavoriteGroup({}) };
@@ -652,11 +649,11 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
   const revealPath = manualReveal?.path ?? automaticReveal?.path;
   const visibleReveals = [manualReveal ?? visibilityOverride, automaticReveal].filter((reveal) => reveal !== undefined);
   const scopedIgnored = preferences.ignored ? undefined : visibleReveals.find((reveal) => reveal.includeIgnored)?.path;
-  const ignored = useIgnoredTree(checkoutId, !simulated && (preferences.ignored || Boolean(scopedIgnored)), expanded, preferences.dotfiles, visibleReveals, scopedIgnored);
+  const ignored = useIgnoredTree(checkoutId, preferences.ignored || Boolean(scopedIgnored), expanded, preferences.dotfiles, visibleReveals, scopedIgnored);
   const markdown = (path: string) => /\.(?:md|markdown)$/i.test(path);
   const allFiles = [...paths, ...ignored.files.filter((path) => workspace === "ide" || markdown(path))];
   const allFolders = [...folders, ...ignored.folders];
-  const windowsHidden = useWindowsHiddenTree({ checkoutId, enabled: !simulated && !preferences.windowsHidden, expanded,
+  const windowsHidden = useWindowsHiddenTree({ checkoutId, enabled: !preferences.windowsHidden, expanded,
     files: allFiles, folders: allFolders, dotfiles: preferences.dotfiles, reveals: visibleReveals });
   const visible = (path: string) => showTreePath(path, preferences.dotfiles, visibleReveals, windowsHidden.paths);
   const tree = makeTree(allFiles.filter(visible), allFolders.filter(visible), preferences.sort);
@@ -744,7 +741,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
     const allSaved = items.every((item) => favoriteKeys.has(checkoutFavoriteKey(item)));
     return [...actions(target, selection), items.length ? [{
       label: selection ? (allSaved ? "Remove selected from favorites" : "Add selected to favorites") : (allSaved ? "Remove from favorites" : "Add to favorites"),
-      run: () => setCheckoutFavorites(favoritesId, items.map((item) => ({ ...item, ignored: ignoredPaths.has(item.path) || undefined })), allSaved),
+      run: () => setCheckoutFavorites(checkoutId, items.map((item) => ({ ...item, ignored: ignoredPaths.has(item.path) || undefined })), allSaved),
     }] : []];
   }
 
@@ -768,15 +765,13 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
         setVisibilityOverride(undefined);
         setPreferences((value) => ({ ...value, dotfiles: !value.dotfiles }));
       } },
-      ...(!simulated ? [
-        { label: preferences.windowsHidden ? "Hide Windows hidden items" : "Show Windows hidden items", run: () => {
-          setManualReveal(undefined);
-          setVisibilityOverride(undefined);
-          setPreferences((value) => ({ ...value, windowsHidden: !value.windowsHidden }));
-        } },
-        { label: preferences.ignored ? "Hide Git-ignored files" : "Show Git-ignored files",
-          run: () => setPreferences((value) => ({ ...value, ignored: !value.ignored })) },
-      ] : []),
+      { label: preferences.windowsHidden ? "Hide Windows hidden items" : "Show Windows hidden items", run: () => {
+        setManualReveal(undefined);
+        setVisibilityOverride(undefined);
+        setPreferences((value) => ({ ...value, windowsHidden: !value.windowsHidden }));
+      } },
+      { label: preferences.ignored ? "Hide Git-ignored files" : "Show Git-ignored files",
+        run: () => setPreferences((value) => ({ ...value, ignored: !value.ignored })) },
       { label: preferences.autoReveal ? "Disable auto-reveal" : "Auto-reveal active file",
         run: () => { setManualReveal(undefined); setPreferences((value) => ({ ...value, autoReveal: !value.autoReveal })); } },
     ], [newFavoriteGroup]];
@@ -786,7 +781,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
     const { path, kind, ignored } = item;
     if (kind === "file") onOpen(path);
     else {
-      if (ignored && !simulated && !folders.includes(path)) {
+      if (ignored && !folders.includes(path)) {
         setPreferences((value) => ({ ...value, ignored: true }));
       }
       const reveal = { path, expand: true };
@@ -814,11 +809,11 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
         ...(noteTarget ? [{ label: "Open note", run: () => onOpen(item.path) }] : []),
         { label: "Move to favorite group", items: [
           ...favoriteGroups.map((group) => ({ label: "Move to " + group.name, disabled: item.groupId === group.id,
-            run: () => moveCheckoutFavorites(favoritesId, [item], group.id) })),
-          { label: "Remove from group", disabled: !item.groupId, run: () => moveCheckoutFavorites(favoritesId, [item]) },
+            run: () => moveCheckoutFavorites(checkoutId, [item], group.id) })),
+          { label: "Remove from group", disabled: !item.groupId, run: () => moveCheckoutFavorites(checkoutId, [item]) },
           { label: newFavoriteGroup.label, run: () => editFavoriteGroup({ items: [item] }) },
         ] },
-      ], ...(noteTarget ? [[{ label: "Remove from favorites", run: () => setCheckoutFavorites(favoritesId, [item], true) }]] : rowActions(item))]}>
+      ], ...(noteTarget ? [[{ label: "Remove from favorites", run: () => setCheckoutFavorites(checkoutId, [item], true) }]] : rowActions(item))]}>
         <button type="button" className="file-tree-row" title={location} onClick={() => openFavorite(item)}>
           <Icon size={15} /><span>{name}</span><small>{item.path}</small>
         </button>
@@ -873,7 +868,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
     }} />
     {blankMenu && <PositionedContextActions label="Checkout root" groups={rootActions} point={blankMenu}
       onClose={() => setBlankMenu(undefined)} restoreFocus={() => rootButton.current?.focus()} />}
-    {favoriteGroupEdit && <FavoriteGroupDialog checkoutId={favoritesId} edit={favoriteGroupEdit} close={() => editFavoriteGroup(undefined)} />}
+    {favoriteGroupEdit && <FavoriteGroupDialog checkoutId={checkoutId} edit={favoriteGroupEdit} close={() => editFavoriteGroup(undefined)} />}
   </div>;
 }
 

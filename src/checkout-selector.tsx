@@ -111,7 +111,7 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
             const selected = item.checkoutId === checkout?.checkoutId;
             const favorite = favorites.has(item.projectId);
             const name = basename(item.repositoryRoot) + (item.checkoutRoot === item.repositoryRoot ? "" : " / " + basename(item.checkoutRoot));
-            const actions = fileContextActions({ checkout: item, simulated: false, status: setStatus,
+            const actions = fileContextActions({ checkout: item, status: setStatus,
               report: (message) => { setStatus(""); setError(message); } });
             return <li key={item.checkoutId}>
               <ContextActions label={item.checkoutRoot} groups={[[

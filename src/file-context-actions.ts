@@ -130,17 +130,16 @@ function otherEditorText(checkoutId: string, path: string) {
 
 type CheckoutFileText = { status: "text"; text: string } | { status: "unsupported_encoding" };
 
-export function checkoutFileLiveText(checkoutId: string, path: string, simulated: boolean, currentText?: CurrentText) {
-  return currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkoutId, path));
+export function checkoutFileLiveText(checkoutId: string, path: string, currentText?: CurrentText) {
+  return currentText?.(path) ?? otherEditorText(checkoutId, path);
 }
 
 export function readCheckoutFileText(checkoutId: string, path: string) {
   return invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId, path });
 }
 
-export function fileContextActions({ checkout, simulated, status, report, currentText }: {
+export function fileContextActions({ checkout, status, report, currentText }: {
   checkout: ProjectCheckout;
-  simulated: boolean;
   status: (message: string) => void;
   report: (message: string) => void;
   currentText?: CurrentText;
@@ -167,14 +166,10 @@ export function fileContextActions({ checkout, simulated, status, report, curren
   };
   function copyTextContents(path: string) {
     const request = ++textCaptureRequest;
-    const text = checkoutFileLiveText(checkout.checkoutId, path, simulated, currentText);
+    const text = checkoutFileLiveText(checkout.checkoutId, path, currentText);
     const confirmation = "Copied text contents of " + fileName(path);
     if (text !== undefined) {
       copy(text, confirmation);
-      return;
-    }
-    if (simulated) {
-      report("Text contents are unavailable for this example file.");
       return;
     }
     report("");
@@ -190,29 +185,27 @@ export function fileContextActions({ checkout, simulated, status, report, curren
     return [[
       ...(path ? [{ label: "Copy relative path", run: () => copy(path, "Copied relative path") }] : []),
       ...(target.kind === "file" && currentText ? [{ label: "Copy text contents", run: () => copyTextContents(path) }] : []),
-      ...(!simulated ? [
-        { label: "Show in File Explorer", run: () => shell(path, "reveal") },
-        ...(target.kind === "file" ? [
-          { label: "Open in default application", run: () => shell(path, "open") },
-          { label: "Open with another application…", run: () => shell(path, "open_with") },
-          { label: "Open in external editor", run: () => {
-            report("");
-            void invoke("open_checkout_file_in_external_editor", { checkoutId: checkout.checkoutId, relativePath: path })
-              .then(() => status("Started external editor for " + fileName(path)))
-              .catch((error: unknown) => report(String(error)));
-          } },
-        ] : []),
+      { label: "Show in File Explorer", run: () => shell(path, "reveal") },
+      ...(target.kind === "file" ? [
+        { label: "Open in default application", run: () => shell(path, "open") },
+        { label: "Open with another application…", run: () => shell(path, "open_with") },
+        { label: "Open in external editor", run: () => {
+          report("");
+          void invoke("open_checkout_file_in_external_editor", { checkoutId: checkout.checkoutId, relativePath: path })
+            .then(() => status("Started external editor for " + fileName(path)))
+            .catch((error: unknown) => report(String(error)));
+        } },
       ] : []),
     ], [{ label: "Copy", items: [
       ...(path ? [
         { label: "Name", run: () => copy(fileName(path), "Copied name") },
       ] : []),
-      ...(!simulated ? [{ label: "Absolute path", run: () => copy(absolute, "Copied absolute path") }] : []),
-      ...(!simulated && target.kind === "file" ? [
+      { label: "Absolute path", run: () => copy(absolute, "Copied absolute path") },
+      ...(target.kind === "file" ? [
         ...(checkout.checkoutId ? [{ label: "OmniAgent link", run: () => copyOmniAgentLink(path) }] : []),
         { label: "Committed file permalink", run: () => copyPermalink(path) },
       ] : []),
-    ], disabled: !path && simulated }]];
+    ] }]];
   }
   return { copy, copyOmniAgentLink, copyPermalink, location, reveal: (path: string) => shell(path, "reveal") };
 }

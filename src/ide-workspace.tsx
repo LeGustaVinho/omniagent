@@ -55,7 +55,7 @@ export default function IdeWorkspace(props: WorkspaceProps) {
 function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: WorkspaceProps & { scope: string }) {
   const requestedFolder = readFolderSearchTarget(target);
   const requestedTerminal = readTerminalFolderTarget(target);
-  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide", simulated: false });
+  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide" });
   const source = useRepositorySourceBuffers(checkout.checkoutId, true);
   const { load: loadSource, watch: watchSource, update: updateSource, getFile: getSource } = source;
   const workspace = useRef<HTMLElement>(null);
@@ -303,9 +303,9 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
     ? source.getFile(path)?.content : undefined, [dock.api, source.getFile]);
   useCheckoutTextReader(checkout.checkoutId, true, readOpenFile);
   const currentText = readOpenFile;
-  const menu = fileContextActions({ checkout, simulated: false, status: setStatus, report: setProblem, currentText });
-  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, simulated: false, currentText, open: openFile });
-  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated: false, bufferAt: (path) => files[path], openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
+  const menu = fileContextActions({ checkout, status: setStatus, report: setProblem, currentText });
+  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, currentText, open: openFile });
+  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, bufferAt: (path) => files[path], openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
   canRestore: (path) => !markdownPath(path), restoreLocalText: async (path, content) => {
     const canonical = await loadSource(path);
     if (canonical !== path) throw new Error("This file now resolves to a different path.");
@@ -326,7 +326,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
     if (notes.length) openWorkspace("knowledge", openNotesTarget(notes));
   }
   const revealFile = (path: string) => { setSidebar(true); setNavigator("files"); setReveal({ path }); };
-  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated: false, refresh: source.refreshCatalog, report: setProblem,
+  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, refresh: source.refreshCatalog, report: setProblem,
     onCreated: (path, kind, copiedFromDisk) => {
       setStatus(copiedFromDisk ? `Copied ${path}` : `Created ${path}`);
       if (kind === "folder" || copiedFromDisk) setReveal({ path });
@@ -342,7 +342,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
   };
   const conversationActions = useCheckoutConversationActions(checkout.checkoutId, false, (id) => openWorkspace("conversations", id));
   const renameNote = (path: string) => openWorkspace("knowledge", noteRenameTarget(path));
-  const fileOperations = useCheckoutItemOperations({ checkoutId: checkout.checkoutId, simulated: false,
+  const fileOperations = useCheckoutItemOperations({ checkoutId: checkout.checkoutId,
     folders: treeActions.folders, refreshTree: treeActions.refreshTree, report: setProblem, status: setStatus,
     isDirty: (items) => Object.keys(files).some((path) => dirty(path) && items.some((item) => itemIncludesPath(item, path))),
     onRenameNote: renameNote, onReveal: revealFile,
@@ -436,7 +436,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
               fileActions={searchFileActions} onClear={() => setSearchScope(undefined)} />)
             : <><p className="file-sidebar-note" title={checkout.checkoutRoot}>
               {fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
-              <FileTree paths={paths} folders={treeActions.folders} active={active} onOpen={chooseFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={false} reveal={reveal} actions={(target, selection) => selection ? [
+              <FileTree paths={paths} folders={treeActions.folders} active={active} onOpen={chooseFile} checkoutId={checkout.checkoutId} workspace="ide" reveal={reveal} actions={(target, selection) => selection ? [
                 [
                   { label: "Open selected files", disabled: !selection.some(({ kind }) => kind === "file"),
                     run: () => { void openSelected(selection.filter(({ kind }) => kind === "file").map(({ path }) => path)); } },
@@ -576,7 +576,7 @@ function IdeSurface({ checkout, target, openWorkspace, openChanges, scope }: Wor
                 </div>
               </Suspense>
             </div>
-            {bottom === "problems" && <IdeProblems issues={markerEntries} simulated={false}
+            {bottom === "problems" && <IdeProblems issues={markerEntries}
               open={({ path, line, column }, split) => openFile(path, line, split, column)} reveal={revealFile} quickFix={showQuickFix} copy={menu.copy}
               onContext={(issue, instruction) => conversationActions.startContextText({
                 title: `${issue.label} in ${fileName(issue.path)}`, reference: problemReference(issue),

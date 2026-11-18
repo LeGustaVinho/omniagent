@@ -18,7 +18,7 @@ it("reveals the active file once without enabling automatic reveal", async () =>
   const client = new QueryClient();
   const tree = (active: string) => <QueryClientProvider client={client}>
     <FileTree paths={["src/first.txt", "docs/other.md"]} folders={["src", "docs"]} active={active} onOpen={vi.fn()}
-      actions={() => []} checkoutId="reveal-worktree" workspace="ide" simulated={false} />
+      actions={() => []} checkoutId="reveal-worktree" workspace="ide" />
   </QueryClientProvider>;
   const { rerender } = render(tree("src/first.txt"));
   expect(screen.queryByRole("button", { name: "first.txt" })).toBeNull();
@@ -45,7 +45,7 @@ it("loads Git-ignored directories lazily from the blank-area context menu", asyn
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const { container } = render(<QueryClientProvider client={client}><FileTree paths={["reading.md"]} onOpen={vi.fn()}
     actions={(item) => item.kind === "root" ? [[{ label: "Refresh tree", run: refresh }]] : []}
-    workspace="ide" simulated={false} checkoutId="worktree-for-ignored-items" /></QueryClientProvider>);
+    workspace="ide" checkoutId="worktree-for-ignored-items" /></QueryClientProvider>);
   const user = userEvent.setup();
   expect(invoke).not.toHaveBeenCalled();
   fireEvent.contextMenu(container.querySelector(".file-tree-blank")!);
@@ -73,7 +73,7 @@ it("persists tree preferences, reveals the active file, and keeps favorites scop
   const open = vi.fn();
   function fixture(checkoutId = "favorites-worktree", active?: string) {
     return <QueryClientProvider client={new QueryClient()}><FileTree paths={["a.txt", "B.md", ".secret", "docs/note.md"]}
-      folders={["docs"]} active={active} onOpen={open} actions={actions} checkoutId={checkoutId} workspace="ide" simulated={false} /></QueryClientProvider>;
+      folders={["docs"]} active={active} onOpen={open} actions={actions} checkoutId={checkoutId} workspace="ide" /></QueryClientProvider>;
   }
   const user = userEvent.setup();
   const mounted = render(fixture("favorites-worktree", "docs/note.md"));
@@ -128,7 +128,7 @@ it("filters Windows attributes separately and reveals a favorite hidden folder w
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const props = { paths: ["root-secret.md", ".dot.md", "reports/ordinary.md", "reports/private/note.md", "reports/private/hidden-child.md"],
-    folders: ["reports", "reports/private"], onOpen: vi.fn(), actions: () => [], checkoutId, workspace: "knowledge" as const, simulated: false };
+    folders: ["reports", "reports/private"], onOpen: vi.fn(), actions: () => [], checkoutId, workspace: "knowledge" as const };
   const fixture = (overrides: Partial<ComponentProps<typeof FileTree>> = {}) =>
     <QueryClientProvider client={client}><FileTree {...props} {...overrides} /></QueryClientProvider>;
   const mounted = render(fixture());
@@ -178,7 +178,7 @@ it("groups legacy favorites through the shared explorer menus and keeps assignme
   const onOpen = vi.fn();
   function fixture(workspace: "ide" | "knowledge" = "ide", currentCheckout = checkoutId, folder = "docs") {
     return <QueryClientProvider client={client}><FileTree paths={workspace === "ide" ? [`${folder}/note.md`, "code.ts"] : [`${folder}/note.md`]}
-      folders={[folder]} checkoutId={currentCheckout} workspace={workspace} simulated={false} actions={() => []} onOpen={onOpen} /></QueryClientProvider>;
+      folders={[folder]} checkoutId={currentCheckout} workspace={workspace} actions={() => []} onOpen={onOpen} /></QueryClientProvider>;
   }
   const mounted = render(fixture());
   const user = userEvent.setup();
@@ -263,7 +263,7 @@ it("reports a Windows-attribute lookup failure while keeping the known checkout 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const open = vi.fn();
   render(<QueryClientProvider client={client}><FileTree paths={["known.md"]} onOpen={open} actions={() => []}
-    checkoutId="unreadable-hidden-items-worktree" workspace="ide" simulated={false} /></QueryClientProvider>);
+    checkoutId="unreadable-hidden-items-worktree" workspace="ide" /></QueryClientProvider>);
   const user = userEvent.setup();
   fireEvent.contextMenu(root());
   await user.click(await screen.findByRole("menuitem", { name: "Hide Windows hidden items" }));

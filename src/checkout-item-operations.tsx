@@ -55,9 +55,8 @@ function copyName(item: Item) {
   return extension > 0 ? `${name.slice(0, extension)} copy${name.slice(extension)}` : `${name} copy`;
 }
 
-export function useCheckoutItemOperations({ checkoutId, simulated, folders, refreshTree, report, status, isDirty, onChanged, onReveal, onRenameNote }: {
+export function useCheckoutItemOperations({ checkoutId, folders, refreshTree, report, status, isDirty, onChanged, onReveal, onRenameNote }: {
   checkoutId: string;
-  simulated: boolean;
   folders?: readonly string[];
   refreshTree: () => Promise<unknown>;
   report: (message: string) => void;
@@ -81,11 +80,10 @@ export function useCheckoutItemOperations({ checkoutId, simulated, folders, refr
     void refreshTree().catch((failure: unknown) => report(String(failure)));
   });
   useEffect(() => {
-    if (simulated) return;
     const handle = (event: Event) => receive((event as CustomEvent<ItemChange>).detail);
     window.addEventListener(itemsChangedEvent, handle);
     return () => window.removeEventListener(itemsChangedEvent, handle);
-  }, [simulated]);
+  }, []);
 
   function start(kind: Request["kind"], items: readonly Item[], targetFolder = "", paste?: Clipboard) {
     setError("");
@@ -126,7 +124,6 @@ export function useCheckoutItemOperations({ checkoutId, simulated, folders, refr
   }
 
   function actions(target: FileTreeTarget, selected?: readonly FileTreeTarget[]): MenuGroups {
-    if (simulated) return [];
     const item = itemOf(target);
     const items = topLevel((selected?.length ? selected : [target]).flatMap((row) => itemOf(row) ?? []));
     const single = (selected?.length ?? 1) === 1 ? items[0] : undefined;

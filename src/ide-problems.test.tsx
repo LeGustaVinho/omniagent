@@ -13,7 +13,7 @@ it("combines exact file and severity filters while keeping the related diagnosti
     { path: "src/two/index.ts", line: 1, column: 2, label: "Error", message: "Other error" },
   ];
   const copy = vi.fn();
-  const props = { copy, simulated: false, open: vi.fn(), reveal: vi.fn(), quickFix: vi.fn() };
+  const props = { copy, open: vi.fn(), reveal: vi.fn(), quickFix: vi.fn() };
   const { rerender } = render(<IdeProblems issues={sourceErrors} {...props} />);
   const user = userEvent.setup();
 

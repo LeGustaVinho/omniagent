@@ -9,14 +9,13 @@ export type FileProblem = CodeProblem & { path: string };
 export const problemReference = ({ path, line, column }: FileProblem) => `${path}:${line}:${column}`;
 const diagnostic = (issue: FileProblem) => `${problemReference(issue)} ${issue.label}: ${issue.message}`;
 
-export function IdeProblems({ issues, open, reveal, quickFix, copy, onContext, simulated }: {
+export function IdeProblems({ issues, open, reveal, quickFix, copy, onContext }: {
   issues: readonly FileProblem[];
   open: (issue: FileProblem, split?: boolean) => void;
   reveal: (path: string) => void;
   quickFix: (issue: FileProblem) => void;
   copy: (text: string, status: string) => void;
   onContext?: (issue: FileProblem, instruction?: string) => void;
-  simulated: boolean;
 }) {
   const [fileFilter, setFileFilter] = useState<string>();
   const [severityFilter, setSeverityFilter] = useState<CodeProblem["label"]>();
@@ -71,7 +70,6 @@ export function IdeProblems({ issues, open, reveal, quickFix, copy, onContext, s
         </ContextActions>
       </li>;
     }) : <li className="file-help">{filtered ? "No diagnostics match your filters." : "No editor diagnostics in this workspace."}</li>}
-    {simulated && <li className="file-help">ripgrep missing · Configure its executable in Settings to enable live repository search.</li>}
     </ul>
   </>;
 }

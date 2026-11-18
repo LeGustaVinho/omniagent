@@ -77,7 +77,7 @@ export default function KnowledgeWorkspace(props: WorkspaceProps) {
 
 function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
   const [reveal, setReveal] = useState<{ path: string }>();
-  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated: false });
+  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge" });
   const repository = useRepositoryNotes(checkout.checkoutId, true);
   const notes = repository.notes;
   const workspace = useRef<HTMLElement>(null);
@@ -92,7 +92,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
   const [propertyFilter, setPropertyFilter] = useState<NotePropertyFilter>();
   const [focusSearch, requestSearchFocus] = useState(0);
   const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, true, propertyFilter ? "" : query);
-  const propertiesOf = useKnowledgeProperties(Object.values(notes).map(({ content }) => content), false);
+  const propertiesOf = useKnowledgeProperties(Object.values(notes).map(({ content }) => content));
   const [graph, setGraph] = useState<false | "global" | { path: string; request: number }>(false);
   const graphEdges = useQuery({
     queryKey: ["repository-note-edges", checkout.checkoutId, noteIndex.index.dataUpdatedAt],
@@ -156,7 +156,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
   const lookupLink = useCallback((link: NoteTarget, from: string) => linkPreviewValue(previews.data, link, from), [previews.data]);
   const drafts = useMemo(() => Object.fromEntries(Object.entries(repository.notes).filter(([, value]) => isDirty(value) && !value.sourceProblem)
     .map(([path, { content }]) => [path, noteFrontmatter(content)])), [repository.notes]);
-  const propertySearch = useKnowledgePropertySearch({ checkoutId: checkout.checkoutId, simulated: false, filter: propertyFilter, catalog, drafts,
+  const propertySearch = useKnowledgePropertySearch({ checkoutId: checkout.checkoutId, filter: propertyFilter, drafts,
     indexVersion: noteIndex.index.dataUpdatedAt });
   const needle = query.trim().toLocaleLowerCase();
   const matches = propertyFilter ? propertySearch.hits.filter(({ path, title }) => !needle || path.toLocaleLowerCase().includes(needle)
@@ -374,12 +374,12 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
     ? getNote(path)?.content : undefined, [dock.api, getNote]);
   useCheckoutTextReader(checkout.checkoutId, true, readOpenNote);
   const currentText = readOpenNote;
-  const menu = fileContextActions({ checkout, simulated: false, status: setStatus, report: setProblem, currentText });
-  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, simulated: false, currentText,
+  const menu = fileContextActions({ checkout, status: setStatus, report: setProblem, currentText });
+  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, currentText,
     open: (path) => open(path, undefined, undefined, "source"),
   });
   const revealNote = (path: string) => { setSidebar(true); setDisplay("tree"); setReveal({ path }); };
-  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated: false, bufferAt: (path) => notes[path],
+  const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, bufferAt: (path) => notes[path],
     openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
     restoreLocalText: async (path, content) => {
       const canonical = await loadNote(path);
@@ -405,7 +405,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
     const paths = readOpenNotesTarget(target)?.flatMap((path) => normalizeRepositoryPath(path) ?? []);
     if (paths?.length && dock.ready) startNotesFromTarget(paths);
   }, [dock.ready, target]);
-  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated: false, knowledge: true, report: setProblem,
+  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, knowledge: true, report: setProblem,
     refresh: () => Promise.all([repository.refreshCatalog(), noteIndex.index.refetch({ throwOnError: true })]),
     onCreated: (path, kind, copiedFromDisk) => {
       setStatus(copiedFromDisk ? `Copied ${path}` : `Created ${path}`);
@@ -419,7 +419,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
     const rename = readNoteRenameTarget(target);
     if (rename && dock.ready) startRenameFromTarget(rename);
   }, [dock.ready, target]);
-  const fileOperations = useCheckoutItemOperations({ checkoutId: checkout.checkoutId, simulated: false,
+  const fileOperations = useCheckoutItemOperations({ checkoutId: checkout.checkoutId,
     folders: treeActions.folders, refreshTree: treeActions.refreshTree, report: setProblem, status: setStatus,
     isDirty: (items) => Object.keys(notes).some((path) => isDirty(notes[path]) && items.some((item) => itemIncludesPath(item, path))),
     onRenameNote: (path) => { void requestRename(path); },
@@ -733,7 +733,7 @@ function KnowledgeSurface({ checkout, target, openWorkspace }: WorkspaceProps) {
               <button type="button" className="fw-btn" aria-label="Clear property filter" onClick={() => setPropertyFilter(undefined)}>Clear</button>
             </div>}
             focusRequest={focusSearch} onOpen={(location) => chooseNote(location.path, location.line ?? undefined, location.anchor ?? undefined)} />
-            : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={chooseNote} onOpenNoteFavorite={openNoteFavorite} checkoutId={checkout.checkoutId} workspace="knowledge" simulated={false} reveal={reveal} actions={(item, selection) => selection ? [
+            : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={chooseNote} onOpenNoteFavorite={openNoteFavorite} checkoutId={checkout.checkoutId} workspace="knowledge" reveal={reveal} actions={(item, selection) => selection ? [
               [
                 { label: "Open selected notes", disabled: !selection.some(({ kind }) => kind === "file"),
                   run: () => { void openSelected(selection.filter(({ kind }) => kind === "file").map(({ path }) => path)); } },
