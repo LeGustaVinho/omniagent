@@ -418,7 +418,8 @@ button:disabled { cursor: default; }
 .work-start h1 { font-weight: 650; font-size: 22px; letter-spacing: -.03em; }
 .work-start p, .work-dock-empty p, .work-empty p { color: var(--muted-foreground); font-size: 14px; line-height: 22px; }
 .work-start button { margin-top: 6px; }
-.work-dock-empty { position: absolute; inset: 0; min-height: 0; gap: 9px; padding: 18px; overflow: auto; }
+/* Keep the empty-state actions above Dockview's full-size watermark. */
+.work-dock-empty { position: absolute; inset: 0; z-index: 2; min-height: 0; gap: 9px; padding: 18px; overflow: auto; }
 .work-empty-icon {
   display: grid;
   place-items: center;

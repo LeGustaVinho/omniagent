@@ -1371,7 +1371,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
 
     await browser.$('button[aria-label="Close settings"]').click();
     await chooseConversations(browser);
-    await browser.$('button[aria-label="New conversation"]').click();
+    await click(browser, 'button[aria-label="Start a new conversation"]');
     const newConversation = browser.$('.conversation-pipeline-dialog[role="dialog"]');
     await newConversation.$("h2=Choose a conversation pipeline").waitForDisplayed();
     assert.equal(await newConversation.$("button=Create conversation").isEnabled(), false);
