@@ -1,4 +1,4 @@
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { Bot, Braces, CirclePause, GitFork, GitMerge, Layers3, Plus, Repeat2, UserRoundCheck, Waypoints } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -19,10 +19,10 @@ const nodeTypes = [
 export const builderNodeKinds = nodeTypes.map(({ kind }) => kind);
 export type WorkflowCatalogItem = { name: string; version: ReusableVersion; blockers: string[]; typedPrompt?: boolean; nodePrefab?: boolean; prompt?: boolean };
 
-export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse }: {
+export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse, open, onOpenChange, onCloseAutoFocus, canvasActions }: {
   projectId: string; disabled: boolean; onAdd: (kind: string) => void; onReuse: (node: ReusableDescription) => void;
+  open: boolean; onOpenChange: (open: boolean) => void; onCloseAutoFocus: (event: Event) => void; canvasActions?: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   const catalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<WorkflowCatalogItem[]>("workflow_package_catalog", { projectId }),
@@ -30,18 +30,19 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse }: {
   });
   const load = useMutation({
     mutationFn: (version: ReusableVersion) => reusableNodeQuery(projectId, version).queryFn(),
-    onSuccess: (node) => { onReuse(node); setOpen(false); },
+    onSuccess: (node) => { onReuse(node); onOpenChange(false); },
   });
   const reusable = (catalog.data ?? []).filter(({ version, nodePrefab, prompt }) =>
     version.kind === "subflow" && (nodePrefab || !prompt));
   return <WorkflowBuilderDialog title="Add node" description="Choose a node or reuse a published configuration."
-    open={open} onOpenChange={setOpen} trigger={<Button type="button" variant="outline" disabled={disabled}>
+    open={open} onOpenChange={(next) => { if (next || !load.isPending) onOpenChange(next); }}
+    onCloseAutoFocus={onCloseAutoFocus} trigger={<Button type="button" variant="outline" disabled={disabled}>
       <Plus size={15} aria-hidden /> Add node
     </Button>}>
     <div className="workflow-node-picker-list">
-      {nodeTypes.map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" onClick={() => {
+      {nodeTypes.map(({ kind, label, icon: Icon }) => <Button type="button" key={kind} variant="outline" disabled={load.isPending} onClick={() => {
         onAdd(kind);
-        setOpen(false);
+        onOpenChange(false);
       }}><Icon size={16} aria-hidden /> {label}</Button>)}
     </div>
     {catalog.isLoading && <p role="status">Loading reusable nodes…</p>}
@@ -55,5 +56,6 @@ export function WorkflowNodePicker({ projectId, disabled, onAdd, onReuse }: {
       </Button>)}
     </fieldset>}
     {(catalog.error ?? load.error) && <p role="alert">{String(catalog.error ?? load.error)}</p>}
+    {canvasActions}
   </WorkflowBuilderDialog>;
 }

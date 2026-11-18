@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { Handle, MarkerType, MiniMap, Position, useUpdateNodeInternals,
-  type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance, type Viewport } from "@xyflow/react";
+  type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance, type Viewport, type XYPosition } from "@xyflow/react";
 import { ChevronRight, CircleAlert, Focus, GitBranch, MessageSquareText, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
@@ -185,7 +185,9 @@ const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTh
 type PendingConnection = { endpoint: WorkflowEndpoint; side: PortSide; replacing?: string };
 type EditorHistory = { past: WorkflowEditorState[]; future: WorkflowEditorState[] };
 type CanvasTarget = { kind: "pane" } | { kind: "node" | "edge"; id: string } | { kind: "selection"; ids: string[] };
-type CanvasMenu = { target: CanvasTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement };
+type CanvasMenu = { target: CanvasTarget; point: XYPosition; origin?: HTMLElement | SVGElement };
+type InsertToolsOptions = { open: boolean; onOpenChange: (open: boolean) => void;
+  onCloseAutoFocus: (event: Event) => void; canvasActions?: ReactNode };
 type GraphSelection = {
   nodes: { node: WorkflowGraphNode; position: { x: number; y: number }; binding?: WorkflowNodeBinding;
     definition?: NonNullable<WorkflowCanvasEdit["definitionCopies"]>[string] }[];
@@ -232,7 +234,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   onViewportChange?: (viewport: Viewport) => void;
   promptRoles?: Record<string, string>;
   inspectPrompt?: (id: string) => ReactNode;
-  insertTools?: (insert: (kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) => void) => ReactNode;
+  insertTools?: (insert: (kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) => void,
+    options: InsertToolsOptions) => ReactNode;
   cloneBinding?: (binding: WorkflowNodeBinding) => WorkflowNodeBinding;
 }) {
   const { graph, layout } = state;
@@ -250,6 +253,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [flow, setFlow] = useState<ReactFlowInstance<CanvasNode, Edge>>();
   const [inspectorRequest, revealInspector] = useState(0);
   const [menu, setMenu] = useState<CanvasMenu>();
+  const [insertion, setInsertion] = useState<{ contextual: boolean; position?: XYPosition }>();
+  const restoreCanvasAfterInsertion = useRef(false);
   const [clipboard, setClipboard] = useState<GraphSelection>();
   const canvas = useRef<HTMLDivElement>(null);
   const dragging = useRef<WorkflowLayout>({});
@@ -394,10 +399,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const definition = catalog.find((entry) => entry.kind === kind);
     if (!definition) return;
     const bounds = canvas.current?.getBoundingClientRect();
-    const point = bounds && flow ? flow.screenToFlowPosition({
+    const point = insertion?.position ?? (bounds && flow ? flow.screenToFlowPosition({
       x: bounds.left + bounds.width / 2,
       y: bounds.top + bounds.height / 2,
-    }) : { x: 270, y: 120 };
+    }) : { x: 270, y: 120 });
     insert({ nodes: [{ node: { id: kind.replaceAll("_", "-"), kind,
       configuration: configuration ?? defaultConfiguration(definition.configuration) }, position: { x: 0, y: 0 }, binding }], wires: [] }, point, false);
     revealInspector((request) => request + 1);
@@ -534,9 +539,18 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   function openMenu(event: MouseEvent | globalThis.MouseEvent, target: CanvasTarget) {
     event.preventDefault();
     event.stopPropagation();
+    const point = { x: event.clientX, y: event.clientY };
+    if (target.kind === "pane" && openNodePicker(point)) return;
     const origin = event.currentTarget;
-    setMenu({ target, point: { x: event.clientX, y: event.clientY },
+    setMenu({ target, point,
       origin: origin instanceof HTMLElement || origin instanceof SVGElement ? origin : undefined });
+  }
+
+  function openNodePicker(point?: XYPosition) {
+    if (!insertTools || disabled) return false;
+    restoreCanvasAfterInsertion.current = point !== undefined;
+    setInsertion({ contextual: point !== undefined, position: point && flow?.screenToFlowPosition(point) });
+    return true;
   }
 
   function copy(text: string) {
@@ -573,11 +587,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     ]];
   }
 
-  function menuGroups(target: CanvasTarget): { label: string; groups: MenuGroups } | undefined {
+  function menuGroups(target: CanvasTarget, anchor?: XYPosition): { label: string; groups: MenuGroups } | undefined {
     if (target.kind === "pane") return { label: "Pipeline canvas", groups: [[
       { label: "Fit graph to view", disabled: !flow, run: () => { void flow?.fitView({ padding: 0.15, maxZoom: 1 }); } },
       ...(clipboard ? [{ label: clipboard.nodes.length === 1 ? "Paste node here" : `Paste ${clipboard.nodes.length} nodes here`, disabled,
-        run: () => insert(clipboard, menu && flow ? flow.screenToFlowPosition(menu.point) : undefined) }] : []),
+        run: () => insert(clipboard, anchor) }] : []),
       { label: "Copy graph JSON", run: () => copy(JSON.stringify(graph, null, 2)) },
     ], [
       { label: "Undo graph edit", disabled: disabled || !history.past.length, run: () => restore("undo") },
@@ -616,7 +630,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     ]] };
   }
 
-  const context = menu && menuGroups(menu.target);
+  const context = menu && menuGroups(menu.target, flow?.screenToFlowPosition(menu.point));
+  const canvasActions = insertion?.contextual && menuGroups({ kind: "pane" }, insertion.position);
 
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
@@ -639,7 +654,24 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   }}>
     <PipelineToolbar>
       {toolbarStart}
-      {insertTools?.(insertNew)}
+      {insertTools?.(insertNew, {
+        open: Boolean(insertion),
+        onOpenChange: (open) => { if (open) openNodePicker(); else setInsertion(undefined); },
+        onCloseAutoFocus: (event) => {
+          if (!restoreCanvasAfterInsertion.current) return;
+          restoreCanvasAfterInsertion.current = false;
+          event.preventDefault();
+          canvas.current?.focus();
+        },
+        canvasActions: canvasActions && <details className="pipeline-evidence">
+          <summary>Canvas actions</summary>
+          <div className="pipeline-actions">{canvasActions.groups.flat().map((action) => "run" in action && <Button
+            key={action.label} type="button" variant="outline" disabled={action.disabled} onClick={() => {
+              setInsertion(undefined);
+              action.run();
+            }}>{action.label}</Button>)}</div>
+        </details>,
+      })}
       <label className="pipeline-inline-field workflow-graph-name"><span>Pipeline name</span><input aria-label="Pipeline name" value={graph.name} disabled={disabled} onChange={(event) => {
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
@@ -669,6 +701,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         const target: CanvasTarget = id ? { kind: anchor?.classList.contains("react-flow__edge") ? "edge" : "node", id }
           : anchor?.classList.contains("react-flow__nodesselection-rect") && selectedNodes.length > 1
             ? { kind: "selection", ids: selectedNodes } : { kind: "pane" };
+        if (target.kind === "pane" && openNodePicker({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })) return;
         setMenu({ target,
           point: { x: rect.left + 8, y: rect.top + 8 }, origin });
       }}>

@@ -147,7 +147,7 @@ it("loads published Library artifacts without loading the Builder node registry"
   expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: exampleCheckout.projectId });
 });
 
-it("adds an AI Node and saves its Prompt artifact with both Schema references", async () => {
+it("uses the canvas node picker and saves an AI Node with its position and Schema references", async () => {
   const typedStart = { ...start, kind: "typed_start", configuration: "typed_start" };
   const end = { ...start, kind: "end", title: "End", configuration: "end", inputs: [control("ready")], outputs: [control("completed")] };
   const subflow = { ...start, kind: "subflow", title: "Function", inputs: [], outputs: [] };
@@ -184,8 +184,17 @@ it("adds an AI Node and saves its Prompt artifact with both Schema references", 
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Add node" }));
-  await user.click(within(screen.getByRole("dialog", { name: "Add node" })).getByRole("button", { name: "AI Node Agent" }));
+  await screen.findByRole("button", { name: "Add node" });
+  const canvas = screen.getByLabelText("Workflow canvas actions");
+  canvas.focus();
+  fireEvent.keyDown(canvas, { key: "F10", shiftKey: true });
+  expect(await screen.findByRole("dialog", { name: "Add node" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(canvas));
+
+  fireEvent.contextMenu(screen.getByTestId("test-pipeline-pane"), { clientX: 325, clientY: 185 });
+  await user.click(within(await screen.findByRole("dialog", { name: "Add node" })).getByRole("button", { name: "AI Node Agent" }));
+  expect(screen.getByTestId("node-subflow").getAttribute("data-position")).toBe(JSON.stringify({ x: 325, y: 185 }));
   const settings = within(await screen.findByLabelText("AI Node Agent settings"));
   await user.selectOptions(settings.getByRole("combobox", { name: "Role" }), settings.getByRole("option", { name: /^Summarizer/ }));
   const input = settings.getByRole("combobox", { name: "Input Schema" });
@@ -194,7 +203,9 @@ it("adds an AI Node and saves its Prompt artifact with both Schema references", 
   await user.selectOptions(output, within(output).getByRole("option", { name: /^Outgoing/ }));
   await user.type(settings.getByRole("textbox", { name: "Prompt" }), "Summarize the message.");
   await user.click(screen.getByRole("button", { name: "Save draft revision" }));
-  expect(ipc).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({ package: expect.objectContaining({
+  expect(ipc).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({ canvasByMember: {
+    workflow: { layout: { subflow: { x: 325, y: 185 } }, updateDefinitions: {} },
+  }, package: expect.objectContaining({
     members: expect.arrayContaining([expect.objectContaining({
       key: "agent",
       body: { kind: "prompt", prompt: expect.objectContaining({ text: "Summarize the message.", schemaContract: true }) },

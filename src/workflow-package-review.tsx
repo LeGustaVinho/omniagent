@@ -432,8 +432,8 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
       fullHeight toolbarStart={toolbarStart} initialViewport={initialViewport} onViewportChange={onViewportChange}
-      insertTools={newPrompt && graph.nodes.some(({ kind }) => kind === "end") ? (insert) =>
-        <WorkflowNodePicker projectId={projectId} disabled={disabled} onAdd={(kind) => {
+      insertTools={newPrompt && graph.nodes.some(({ kind }) => kind === "end") ? (insert, options) =>
+        <WorkflowNodePicker {...options} projectId={projectId} disabled={disabled} onAdd={(kind) => {
           if (kind === "subflow") insert(kind, { reference: newPrompt() });
           else insert(kind);
         }} onReuse={({ artifact }) => insert("subflow", { reference: { source: "published", version: artifact.version } })} /> : undefined}
