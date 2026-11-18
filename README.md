@@ -53,7 +53,7 @@ Create a pipeline that passes a typed request through a Wait node and returns it
 
 ### Run the Development Pipeline
 
-1. Open **Pipelines → Builder → From template → Use template**. Choose **Development Pipeline** and a local Codex or Claude model, then create the draft. You can also find the template and its built-in Functions, Schemas, Node Prefabs, and Roles under **Pipelines → Library → Native templates**.
+1. Open **Pipelines → Builder → From template → Use template**. Choose **Development Pipeline** and a local Codex or Claude model, then create the draft. Under **Pipelines → Library → Native templates**, choose an artifact category and select **View** to inspect the bundled definitions.
    The draft opens on the main graph. Use **Back to pipeline** from a Function or Node Prefab editor. Review and publish the draft when its project-specific revision is ready.
 2. Launch it from a registered Git checkout and enter the feature request. Set the remote and destination branch when the project needs an explicit target. Delivery requires a project policy that allows repository writes for the Agent role, access to the project's test and build commands, and an authenticated GitHub CLI.
 3. Review the plan and backlog in **Runs** and authorize the managed task worktrees when prompted. Review the exact pull request revision when a merge requires approval. The final result records the integration SHA, delivered work and any blockers.

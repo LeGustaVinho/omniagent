@@ -4,13 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, Braces, Layers3, Plus, Waypoints } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PipelineSectionHeading } from "@/pipeline-layout";
-import { packageDraftTarget, schemaMember, WorkflowTemplateChooser, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
+import { packageDraftTarget, schemaMember, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import type { WorkflowCatalogItem } from "@/workflow-node-picker";
 import { defaultTypedPrompt } from "@/workflow-prompt-model";
 import type { ReusableBody, ReusableReference } from "@/workflow-reusable";
 import type { WorkspaceProps } from "@/workbench-contract";
-import { workflowTemplates } from "@/workflow-templates";
+import { NativeWorkflowTemplates } from "@/workflow-native-templates";
 
 const sections = [
   { key: "schema", label: "Schemas", title: "Schema", icon: Braces, description: "Define the data nodes can pass to each other.",
@@ -19,10 +19,6 @@ const sections = [
     includes: ({ nodePrefab }: WorkflowCatalogItem) => Boolean(nodePrefab) },
   { key: "function", label: "Functions", title: "Function", icon: Waypoints, description: "Build a reusable graph between Start and Return.",
     includes: ({ version, prompt, typedPrompt }: WorkflowCatalogItem) => version.kind === "subflow" && !prompt && !typedPrompt },
-] as const;
-
-const nativeCategories = [
-  ["subflow", "Functions"], ["schema", "Schemas"], ["prefab", "Node Prefabs"], ["role", "Roles"], ["prompt", "Prompts"],
 ] as const;
 
 type DraftKind = typeof sections[number]["key"];
@@ -89,22 +85,7 @@ export function WorkflowLibrary({ projectId, openWorkspace }: { projectId: strin
   const items = catalog.data ?? [];
   return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
     <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
-    <section className="workflow-library-section" aria-label="Native templates">
-      <h3>Native templates</h3>
-      {workflowTemplates.map((template) => <article className="pipeline-stack" key={template.key} aria-label={template.name}>
-        <header className="pipeline-actions justify-between">
-          <h4>{template.name}</h4>
-          <WorkflowTemplateChooser projectId={projectId} initialTemplateKey={template.key} onCreated={openDraft} />
-        </header>
-        {nativeCategories.map(([kind, label]) => {
-          const members = template.members.filter((member) => member.kind === kind);
-          return !!members.length && <details key={kind}>
-            <summary>{label} ({members.length})</summary>
-            <ul aria-label={label}>{members.map(({ key, name }) => <li key={key}><strong>{name}</strong></li>)}</ul>
-          </details>;
-        })}
-      </article>)}
-    </section>
+    <NativeWorkflowTemplates projectId={projectId} onCreated={openDraft} />
     {(catalog.error || drafts.error || !open && draft.error) && <p role="alert">{String(catalog.error ?? drafts.error ?? draft.error)}</p>}
     {catalog.isPending && <p role="status">Loading published artifacts…</p>}
     {sections.map(({ key, label, title, description, icon: Icon, includes }) => {

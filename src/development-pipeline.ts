@@ -3,7 +3,7 @@ import type { ReusableBody, ReusableReference } from "@/workflow-reusable";
 import type { WorkflowEndpoint, WorkflowGraph, WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import type { SchemaField } from "@/workflow-schema-model";
 import {
-  boolean, developmentPrompts as prompts, developmentReview, developmentRole, developmentRoleName, developmentRoles,
+  boolean, developmentPrompts as prompts, developmentReview, developmentRole, developmentRoleDefinition, developmentRoleName, developmentRoles,
   developmentSchemas as schemas, field, integer, list, object, type DevelopmentRole,
 } from "@/development-pipeline-content";
 
@@ -401,9 +401,12 @@ function developmentPipelineMembers(): Member[] {
 
 export function developmentPipelineCatalog() {
   return [
-    ...developmentRoles.map((key) => ({ key: `role-${key}`, name: developmentRoleName(key), kind: "role" })),
-    ...developmentPipelineMembers().map(({ key, name, body }) =>
-      ({ key, name, kind: body.kind === "prompt" && body.prompt?.nodePrefab ? "prefab" : body.kind })),
+    ...developmentRoles.map((key) => ({
+      key: `role-${key}`, name: developmentRoleName(key), kind: "role", body: { kind: "role", template: developmentRoleDefinition(key) },
+    })),
+    ...developmentPipelineMembers().map((member) => ({
+      ...member, kind: member.body.kind === "prompt" && member.body.prompt?.nodePrefab ? "prefab" : member.body.kind,
+    })),
   ];
 }
 

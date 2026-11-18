@@ -200,3 +200,101 @@
   color: var(--muted-foreground);
   font-size: .72rem;
 }
+
+.workflow-native-template-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 35rem), 1fr));
+  gap: .8rem;
+  max-inline-size: 76rem;
+}
+
+.workflow-native-template {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: .7rem;
+  background: var(--card);
+}
+
+.workflow-native-template-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .7rem;
+  padding: .8rem 1rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.workflow-native-template-heading > svg { flex: none; color: var(--primary); }
+.workflow-native-template-heading > h4 { flex: 1 1 10rem; font-weight: 650; }
+
+.workflow-native-template-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+  padding: .55rem .8rem;
+}
+
+.workflow-native-template-categories button span {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.workflow-native-template-categories button[aria-pressed="true"] { background: var(--muted); }
+
+.workflow-library-section ul.workflow-native-template-artifacts {
+  margin: 0;
+  padding: .2rem .8rem .8rem;
+  max-block-size: 20rem;
+  overflow-y: auto;
+}
+
+.workflow-native-template-artifacts > li { background: var(--background); }
+.workflow-native-template-artifacts > li > strong { overflow-wrap: anywhere; }
+
+.workflow-native-graph-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: .75rem;
+}
+
+.workflow-native-graph-details > section {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: .55rem;
+}
+
+.workflow-native-graph-details h3 {
+  padding: .6rem .75rem;
+  border-block-end: 1px solid var(--border);
+  font-weight: 650;
+}
+
+.workflow-native-graph-details ul {
+  max-block-size: 18rem;
+  overflow-y: auto;
+}
+
+.workflow-native-graph-details li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: .4rem .75rem;
+  padding: .45rem .75rem;
+  overflow-wrap: anywhere;
+}
+
+.workflow-native-graph-details li + li { border-block-start: 1px solid var(--border); }
+
+.workflow-native-source {
+  max-block-size: 24rem;
+  overflow: auto;
+  padding: .75rem;
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  background: var(--background);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.workflow-native-references dt { font-weight: 650; }
+.workflow-native-references dd { overflow-wrap: anywhere; }

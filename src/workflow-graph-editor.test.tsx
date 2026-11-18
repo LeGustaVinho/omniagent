@@ -100,7 +100,7 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   expect(screen.getByTestId(edge)).toBeTruthy();
 });
 
-it("shows native template assets in Library with no published project artifacts", async () => {
+it("groups and opens native template artifacts read-only without publishing a draft", async () => {
   const ipc = vi.mocked(invoke);
   ipc.mockClear();
   ipc.mockResolvedValue([]);
@@ -112,12 +112,20 @@ it("shows native template assets in Library with no published project artifacts"
   expect(await library.findByText("No published schemas.")).toBeTruthy();
   const native = within(library.getByRole("article", { name: "Development Pipeline" }));
   const user = userEvent.setup();
-  for (const [category, asset] of [
-    ["Functions", "Clarify Requirements"], ["Schemas", "Feature Request"],
-    ["Node Prefabs", "Discovery Analyst"], ["Roles", "Delivery Engineer"],
+  for (const [category, asset, detail] of [
+    ["Pipeline", "Development Pipeline", "Connections"], ["Functions", "Clarify Requirements", "Nodes"],
+    ["Schemas", "Feature Request", "JSON Schema"], ["Node Prefabs", "Discovery Analyst", "Prompt"],
+    ["Roles", "Delivery Engineer", "Role"],
   ] as const) {
-    await user.click(native.getByText((text) => text.startsWith(category + " (")));
-    expect(within(native.getByRole("list", { name: category })).getByText(asset)).toBeTruthy();
+    const categoryButton = native.getByRole("button", { name: new RegExp(`^${category} \\d+$`) });
+    await user.click(categoryButton);
+    expect(categoryButton.getAttribute("aria-pressed")).toBe("true");
+    await user.click(within(native.getByRole("list", { name: category })).getByRole("button", { name: `View ${asset}` }));
+    const dialog = within(await screen.findByRole("dialog", { name: asset }));
+    expect(dialog.getByRole("region", { name: detail })).toBeTruthy();
+    expect(dialog.getByText("Artifact source")).toBeTruthy();
+    expect(dialog.queryByRole("textbox")).toBeNull();
+    await user.keyboard("{Escape}");
   }
   expect(native.getByRole("button", { name: "Use template" })).toBeTruthy();
   expect(ipc).not.toHaveBeenCalledWith("create_workflow_package", expect.anything());

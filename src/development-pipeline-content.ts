@@ -79,12 +79,16 @@ const roles = {
 export type DevelopmentRole = keyof typeof roles;
 export const developmentRoleName = (key: DevelopmentRole) => roles[key][0];
 
-export function developmentRole(key: DevelopmentRole, model: ModelSelection): RoleSnapshot {
+export function developmentRoleDefinition(key: DevelopmentRole): Omit<RoleSnapshot, "model"> {
   const [name, toolScope, instructions] = roles[key];
   return {
-    name, role: "agent", model, effort: null, toolScope, reviewPolicy: "independent", instructions,
+    name, role: "agent", effort: null, toolScope, reviewPolicy: "independent", instructions,
     completionContract: "Return one JSON object matching the Output Schema. Cite the commands, source paths, Git revisions, or check results that support your findings.",
   };
+}
+
+export function developmentRole(key: DevelopmentRole, model: ModelSelection): RoleSnapshot {
+  return { ...developmentRoleDefinition(key), model };
 }
 
 export const developmentRoles = Object.keys(roles) as DevelopmentRole[];
