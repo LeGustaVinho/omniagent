@@ -58,6 +58,7 @@ function DeliveryRow({ item, conversationId, runId, live }: {
       client.invalidateQueries({ queryKey: ["conversation-run", runId, "input"] }),
       client.invalidateQueries({ queryKey: ["conversation", conversationId, "instructions"] }),
       client.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] }),
+      client.invalidateQueries({ queryKey: ["conversation", conversationId, "pipeline-turns"] }),
       client.invalidateQueries({ queryKey: ["project-job-queue"] }),
     ]),
   });

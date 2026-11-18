@@ -215,14 +215,16 @@ pub(crate) fn revise_direct_turn_input(
     conversation: &str,
     job: &str,
     revision: &str,
+    history_context: Option<&str>,
 ) -> Result<()> {
     let pending = db
         .query_row(
             "SELECT t.sequence, t.payload, t.workflow_run_id FROM conversation_pipeline_turns t
          JOIN workflow_run_pins p ON p.pipeline_run_id = t.workflow_run_id
          WHERE t.conversation_id = ?1 AND t.request_id = ?2 AND t.state = 'running'
-           AND p.project_id = ?3 AND p.workflow_id = ?4 AND t.message_revision_id IS NOT ?5",
-            params![conversation, job, project, WORKFLOW_ID, revision],
+           AND p.project_id = ?3 AND p.workflow_id = ?4
+           AND (t.message_revision_id IS NOT ?5 OR (?6 IS NOT NULL AND t.history_context_id IS NOT ?6))",
+            params![conversation, job, project, WORKFLOW_ID, revision, history_context],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -242,6 +244,12 @@ pub(crate) fn revise_direct_turn_input(
         .inputs
         .values
         .insert("messageRevisionId".into(), revision.into());
+    if let Some(history_context) = history_context {
+        saved
+            .inputs
+            .values
+            .insert("historyContextId".into(), history_context.into());
+    }
     launch.inputs = saved.inputs.values.clone();
     let launch_payload = serde_json::to_vec(&launch)?;
     let original: String = db.query_row(
@@ -265,7 +273,7 @@ pub(crate) fn revise_direct_turn_input(
              WHERE pipeline_run_id = ?1 AND node_instance_id = 'start' AND execution_key = ''",
             params![run, artifact.id, digest(&launch_payload)],
         )?;
-        // The queued instruction is still editable, so no attempt has consumed the draft binding.
+        // Replace the draft binding before recording delivery of this instruction.
         db.execute("DELETE FROM workflow_artifacts WHERE id = ?1", [original])?;
     }
     db.execute(
@@ -273,8 +281,14 @@ pub(crate) fn revise_direct_turn_input(
         params![run, protection::protect(&launch_payload)?],
     )?;
     db.execute(
-        "UPDATE conversation_pipeline_turns SET message_revision_id = ?2, payload = ?3 WHERE sequence = ?1",
-        params![sequence, revision, protection::protect(&serde_json::to_vec(&saved)?)?],
+        "UPDATE conversation_pipeline_turns SET message_revision_id = ?2, payload = ?3,
+         history_context_id = coalesce(?4, history_context_id) WHERE sequence = ?1",
+        params![
+            sequence,
+            revision,
+            protection::protect(&serde_json::to_vec(&saved)?)?,
+            history_context
+        ],
     )?;
     Ok(())
 }

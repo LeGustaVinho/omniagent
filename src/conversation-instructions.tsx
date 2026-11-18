@@ -62,6 +62,7 @@ export function useConversationInstructions(conversationId: string, visible: boo
     queryClient.invalidateQueries({ queryKey: key }),
     queryClient.invalidateQueries({ queryKey: deliveryKey }),
     queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] }),
+    queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "pipeline-turns"] }),
     queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
   ]);
   return { data: query.data ?? [], deliveries: deliveries.data ?? [], error: query.error, refresh,

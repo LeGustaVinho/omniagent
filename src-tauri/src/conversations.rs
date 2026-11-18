@@ -134,6 +134,7 @@ pub struct AttemptPlan {
     pub agent_session_id: String,
     pub previous_run_id: Option<String>,
     pub context_id: String,
+    pub(crate) input_history_context_id: String,
     pub resume_cursor_id: Option<String>,
     pub intent: SessionIntent,
     pub scope: SessionScope,
@@ -1828,6 +1829,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         link_question_reply(db, &run.id, request_event_seq, &origin, reply)?;
         answered_question = Some(origin);
     }
+    let input_history_context_id = input_context_id.clone();
     let native_job_recovery = match history {
         AttemptHistory::Resume { native } if resume_cursor_id.is_some() => native,
         _ => None,
@@ -1838,6 +1840,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         agent_session_id,
         previous_run_id,
         context_id,
+        input_history_context_id,
         resume_cursor_id,
         intent,
         scope,
@@ -3321,17 +3324,46 @@ mod tests {
         assert_eq!(pending[0].delivery, InstructionDelivery::NeedsReview);
         assert_eq!(pending[0].run_id.as_deref(), Some(original.run.id.as_str()));
         assert!(store.claim_next_job(env.clone()).await?.is_none());
+        store.advance_conversation_pipeline_turns().await?;
+        let turns = serde_json::to_value(
+            store
+                .conversation_pipeline_turns(conversation.id.clone())
+                .await?,
+        )?;
+        let turn = turns
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["requestId"] == uncertain.id)
+            .context("Missing pipeline for the uncertain instruction")?;
+        assert_eq!(turn["state"], "failed");
+        let workflow_run = turn["runId"]
+            .as_str()
+            .context("Missing pipeline run")?
+            .to_owned();
         store
             .resolve_uncertain_steering(
                 conversation.id.clone(),
-                uncertain.id,
+                uncertain.id.clone(),
                 uncertain.revision_id.clone(),
                 original.run.id.clone(),
                 true,
             )
             .await?;
+        let turns = serde_json::to_value(
+            store
+                .conversation_pipeline_turns(conversation.id.clone())
+                .await?,
+        )?;
+        let turn = turns
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["requestId"] == uncertain.id)
+            .context("Missing reopened pipeline")?;
+        assert_eq!(turn["state"], "running");
         let reviewed = store
-            .agent_dispatch(conversation.id, original.run.id)
+            .agent_dispatch(conversation.id.clone(), original.run.id)
             .await?
             .unwrap();
         assert_eq!(
@@ -3357,6 +3389,25 @@ mod tests {
                 .count(),
             1
         );
+        store.mark_agent_running(retry.run.id.clone()).await?;
+        store
+            .finish_agent_attempt(
+                retry.run.id,
+                RunStatus::Succeeded,
+                Some("Reviewed reply".into()),
+            )
+            .await?;
+        store.advance_conversation_pipeline_turns().await?;
+        let turns =
+            serde_json::to_value(store.conversation_pipeline_turns(conversation.id).await?)?;
+        let turn = turns
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["requestId"] == uncertain.id)
+            .context("Missing completed pipeline")?;
+        assert_eq!(turn["state"], "succeeded");
+        assert_eq!(turn["runId"], workflow_run);
         Ok(())
     }
 
@@ -7785,6 +7836,11 @@ mod tests {
                 Some("Previous turn settled".into()),
             )
             .await?;
+        let expected_history = store
+            .conversation_history(chat.id.clone())
+            .await?
+            .context_id;
+        assert_ne!(expected_history, active.context_id);
 
         let pending = store
             .pending_conversation_instructions(chat.id.clone(), environment.clone())
@@ -7794,13 +7850,42 @@ mod tests {
             store.claim_next_job(environment.clone()),
             other.revise_pending_instruction(
                 chat.id.clone(),
-                first.id,
+                first.id.clone(),
                 pending[0].revision_id.clone(),
                 "racing-instruction".into(),
                 None
             ),
         );
         let plan = claim?.context("Missing instruction claim")?;
+        assert_eq!(plan.input_history_context_id, expected_history);
+        let turns =
+            serde_json::to_value(store.conversation_pipeline_turns(chat.id.clone()).await?)?;
+        let turn = turns
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["requestId"] == first.id)
+            .context("Missing pipeline for the queued instruction")?;
+        let run_id = turn["runId"]
+            .as_str()
+            .context("Missing pipeline execution")?;
+        let run = store
+            .inspect_workflow_execution(first.project_id.clone(), run_id.into())
+            .await?
+            .context("Missing pipeline evidence")?;
+        let launch = run.launch.context("Missing launch evidence")?;
+        assert_eq!(launch.inputs["historyContextId"], expected_history);
+        let input = run
+            .outputs
+            .iter()
+            .find(|output| {
+                output.artifact.node_instance_id == "start" && output.artifact.port == "inputs"
+            })
+            .context("Missing Start artifact")?;
+        assert!(
+            matches!(&input.artifact.value, crate::workflows::ArtifactValue::JsonObject(values)
+            if values["historyContextId"] == expected_history)
+        );
         let accepted = plan.input.last().context("Missing claimed revision")?;
         assert_eq!(
             accepted.text,

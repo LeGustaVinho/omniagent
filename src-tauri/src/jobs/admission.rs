@@ -587,13 +587,6 @@ impl Store {
                 } else {
                     None
                 };
-                if let Some(claim) = adopted.as_ref().or(standalone.as_ref())
-                    && let Some(context) = &job.context
-                {
-                    crate::workflows::conversation_turns::revise_direct_turn_input(
-                        &tx, &job.project_id, &context.conversation_id, &claim.job_id, &claim.revision_id,
-                    )?;
-                }
                 let mut plan = build_attempt(
                     &tx, &job, inputs, checkpoint.as_ref(), allocation,
                     adopted.as_ref().map(|claim| claim.revision_id.clone()),
@@ -630,6 +623,17 @@ impl Store {
                         tx.execute("DELETE FROM native_goal_resume_checkpoints WHERE job_id = ?1", [&job.id])?;
                     }
                     if let Some(claim) = adopted.or(standalone) {
+                        if claim.job_id == job.id {
+                            crate::workflows::conversation_turns::reopen_direct_turn(&tx, &job)?;
+                        } else {
+                            let instruction = load_job(&tx, &job.project_id, &claim.job_id)?
+                                .context("The claimed instruction lost its job")?;
+                            crate::workflows::conversation_turns::reopen_direct_turn(&tx, &instruction)?;
+                        }
+                        crate::workflows::conversation_turns::revise_direct_turn_input(
+                            &tx, &job.project_id, &plan.conversation_id, &claim.job_id, &claim.revision_id,
+                            Some(&plan.input_history_context_id),
+                        )?;
                         claim.record(&tx, plan)?;
                     } else if let Some(checkpoint) = &checkpoint {
                         instruction_delivery::carry_unsent_instruction(&tx, checkpoint.run_id(), plan)?;

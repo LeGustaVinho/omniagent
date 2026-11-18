@@ -449,7 +449,7 @@ pub(crate) fn record_event(
 
 fn recheck_fallback_destination(db: &Connection, conversation: &str, id: &str) -> Result<()> {
     let (project, settings) = conversation_policy(db, conversation)?;
-    let job = load_job(db, &project, id)?.context("Steering fallback lost its job")?;
+    let mut job = load_job(db, &project, id)?.context("Steering fallback lost its job")?;
     let selected = load_conversation(db, conversation)?;
     let recorded = job
         .context
@@ -470,6 +470,10 @@ fn recheck_fallback_destination(db: &Connection, conversation: &str, id: &str) -
                 .conversation_override
                 .unwrap_or(settings.project_default),
         )?;
+        job = load_job(db, &project, id)?.context("Steering fallback lost its job")?;
+    }
+    if job.queue_state != QueueState::Cancelled {
+        crate::workflows::conversation_turns::reopen_direct_turn(db, &job)?;
     }
     Ok(())
 }
