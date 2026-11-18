@@ -2810,6 +2810,18 @@ test("compares models from a saved Markdown revision in Knowledge", { timeout: 9
     const comparisonRow = knowledge.$(`button=${comparisonPath}`);
     await comparisonRow.waitForDisplayed();
     await comparisonRow.click({ button: "right" });
+    const noteMenu = `.context-actions-menu[aria-label=${JSON.stringify(comparisonPath)}]`;
+    await browser.$(noteMenu).waitForDisplayed();
+    const [menuSurface, themeSurface] = await browser.execute((selector) => {
+      const menu = document.querySelector(selector);
+      const swatch = document.createElement("span");
+      swatch.style.backgroundColor = "var(--elevated)";
+      menu.appendChild(swatch);
+      const colors = [getComputedStyle(menu).backgroundColor, getComputedStyle(swatch).backgroundColor];
+      swatch.remove();
+      return colors;
+    }, noteMenu);
+    assert.equal(menuSurface, themeSurface, "The Knowledge file menu should cover the editor with the theme's menu surface");
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Compare models from note…"]');
     const compare = browser.$('section[aria-label="Model comparisons"]');
     const source = compare.$('[aria-label="Saved note input"]');

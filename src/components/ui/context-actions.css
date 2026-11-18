@@ -24,8 +24,8 @@
   padding: .3rem;
   border: 1px solid var(--border);
   border-radius: .45rem;
-  background: var(--popover);
-  color: var(--popover-foreground);
+  background: var(--elevated);
+  color: var(--foreground);
   box-shadow: 0 .5rem 1.5rem #0004;
   font-size: .8125rem;
 }
