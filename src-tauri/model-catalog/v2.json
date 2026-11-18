@@ -1,0 +1,140 @@
+{
+  "version": 2,
+  "models": [
+    {
+      "provider": "claude", "id": "claude-fable-5-2", "name": "Claude Fable 5.2",
+      "intelligenceTenths": 993, "apiReferenceCents": 1600, "priceScore": 95
+    },
+    {
+      "provider": "codex", "id": "gpt-6.2-astra", "name": "GPT‑6.2 Astra",
+      "intelligenceTenths": 973, "apiReferenceCents": 1600, "priceScore": 95
+    },
+    {
+      "provider": "antigravity", "id": "gemini-4-carbon", "name": "Gemini 4 Carbon",
+      "intelligenceTenths": 939, "apiReferenceCents": 400, "priceScore": 65
+    },
+    {
+      "provider": "claude", "id": "claude-opus-5-5", "name": "Claude Opus 5.5",
+      "intelligenceTenths": 908, "apiReferenceCents": 800, "priceScore": 80,
+      "aliases": [{"provider": "antigravity", "id": "claude-opus-5-5"}, {"provider": "antigravity", "id": "claude-opus-5-5-low"}, {"provider": "antigravity", "id": "claude-opus-5-5-medium"}, {"provider": "antigravity", "id": "claude-opus-5-5-high"}]
+    },
+    {
+      "provider": "codex", "id": "gpt-6.2-sol", "name": "GPT‑6.2 Sol",
+      "intelligenceTenths": 898, "apiReferenceCents": 400, "priceScore": 65
+    },
+    {
+      "provider": "antigravity", "id": "gemini-4-argon", "name": "Gemini 4 Argon",
+      "intelligenceTenths": 847, "apiReferenceCents": 400, "priceScore": 65,
+      "aliases": [{"provider": "antigravity", "id": "gemini-4-argon-low"}, {"provider": "antigravity", "id": "gemini-4-argon-medium"}, {"provider": "antigravity", "id": "gemini-4-argon-high"}]
+    },
+    {
+      "provider": "codex", "id": "gpt-6-astra", "name": "GPT‑6 Astra",
+      "intelligenceTenths": 834, "apiReferenceCents": 2000, "priceScore": 100
+    },
+    {
+      "provider": "claude", "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5",
+      "intelligenceTenths": 823, "apiReferenceCents": 400, "priceScore": 65,
+      "aliases": [{"provider": "antigravity", "id": "claude-sonnet-5-5"}, {"provider": "antigravity", "id": "claude-sonnet-5-5-low"}, {"provider": "antigravity", "id": "claude-sonnet-5-5-medium"}, {"provider": "antigravity", "id": "claude-sonnet-5-5-high"}]
+    },
+    {
+      "provider": "claude", "id": "claude-fable-5-1", "name": "Claude Fable 5.1",
+      "intelligenceTenths": 820, "apiReferenceCents": 2000, "priceScore": 100
+    },
+    {
+      "provider": "codex", "id": "gpt-6.1-sol", "name": "GPT‑6.1 Sol",
+      "intelligenceTenths": 813, "apiReferenceCents": 400, "priceScore": 65
+    },
+    {
+      "provider": "antigravity", "id": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen",
+      "intelligenceTenths": 795, "apiReferenceCents": 300, "priceScore": 59,
+      "aliases": [{"provider": "antigravity", "id": "gemini-4-hydrogen-low"}, {"provider": "antigravity", "id": "gemini-4-hydrogen-medium"}, {"provider": "antigravity", "id": "gemini-4-hydrogen-high"}, {"provider": "antigravity", "id": "gemini-4-hydrogen-xhigh"}]
+    },
+    {
+      "provider": "codex", "id": "gpt-6.1-terra", "name": "GPT‑6.1 Terra",
+      "intelligenceTenths": 777, "apiReferenceCents": 200, "priceScore": 50
+    },
+    {
+      "provider": "claude", "id": "claude-opus-5", "name": "Claude Opus 5",
+      "intelligenceTenths": 745, "apiReferenceCents": 1000, "priceScore": 85
+    },
+    {
+      "provider": "claude", "id": "claude-fable-5", "name": "Claude Fable 5",
+      "intelligenceTenths": 734, "apiReferenceCents": 2000, "priceScore": 100
+    },
+    {
+      "provider": "claude", "id": "claude-opus-4-7", "name": "Claude Opus 4.7",
+      "intelligenceTenths": 683, "apiReferenceCents": 1000, "priceScore": 85
+    },
+    {
+      "provider": "claude", "id": "claude-opus-4-6", "name": "Claude Opus 4.6",
+      "intelligenceTenths": 671, "apiReferenceCents": 1000, "priceScore": 85
+    },
+    {
+      "provider": "codex", "id": "gpt-5.6-sol", "name": "GPT‑5.6 Sol",
+      "intelligenceTenths": 667, "apiReferenceCents": 800, "priceScore": 80
+    },
+    {
+      "provider": "codex", "id": "gpt-6-sol", "name": "GPT‑6 Sol",
+      "intelligenceTenths": 656, "apiReferenceCents": 400, "priceScore": 65
+    },
+    {
+      "provider": "antigravity", "id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash",
+      "intelligenceTenths": 598, "apiReferenceCents": 150, "priceScore": 44
+    },
+    {
+      "provider": "claude", "id": "claude-opus-4-8", "name": "Claude Opus 4.8",
+      "intelligenceTenths": 553, "apiReferenceCents": 1000, "priceScore": 85
+    },
+    {
+      "provider": "claude", "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6",
+      "intelligenceTenths": 531, "apiReferenceCents": 600, "priceScore": 74
+    },
+    {
+      "provider": "antigravity", "id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash",
+      "intelligenceTenths": 525, "apiReferenceCents": 150, "priceScore": 44,
+      "aliases": [{"provider": "antigravity", "id": "gemini-3.8-flash-low"}, {"provider": "antigravity", "id": "gemini-3.8-flash-medium"}, {"provider": "antigravity", "id": "gemini-3.8-flash-high"}]
+    },
+    {
+      "provider": "claude", "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5",
+      "intelligenceTenths": 513, "apiReferenceCents": 20, "priceScore": 0
+    },
+    {
+      "provider": "codex", "id": "gpt-5.6-terra", "name": "GPT‑5.6 Terra",
+      "intelligenceTenths": 513, "apiReferenceCents": 450, "priceScore": 68
+    },
+    {
+      "provider": "antigravity", "id": "gemini-3.7-flash", "name": "Gemini 3.7 Flash",
+      "intelligenceTenths": 492, "apiReferenceCents": 150, "priceScore": 44
+    },
+    {
+      "provider": "claude", "id": "claude-sonnet-5", "name": "Claude Sonnet 5",
+      "intelligenceTenths": 416, "apiReferenceCents": 400, "priceScore": 65
+    },
+    {
+      "provider": "antigravity", "id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro",
+      "intelligenceTenths": 416, "apiReferenceCents": 450, "priceScore": 68
+    },
+    {
+      "provider": "codex", "id": "gpt-6-luna", "name": "GPT‑6 Luna",
+      "intelligenceTenths": 390, "apiReferenceCents": 20, "priceScore": 0
+    },
+    {
+      "provider": "codex", "id": "gpt-5.6-luna", "name": "GPT‑5.6 Luna",
+      "intelligenceTenths": 385, "apiReferenceCents": 45, "priceScore": 18
+    },
+    {
+      "provider": "claude", "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5",
+      "intelligenceTenths": 160, "apiReferenceCents": 200, "priceScore": 50,
+      "aliases": [{"provider": "claude", "id": "claude-haiku-4-5"}]
+    },
+    {
+      "provider": "antigravity", "id": "gpt-oss-120b", "name": "GPT-OSS 120B",
+      "intelligenceTenths": 0, "apiReferenceCents": null, "priceScore": null,
+      "aliases": [{"provider": "antigravity", "id": "gpt-oss-120b-medium"}]
+    },
+    {
+      "provider": "antigravity", "id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash-Lite",
+      "intelligenceTenths": null, "apiReferenceCents": 85, "priceScore": 31
+    }
+  ]
+}

@@ -83,7 +83,7 @@ pub struct ModelOption {
 }
 
 pub static MODEL_CATALOG: LazyLock<ModelCatalog> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../model-catalog/v1.json"))
+    serde_json::from_str(include_str!("../model-catalog/v2.json"))
         .expect("valid bundled model catalog")
 });
 
@@ -151,12 +151,17 @@ mod tests {
 
     #[test]
     fn bundled_catalog_contains_unique_provider_scoped_ids() {
-        assert_eq!(MODEL_CATALOG.version, 1);
-        assert_eq!(MODEL_CATALOG.models.len(), 14);
+        assert_eq!(MODEL_CATALOG.version, 2);
         let mut seen = HashSet::new();
         for model in &MODEL_CATALOG.models {
-            assert!(model.rating.intelligence_tenths.unwrap() <= 1000);
-            assert!(model.rating.price_score.unwrap() <= 100);
+            assert!(model.rating.available());
+            assert!(
+                model
+                    .rating
+                    .intelligence_tenths
+                    .is_none_or(|score| score <= 1000)
+            );
+            assert!(model.rating.price_score.is_none_or(|score| score <= 100));
             for key in std::iter::once(&model.canonical).chain(&model.aliases) {
                 assert!(seen.insert((key.provider, key.id.as_str())));
             }
@@ -178,6 +183,8 @@ mod tests {
 
     #[test]
     fn preserves_every_value_in_the_supplied_table() {
+        let original: ModelCatalog =
+            serde_json::from_str(include_str!("../model-catalog/v1.json")).unwrap();
         let expected = [
             ("Claude Fable 5.2", 1000, 1600, 95),
             ("Claude Opus 5.5", 876, 800, 80),
@@ -194,7 +201,7 @@ mod tests {
             ("Gemini 3.1 Pro", 218, 450, 68),
             ("GPT‑6 Luna", 169, 20, 0),
         ];
-        let rows: Vec<_> = MODEL_CATALOG
+        let rows: Vec<_> = original
             .models
             .iter()
             .map(|model| {
@@ -207,7 +214,7 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, expected);
-        let sol = |id| MODEL_CATALOG.lookup(Provider::Codex, id);
+        let sol = |id| original.lookup(Provider::Codex, id);
         assert_eq!(
             sol("gpt-5.6-sol").unwrap().rating.intelligence_tenths,
             Some(537)

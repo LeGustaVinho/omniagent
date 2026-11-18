@@ -438,6 +438,12 @@ fn benchmark(values: &BTreeMap<Metric, Evidence>, metric: Metric) -> Option<f64>
 }
 
 fn seed() -> Vec<EvidenceSet> {
+    serde_json::from_str(include_str!("../../model-catalog/v2-evidence.json"))
+        .expect("valid bundled source observations")
+}
+
+#[cfg(test)]
+fn original_seed() -> Vec<EvidenceSet> {
     #[derive(Deserialize)]
     struct BundledEvidence {
         #[serde(flatten)]
@@ -892,18 +898,24 @@ mod tests {
     #[test]
     fn calculates_every_bundled_rating_from_the_supplied_observations() {
         let seed = seed();
+        assert_eq!(seed.len(), MODEL_CATALOG.models.len());
         for (model, calculated) in seed
             .iter()
             .zip(normalize(seed.iter().map(|entry| &entry.values)))
         {
-            if let Some(bundled) = MODEL_CATALOG.lookup(model.key.provider, &model.key.id) {
-                assert_eq!(calculated, bundled.rating, "{}", model.key.id);
-            } else {
-                assert_eq!(model.key.id, "gemini-3.5-flash-lite");
-                assert_eq!(calculated.intelligence_tenths, None);
-                assert_eq!(calculated.api_reference_cents, Some(85));
-                assert_eq!(calculated.price_score, Some(31));
-            }
+            let bundled = MODEL_CATALOG
+                .lookup(model.key.provider, &model.key.id)
+                .unwrap_or_else(|| panic!("{} is missing from the bundled catalog", model.key.id));
+            assert_eq!(calculated, bundled.rating, "{}", model.key.id);
+        }
+        for (provider, id, price) in [
+            (Provider::Codex, "gpt-6.2-sol", 400),
+            (Provider::Codex, "gpt-6.2-astra", 1600),
+            (Provider::Antigravity, "gemini-4-carbon", 400),
+        ] {
+            let model = MODEL_CATALOG.lookup(provider, id).unwrap();
+            assert_eq!(model.rating.api_reference_cents, Some(price));
+            assert!(model.rating.intelligence_tenths.is_some());
         }
     }
 
@@ -947,7 +959,7 @@ mod tests {
 
     #[test]
     fn new_sol_uses_published_rows_and_shares_the_reference_price() {
-        let seed = seed();
+        let seed = original_seed();
         let evidence = BTreeMap::from([
             (Metric::Price, sol_price()),
             (
@@ -1010,12 +1022,27 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("catalog.sqlite");
         let store = Store::open(database.clone())?;
+        let mut snapshot = store.catalog_snapshot().await?;
+        assert_eq!(snapshot.catalog.version, MODEL_CATALOG.version);
+        assert_eq!(
+            snapshot
+                .catalog
+                .lookup(Provider::Codex, "gpt-6.2-sol")
+                .unwrap()
+                .rating
+                .api_reference_cents,
+            Some(400)
+        );
+        let launch = sol();
+        snapshot
+            .evidence
+            .retain(|entry| entry.key != launch.model.canonical);
+        let next_revision = snapshot.catalog.version + 1;
         let mut status = CatalogRefreshStatus {
-            revision: 2,
+            revision: next_revision,
             updated_at: Some(100),
             ..Default::default()
         };
-        let mut snapshot = store.catalog_snapshot().await?;
         let mut known = Target {
             model: MODEL_CATALOG
                 .lookup(Provider::Codex, "gpt-6.1-sol")
@@ -1024,7 +1051,7 @@ mod tests {
         };
         known.model.name = "GPT-6.1 Sol".into();
         snapshot.apply(
-            vec![sol(), known],
+            vec![launch, known],
             vec![
                 BTreeMap::from([(Metric::Price, sol_price())]),
                 BTreeMap::new(),
@@ -1039,7 +1066,7 @@ mod tests {
         let reopened = Store::open(database)?;
         assert_eq!(reopened.model_catalog_status().await?.pending.len(), 2);
         let active = reopened.active_model_catalog().await?;
-        assert_eq!(active.version, 2);
+        assert_eq!(active.version, next_revision);
         assert_eq!(
             active
                 .lookup(Provider::Codex, "gpt-6.2-sol")
@@ -1069,6 +1096,7 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let store = Store::open(directory.path().join("catalog.sqlite"))?;
         let status = CatalogRefresh::default().refresh(&store).await?;
+        assert!(status.updated_at.is_some(), "{status:?}");
         let catalog = store.active_model_catalog().await?;
         let rating = catalog
             .lookup(Provider::Codex, "gpt-6.2-sol")

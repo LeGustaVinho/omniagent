@@ -1,0 +1,296 @@
+[
+  {
+    "key": {"provider": "claude", "id": "claude-fable-5-2"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 8.0, "output": 40.0}}, "label": "Claude Fable 5.2", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 65.0}, "label": "Claude Fable 5.2 Max, Default Fallback", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 173.5}, "label": "Claude Fable 5.2", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 65.15}, "label": "Claude Fable 5.2", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6.2-astra"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 8.0, "output": 40.0}}, "label": "gpt-6.2-astra", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 62.0}, "label": "GPT-6.2 Astra Max", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 174.17}, "label": "GPT-6.2 Astra", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 63.13}, "label": "GPT-6.2 Astra", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-4-carbon"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "gemini-4-carbon", "url": "https://aistudio.google.com/docs/pricing#gemini-4-carbon", "edition": "text-on-demand", "checked_at": 1795026046},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 60}, "label": "Gemini 4 Carbon (High)", "url": "https://artificialanalysis.ai/models/gemini-4-carbon", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 169.78}, "label": "Gemini 4 Carbon", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795026046},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1526}, "label": "Gemini 4 Carbon (High)", "url": "https://arena.ai/leaderboard/chat/text", "edition": "Text style control", "checked_at": 1795026046},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 63.13}, "label": "Gemini 4 Carbon", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795026046}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-opus-5-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 4.0, "output": 20.0}}, "label": "Claude Opus 5.5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 59.0}, "label": "Claude Opus 5.5 Max, Default Fallback", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 168.7}, "label": "Claude Opus 5.5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1507.0}, "label": "Claude Opus 5.5 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 65.15}, "label": "Claude Opus 5.5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6.2-sol"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "gpt-6.2-sol", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 57.0}, "label": "GPT-6.2 Sol Max", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 60.61}, "label": "GPT-6.2 Sol", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-4-argon"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "gemini-4-argon", "url": "https://aistudio.google.com/docs/pricing#gemini-4-argon", "edition": "text-on-demand", "checked_at": 1795025866},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 50.0}, "label": "Gemini 4 Argon High", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 166.57}, "label": "Gemini 4 Argon", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1522.0}, "label": "Gemini 4 Argon (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 57.58}, "label": "Gemini 4 Argon", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6-astra"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 10.0, "output": 50.0}}, "label": "gpt-6-astra", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 57}, "label": "GPT-6 Astra (Max)", "url": "https://artificialanalysis.ai/models/gpt-6-astra", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 169.2}, "label": "GPT-6 Astra", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1474.0}, "label": "GPT-6 Astra (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 59.6}, "label": "GPT-6 Astra", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-sonnet-5-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "Claude Sonnet 5.5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 55.0}, "label": "Claude Sonnet 5.5 Max, Default Fallback", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 166.59}, "label": "Claude Sonnet 5.5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1473.0}, "label": "Claude Sonnet 5.5 (xHigh)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 64.14}, "label": "Claude Sonnet 5.5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-fable-5-1"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 10.0, "output": 50.0}}, "label": "Claude Fable 5.1", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 49}, "label": "Claude Fable 5.1 (Max, Default Fallback)", "url": "https://artificialanalysis.ai/models/claude-fable-5-1", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 167.09}, "label": "Claude Fable 5.1", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1502.0}, "label": "Claude Fable 5.1 (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 58.08}, "label": "Claude Fable 5.1", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6.1-sol"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "gpt-6.1-sol", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 55}, "label": "GPT-6.1 Sol (Max)", "url": "https://artificialanalysis.ai/models/gpt-6-1-sol", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 168.63}, "label": "GPT-6.1 Sol", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1481.0}, "label": "GPT-6.1 Sol (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 55.05}, "label": "GPT-6.1 Sol", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-4-hydrogen"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 1.5, "output": 7.5}}, "label": "gemini-4-hydrogen", "url": "https://aistudio.google.com/docs/pricing#gemini-4-hydrogen", "edition": "text-on-demand", "checked_at": 1795025866},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 51.0}, "label": "Gemini 4 Hydrogen (High)", "url": "https://artificialanalysis.ai/models/gemini-4-hydrogen", "edition": "5.0.1", "checked_at": 1795025866},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1490.0}, "label": "Gemini 4 Hydrogen (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 54.04}, "label": "Gemini 4 Hydrogen", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6.1-terra"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 1.0, "output": 5.0}}, "label": "gpt-6.1-terra", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 51.0}, "label": "GPT-6.1 Terra Max", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 167.72}, "label": "GPT-6.1 Terra", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 49.49}, "label": "GPT-6.1 Terra", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-opus-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 5.0, "output": 25.0}}, "label": "Claude Opus 5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 44}, "label": "Claude Opus 5 (Max)", "url": "https://artificialanalysis.ai/models/claude-opus-5", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 164.74}, "label": "Claude Opus 5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1489.0}, "label": "Claude Opus 5 (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 53.53}, "label": "Claude Opus 5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-fable-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 10.0, "output": 50.0}}, "label": "Claude Fable 5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 164.21}, "label": "Claude Fable 5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1504.0}, "label": "Claude Fable 5 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 41.41}, "label": "Claude Fable 5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-opus-4-7"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 5.0, "output": 25.0}}, "label": "Claude Opus 4.7", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 157.5}, "label": "Claude Opus 4.7", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1501.0}, "label": "Claude Opus 4.7 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-opus-4-6"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 5.0, "output": 25.0}}, "label": "Claude Opus 4.6", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 156.35}, "label": "Claude Opus 4.6", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1503.0}, "label": "Claude Opus 4.6 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-5.6-sol"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 4.0, "output": 20.0}}, "label": "gpt-5.6-sol", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 163.05}, "label": "GPT-5.6 Sol", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1485.0}, "label": "GPT-5.6 Sol (xHigh)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 37.88}, "label": "GPT-5.6 Sol", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6-sol"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "gpt-6-sol", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 44}, "label": "GPT-6 Sol (Max)", "url": "https://artificialanalysis.ai/models/gpt-6-sol", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 163.82}, "label": "GPT-6 Sol", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1457.0}, "label": "GPT-6 Sol (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 44.44}, "label": "GPT-6 Sol", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-3.6-flash"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.75, "output": 3.75}}, "label": "gemini-3.6-flash", "url": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing", "edition": "text-on-demand", "checked_at": 1795026185},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 155.24}, "label": "Gemini 3.6 Flash", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795026185},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1483}, "label": "Gemini 3.6 Flash (High)", "url": "https://arena.ai/leaderboard/chat/text", "edition": "Text style control", "checked_at": 1795026185}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-opus-4-8"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 5.0, "output": 25.0}}, "label": "Claude Opus 4.8", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 159.91}, "label": "Claude Opus 4.8", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1482.0}, "label": "Claude Opus 4.8 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 23.23}, "label": "Claude Opus 4.8", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-sonnet-4-6"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 3.0, "output": 15.0}}, "label": "Claude Sonnet 4.6", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 152.86}, "label": "Claude Sonnet 4.6", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1472.0}, "label": "Claude Sonnet 4.6", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-3.8-flash"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.75, "output": 3.75}}, "label": "gemini-3.8-flash", "url": "https://aistudio.google.com/docs/pricing#gemini-3.8-flash", "edition": "text-on-demand", "checked_at": 1795025866},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 31}, "label": "Gemini 3.8 Flash (High)", "url": "https://artificialanalysis.ai/models/gemini-3-8-flash", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 158.83}, "label": "Gemini 3.8 Flash", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1497.0}, "label": "Gemini 3.8 Flash (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 19.7}, "label": "Gemini 3.8 Flash", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-haiku-5-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.1, "output": 0.5}}, "label": "Claude Haiku 5.5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 36.0}, "label": "Claude Haiku 5.5 Max", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 160.29}, "label": "Claude Haiku 5.5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1421.0}, "label": "Claude Haiku 5.5 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 36.36}, "label": "Claude Haiku 5.5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-5.6-terra"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 12.0}}, "label": "gpt-5.6-terra", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 32}, "label": "GPT-5.6 Terra (Max)", "url": "https://artificialanalysis.ai/models/gpt-5-6-terra", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 160.78}, "label": "GPT-5.6 Terra", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1468.0}, "label": "GPT-5.6 Terra (xHigh)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 22.73}, "label": "GPT-5.6 Terra", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-3.7-flash"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.75, "output": 3.75}}, "label": "gemini-3.7-flash", "url": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing", "edition": "text-on-demand", "checked_at": 1795026185},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 158.38}, "label": "Gemini 3.7 Flash", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795026185},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1489}, "label": "Gemini 3.7 Flash (High)", "url": "https://arena.ai/leaderboard/chat/text", "edition": "Text style control", "checked_at": 1795026185},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 12.12}, "label": "Gemini 3.7 Flash", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795026185}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-sonnet-5"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 10.0}}, "label": "Claude Sonnet 5", "url": "https://platform.claude.com/docs/en/about-claude/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 156.9}, "label": "Claude Sonnet 5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1461.0}, "label": "Claude Sonnet 5 (High)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 10.61}, "label": "Claude Sonnet 5", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-3.1-pro"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 2.0, "output": 12.0}}, "label": "gemini-3.1-pro", "url": "https://aistudio.google.com/docs/pricing#gemini-3-1-pro", "edition": "text-on-demand", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 156.25}, "label": "Gemini 3.1 Pro", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795026046},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1487}, "label": "Gemini 3.1 Pro Preview", "url": "https://arena.ai/leaderboard/chat/text", "edition": "Text style control", "checked_at": 1795026046},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 2.52}, "label": "Gemini 3.1 Pro Preview (02/26)", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795026046}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-6-luna"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.1, "output": 0.5}}, "label": "gpt-6-luna", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 28.0}, "label": "GPT-6 Luna Max", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 156.39}, "label": "GPT-6 Luna", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1441.0}, "label": "GPT-6 Luna (Max)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 13.64}, "label": "GPT-6 Luna", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "codex", "id": "gpt-5.6-luna"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.2, "output": 1.2}}, "label": "gpt-5.6-luna", "url": "https://developers.openai.com/api/docs/pricing.md", "edition": "text-on-demand", "checked_at": 1795025865},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 24}, "label": "GPT-5.6 Luna (Max)", "url": "https://artificialanalysis.ai/models/gpt-5-6-luna", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 156.7}, "label": "GPT-5.6 Luna", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1453.0}, "label": "GPT-5.6 Luna (xHigh)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865},
+      "TerminalBench": {"metric": "TerminalBench", "value": {"Score": 11.62}, "label": "GPT-5.6 Luna", "url": "https://www.vals.ai/benchmarks/terminal-bench-4", "edition": "4.0 Mini-SWE-agent", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "claude", "id": "claude-haiku-4-5-20251001"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 1.0, "output": 5.0}}, "label": "claude-haiku-4-5-20251001", "url": "https://platform.claude.com/docs/en/models/haiku-4-5/overview", "edition": "text-on-demand", "checked_at": 1795026046},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 7}, "label": "Claude 4.5 Haiku (Reasoning)", "url": "https://artificialanalysis.ai/models/claude-4-5-haiku", "edition": "5.0.1", "checked_at": 1795026046},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 142.76}, "label": "Claude Haiku 4.5", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795026046},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1414.0}, "label": "Claude Haiku 4.5 (20251001)", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gpt-oss-120b"},
+    "values": {
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 4.0}, "label": "gpt-oss-120b High", "url": "https://artificialanalysis.ai/leaderboards/models", "edition": "5.0.1", "checked_at": 1795025865},
+      "Epoch": {"metric": "Epoch", "value": {"Score": 140.23}, "label": "gpt-oss-120b", "url": "https://epoch.ai/data/eci_scores.csv", "edition": "General ECI", "checked_at": 1795025865},
+      "TextArena": {"metric": "TextArena", "value": {"Score": 1352.0}, "label": "gpt-oss-120b", "url": "https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset", "edition": "Text style control", "checked_at": 1795025865}
+    }
+  },
+  {
+    "key": {"provider": "antigravity", "id": "gemini-3.5-flash-lite"},
+    "values": {
+      "Price": {"metric": "Price", "value": {"Rates": {"input": 0.3, "output": 2.5}}, "label": "gemini-3.5-flash-lite", "url": "https://aistudio.google.com/docs/pricing#gemini-3.5-flash-lite", "edition": "text-on-demand", "checked_at": 1795026046},
+      "ArtificialAnalysis": {"metric": "ArtificialAnalysis", "value": {"Score": 12}, "label": "Gemini 3.5 Flash-Lite", "url": "https://artificialanalysis.ai/models/gemini-3-5-flash-lite", "edition": "5.0.1", "checked_at": 1795026046}
+    }
+  }
+]
